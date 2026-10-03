@@ -261,12 +261,76 @@ class SourceConfig:
         return cfg
 
 
+CHANNELS = ("feishu_lark_cli", "feishu_direct")
+INBOUND_MODES = ("ws", "http", "none")
+
+
+@dataclass(frozen=True)
+class ServiceCfg:
+    """独立运行配置（`service.yaml`）。**文件缺失时全部取默认值 = 与阶段 1 行为完全一致**。
+
+    默认 `channel=feishu_lark_cli`、`inbound.mode=none`，所以 Vault 里那份配置一行不用改。
+    """
+
+    channel: str = "feishu_lark_cli"
+    feishu: dict[str, Any] = field(default_factory=dict)
+    inbound: dict[str, Any] = field(default_factory=dict)
+    schedule: dict[str, Any] = field(default_factory=dict)
+    log: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def inbound_mode(self) -> str:
+        return str(self.inbound.get("mode") or "none")
+
+    @property
+    def tick_seconds(self) -> float:
+        return float(self.schedule.get("tick_seconds") or 300)
+
+    def http(self) -> dict[str, Any]:
+        return dict(self.inbound.get("http") or {})
+
+
+def load_service(news_dir: Path) -> ServiceCfg:
+    """读 `service.yaml`（可选）。任何非法枚举都抛 ConfigError，不静默取默认。"""
+    path = Path(news_dir) / "service.yaml"
+    if not path.is_file():
+        return ServiceCfg()
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"{path} 解析失败：{exc}") from exc
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{path}: 顶层需要映射")
+    channel = str(raw.get("channel") or "feishu_lark_cli")
+    if channel not in CHANNELS:
+        raise ConfigError(f"{path}: channel={channel!r} 未知，可用：{', '.join(CHANNELS)}")
+    inbound = raw.get("inbound") or {}
+    if not isinstance(inbound, dict):
+        raise ConfigError(f"{path}: inbound 需要映射")
+    mode = str(inbound.get("mode") or "none")
+    if mode not in INBOUND_MODES:
+        raise ConfigError(f"{path}: inbound.mode={mode!r} 未知，可用：{', '.join(INBOUND_MODES)}")
+    schedule = raw.get("schedule") or {}
+    if not isinstance(schedule, dict):
+        raise ConfigError(f"{path}: schedule 需要映射")
+    tick = float(schedule.get("tick_seconds") or 300)
+    if tick < 30:
+        raise ConfigError(f"{path}: schedule.tick_seconds={tick:g} 太小（下限 30）——"
+                          "轮询频率由各源的 fetch.interval_min 控制，别靠缩短 tick 提速")
+    for name in ("feishu", "log"):
+        if raw.get(name) is not None and not isinstance(raw.get(name), dict):
+            raise ConfigError(f"{path}: {name} 需要映射")
+    return ServiceCfg(channel=channel, feishu=dict(raw.get("feishu") or {}), inbound=dict(inbound),
+                      schedule=dict(schedule), log=dict(raw.get("log") or {}))
+
+
 @dataclass(frozen=True)
 class Config:
     chat: str
     slots: dict[str, str]
     sources: dict[str, SourceConfig]
     models: dict[str, Any] = field(default_factory=dict)
+    service: ServiceCfg = field(default_factory=ServiceCfg)
 
     def enabled_sources(self) -> list[SourceConfig]:
         return [s for s in self.sources.values() if s.enabled]
@@ -354,7 +418,8 @@ def load(news_dir: Path | None = None) -> Config:
         if not isinstance(models, dict):
             raise ConfigError(f"{models_path}: 顶层需要映射")
 
-    return Config(chat=chat, slots=slots, sources=sources, models=models)
+    return Config(chat=chat, slots=slots, sources=sources, models=models,
+                  service=load_service(news_dir))
 
 
 def summarize(cfg: Config) -> list[dict[str, Any]]:

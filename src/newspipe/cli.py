@@ -9,6 +9,8 @@
     cli.py --probe-model [--capability] 只读探针：模型解析结果（绝不打印密钥）
     cli.py --card-preview <batch>       把某个批次渲染成卡片 JSON（不发送）
     cli.py --list-sources               信源四轴一览
+    cli.py --serve [--once]             常驻服务：自带调度 + 入站（独立运行形态）
+    cli.py --probe-channel [--chat id]  直连通道自检：真发一张卡（不打印任何密钥）
 
 通用开关：`--dry`（零副作用：不写游标/心跳/批次、不调模型）、`--verbose`（人读输出）、
 `--json`（机器读输出）。
@@ -23,8 +25,8 @@ import json
 from pathlib import Path
 
 
-from newspipe import channel, config, llm, pipeline, render, state  # noqa: E402
-from newspipe.errors import ConfigError, NewsError  # noqa: E402
+from newspipe import channel, config, llm, pipeline, render, service, state  # noqa: E402
+from newspipe.errors import ConfigError, DeliveryError, NewsError  # noqa: E402
 
 
 def _emit(text: str) -> None:
@@ -56,11 +58,23 @@ def _failed(runs: list[pipeline.SourceRun]) -> list[pipeline.SourceRun]:
     return [r for r in runs if r.status in ("error", "config_missing", "send_failed", "overflow")]
 
 
+def _service_is_custom(cfg: config.Config) -> bool:
+    """服务配置是否偏离默认（默认 = 与阶段 1 完全一致）。"""
+    return (cfg.service.channel != "feishu_lark_cli"
+            or cfg.service.inbound_mode != "none"
+            or (config.default_news_dir() / "service.yaml").is_file())
+
+
 def cmd_status(store: state.Store, cfg: config.Config, *, json_out: bool) -> int:
     rows = pipeline.stats(store, cfg)
     usage = store.usage(state.today())
+    # 服务自述只在**非默认**时出现：没配 service.yaml 时输出与阶段 1 逐字节一致
+    svc = service.describe_service(cfg) if _service_is_custom(cfg) else None
     if json_out:
-        print(json.dumps({"sources": rows, "llm_usage": usage}, ensure_ascii=False, indent=2))
+        payload = {"sources": rows, "llm_usage": usage}
+        if svc is not None:
+            payload["service"] = svc
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
     print(f"{'信源':<20}{'触发':<6}{'形态':<12}{'优先级':<8}{'加工':<8}{'状态':<14}{'抓/发':<10}{'顺延':<6}备注")
     for r in rows:
@@ -76,6 +90,17 @@ def cmd_status(store: state.Store, cfg: config.Config, *, json_out: bool) -> int
         top = "、".join(f"{k}×{v}" for k, v in sorted(reasons.items(), key=lambda kv: -kv[1]))
         print(f"\nAI 加工（今日）：调用 {calls} 次，降级 {degraded} 次"
               + (f"（原因：{top}）" if top else ""))
+    if svc is not None:
+        detail = svc.get("channel_detail") or {}
+        creds = detail.get("creds") or {}
+        print(f"\n服务：通道={svc['channel']} 入站={svc['inbound_mode']} tick={svc['tick_seconds']:g}s")
+        if creds:
+            print(f"  凭据：app_id={creds.get('app_id') or '-'} "
+                  f"secret={creds.get('app_secret') or '-'} 来源={creds.get('source') or '-'}")
+        if detail.get("error"):
+            print(f"  通道错误：{detail['error']}")
+        last = (svc.get("last_runs") or {}).get("last_run_at")
+        print(f"  最近一轮：{last or '（本进程还没跑过）'}")
     return 0
 
 
@@ -166,6 +191,37 @@ def cmd_enrich_only(store: state.Store, cfg: config.Config, *, date: str, dry: b
     return 0
 
 
+def cmd_probe_channel(cfg: config.Config, *, chat: str, json_out: bool) -> int:
+    """直连通道自检：token → 建实体 → 发卡 → 更新实体。输出里**不含任何密钥**。"""
+    from newspipe import backends
+
+    news_dir = config.default_news_dir()
+    if cfg.service.channel != "feishu_direct":
+        _emit(f"⚠️ service.yaml 的 channel 是 {cfg.service.channel!r}，"
+              "但本命令始终用 feishu_direct 自检（这正是要验证的路径）")
+    try:
+        channel = backends.make_channel("feishu_direct", service_cfg=cfg.service.feishu,
+                                        news_dir=news_dir)
+        result = channel.probe(chat)
+    except (ConfigError, DeliveryError) as exc:
+        _emit(f"⚠️ 直连通道自检失败：{type(exc).__name__}: {exc}")
+        return 1
+    if json_out:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    creds = result.get("creds") or {}
+    print(f"通道 {result['channel']} 自检（目标 {chat}）")
+    print(f"  凭据：app_id={creds.get('app_id') or '-'} "
+          f"app_secret={creds.get('app_secret') or '-'} 来源={creds.get('source') or '-'}")
+    for step in result.get("steps") or []:
+        mark = "✅" if step.get("ok") else "❌"
+        detail = step.get("result") or step.get("error") or ""
+        print(f"  {mark} {step['step']:<20} {step.get('ms', 0):>5}ms  {detail}")
+    if result.get("message_id"):
+        print(f"  卡片已发出：card_id={result.get('card_id')} message_id={result['message_id']}")
+    return 0
+
+
 def _now():
     from datetime import datetime
 
@@ -186,6 +242,10 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--probe-model", action="store_true", help="模型解析探针（不打印密钥）")
     g.add_argument("--card-preview", metavar="BATCH", help="渲染某个批次为卡片 JSON")
     g.add_argument("--card", metavar="PAYLOAD", help="卡片回调（插件薄壳调它）：payload 为 JSON 文本")
+    g.add_argument("--serve", action="store_true", help="常驻服务：自带调度 + 入站（独立运行）")
+    g.add_argument("--probe-channel", action="store_true", help="直连通道自检：真发一张卡")
+    ap.add_argument("--once", action="store_true", help="--serve 时只跑一轮到期任务就退出")
+    ap.add_argument("--chat", help="--probe-channel 的目标会话（默认 sources.yaml 的 chat）")
     ap.add_argument("--capability", default="summarize", help="--probe-model 的 capability")
     ap.add_argument("--dry", action="store_true", help="零副作用（不写状态、不调模型）")
     ap.add_argument("--verbose", "-v", action="store_true")
@@ -197,9 +257,9 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     modes = [bool(args.alert), bool(args.source), args.enrich_only, args.status,
              args.list_sources, args.migrate, args.probe_model,
-             bool(args.card_preview), bool(args.card)]
+             bool(args.card_preview), bool(args.card), args.serve, args.probe_channel]
     if not any(modes) and not args.slot:
-        ap.error("需要指定一个模式：--slot / --alert / --source / --status / --list-sources / …")
+        ap.error("需要指定一个模式：--slot / --alert / --serve / --status / --list-sources / …")
 
     try:
         cfg = config.load()
@@ -235,6 +295,10 @@ def main(argv: list[str] | None = None) -> int:
         if message:
             print(message)
         return 0
+    if args.probe_channel:
+        return cmd_probe_channel(cfg, chat=args.chat or cfg.chat, json_out=args.json)
+    if args.serve:
+        return service.run_forever(cfg, store, dry=args.dry, once=args.once)
     if args.enrich_only:
         return cmd_enrich_only(store, cfg, date=args.date or state.today(), dry=args.dry,
                                verbose=args.verbose, json_out=args.json,

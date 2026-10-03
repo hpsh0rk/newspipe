@@ -1,7 +1,8 @@
 # newspipe —— 资讯管线（独立包）
 
 **一句话**：多信源采集 → AI 加工（中文标题/摘要/翻译）→ 飞书卡片投递（列表页 ↔ 详情页可点），
-**核心与宿主解耦**（只依赖 PyYAML + 标准库），默认行为仍是「跟随 Hermes 主模型 + 经 lark-cli 投递」。
+**可以不依赖 Hermes 独立运行**（直连飞书 OpenAPI 投递 + 自建长连接入站 + 自带调度），
+默认行为仍是「跟随 Hermes 主模型 + 经 lark-cli 投递」（缺 `service.yaml` 时与抽离前逐字节一致）。
 
 从 Knowledge Vault 的 `scripts/news/` 抽离而来。设计权威源在 Vault，本仓库是代码的家。
 
@@ -9,11 +10,12 @@
 
 | 维度 | 现状 |
 |---|---|
-| 设计讨论 | Vault：`thinkings/资讯管线架构-v2-2026-10-03.md`（设计权威）+ 研讨 5 轮 + 交接单 |
-| 代码 | 本仓库：21 个模块 / 2964 行（原样搬迁 + 端口化）+ 81 个测试 |
+| 设计讨论 | Vault：`thinkings/资讯管线架构-v2-2026-10-03.md`（设计权威）+ 研讨 6 轮 + 交接单 |
+| 代码 | 本仓库：23 个模块 + 5 个后端 + 159 个测试（全绿） |
 | 真实用户验证 | 1 人（作者自用）：在 Vault 里每天真跑，3 个槽位 + 每 5 分钟轮询 + 痛点提炼 |
+| 独立运行 | ✅ 通道直连真机跑通（token→建实体→发卡→更新）+ 长连接真机握手 + `ping success` |
 | 前置调研 | 已完成：决策模型 Jev（TypeSafe AI）调研，对应 `priority_judge` 位置（见 Vault Round 5） |
-| 与宿主耦合 | **3 处，已收进端口**：模型解析、投递通道、（第 4 处）数据根目录 → 见 `docs/migration.md` |
+| 与宿主耦合 | **全部收进端口/开关**：模型解析、投递通道、入站来源、数据根目录 |
 
 ## 核心设计（30 秒版）
 
@@ -25,16 +27,17 @@
 
 ## 与宿主的边界（`src/newspipe/ports.py`）
 
-| 端口 | 默认实现（跟随 Hermes） | 独立实现 |
+| 端口 | 跟随 Hermes（默认） | 独立运行 |
 |---|---|---|
-| `ModelResolver` | `backends/model_hermes.py`（读 `~/.hermes/config.yaml` + `.env`） | `backends/model_openai.py`（纯显式配置，已实现，7 条契约测试） |
-| `CardChannel` | `backends/feishu_lark_cli.py`（subprocess 调 lark-cli） | 直连飞书 OpenAPI（阶段 2，未做） |
-| 入站回调 | Hermes 插件 → `newspipe card <payload>` | 飞书事件订阅 → 同一个函数（阶段 3，未做） |
+| `ModelResolver` | `backends/model_hermes.py`（读 `~/.hermes/config.yaml` + `.env`） | `backends/model_openai.py`（纯显式配置） |
+| `CardChannel` | `backends/feishu_lark_cli.py`（subprocess 调 lark-cli） | `backends/feishu_direct.py`（直连 OpenAPI，已真机验证） |
+| 入站回调 | Hermes 插件 → `newspipe card <payload>` | `inbound.py`（长连接 ws / HTTP 回调，已真机握手） |
+| 调度 | Hermes cron（5 条 job） | `service.py`（一个常驻进程，自带槽位 + 轮询节流） |
 
 ## 快速上手
 
 ```bash
-python -m venv .venv && .venv/bin/pip install -e .          # 或 pip install -e '.[h2]'
+python -m venv .venv && .venv/bin/pip install -e .          # 或 pip install -e '.[h2,feishu,crypto]'
 export NEWSPIPE_HOME=/path/to/data          # 放 info/news/ 的那一层（配置 + 状态）
 cp examples/news/*.yaml $NEWSPIPE_HOME/info/news/           # 示例配置，改 chat 即可
 .venv/bin/newspipe --list-sources
@@ -47,7 +50,49 @@ cp examples/news/*.yaml $NEWSPIPE_HOME/info/news/           # 示例配置，改
 > 任何情况下 `python -m newspipe.cli` 都等价可用。
 
 环境变量：`NEWSPIPE_HOME`（数据根，默认 cwd）、`NEWSPIPE_NEWS_DIR`、`NEWSPIPE_STAGING_QUEUE`、
-`NEWSPIPE_MODEL_BACKEND`（`hermes`|`explicit`）、`NEWSPIPE_CHANNEL`。
+`NEWSPIPE_MODEL_BACKEND`（`hermes`|`explicit`）、`NEWSPIPE_CHANNEL`、
+`NEWSPIPE_FEISHU_*`（凭据）、`NEWSPIPE_SDK_LOG`（`info`|`debug`，调试长连接用）。
+
+## 独立运行（阶段 2 + 3）
+
+三步：**填 `service.yaml` → 自检通道 → 起常驻服务**。
+
+```bash
+# 1. 服务配置（密钥不要写在这里）
+cat > $NEWSPIPE_HOME/info/news/service.yaml <<'YAML'
+channel: feishu_direct        # 默认 feishu_lark_cli；显式开才脱离 lark-cli
+inbound: {mode: ws}           # ws（长连接，只需出网）| http（需公网）| none
+schedule: {tick_seconds: 300} # 轮询节流粒度
+YAML
+
+# 2. 通道自检：真发一张卡，输出里不含任何密钥
+.venv/bin/newspipe --probe-channel --chat oc_xxxxxxxx
+
+# 3. 常驻服务（自带调度 + 入站，一个进程）
+.venv/bin/newspipe --serve --verbose
+.venv/bin/newspipe --serve --once --dry     # 演练：跑一轮到期任务就退出
+```
+
+凭据解析顺序（`src/newspipe/credentials.py`，**永不打印值**）：
+`service.yaml` 显式值 → env `NEWSPIPE_FEISHU_*` → 回落宿主命名 `FEISHU_*` → dotenv（`$NEWSPIPE_HOME/.env`、
+`~/.hermes/.env`）→ macOS 钥匙串。缺关键项时报 `ConfigError` 并给可执行的修法。
+
+开机自启（launchd）：
+
+```bash
+cp service/com.newspipe.service.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.newspipe.service.plist
+launchctl kickstart -k gui/$(id -u)/com.newspipe.service
+tail -f ~/Library/Logs/newspipe.log
+```
+
+### 两个必须知道的运行事实
+
+1. **入站事件只发给应用的其中一条长连接**。如果 Hermes 网关（也用同一个 app）在跑，
+   点击回调可能落到它那边——不是故障，但会让你以为「自建入站没生效」。
+   切换期先停一侧（`launchctl bootout` / 停 Hermes 网关），别两边同时跑。
+2. **飞书应用的卡片回调必须指向「长连接」模式**（`FEISHU_CONNECTION_MODE=websocket`）。
+   `http` 模式需要公网可达地址 + 事件订阅回调 URL + `encrypt_key`（签名校验与 AES 解密）。
 
 ## 文档索引
 
@@ -56,6 +101,7 @@ cp examples/news/*.yaml $NEWSPIPE_HOME/info/news/           # 示例配置，改
 | `docs/migration.md` | 抽离方案：耦合面清单 + 三阶段路线 + 每阶段代价 | 本项目 |
 | `specs/stage1-package-extraction.md` | 阶段 1 规格与验收（已交付） | 本项目 |
 | `specs/stage1-brainstorming.md` | 阶段 1 的设计决策与取舍 | 本项目 |
+| `specs/stage2-3-standalone.md` | 阶段 2/3 规格与验收（已交付） | 本项目 |
 | `handoff.md` | 交接单：现状 / 改动文件 / 坑 / 下一步 | 本项目 |
 | `docs/vault-snapshot/` | Vault 设计文档的只读快照（含 sha256 清单） | Vault |
 
@@ -63,12 +109,14 @@ cp examples/news/*.yaml $NEWSPIPE_HOME/info/news/           # 示例配置，改
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| P0 | 包化 + 端口化（行为不变） | ✅ 已完成，见 `specs/stage1-package-extraction.md` |
-| P1 | Vault 接线方式定案（editable install vs 独立部署） | ⏳ 待决策 |
-| P2 | 通道直连飞书 OpenAPI，去掉 `lark-cli` 依赖 | 未开始 |
-| P3 | 入站自建常驻服务（事件订阅），真正零 Hermes | 未开始（占抽离总工作量约 80%） |
+| P0 | 包化 + 端口化（行为不变） | ✅ 交付，`specs/stage1-package-extraction.md` |
+| P1 | Vault 接线方式定案（editable install vs 独立部署） | ⏳ 待决策（不阻塞 P2/P3） |
+| P2 | 通道直连飞书 OpenAPI，去掉 `lark-cli` 依赖 | ✅ 交付并真机验证，`specs/stage2-3-standalone.md` |
+| P3 | 入站自建 + 自带调度（常驻服务） | ✅ 交付并真机握手；点击端到端待切换期实测 |
 
 ## 风险提醒（照抄自讨论，勿淡化）
 
 抽离会把 Hermes 已经解决的四件事变成自己要维护的：**凭据存储、进程守护、投递重试、事件订阅**。
-只有当你确实要在**没有 Hermes 的机器**上跑，阶段 3 才值得做。
+代码里这四件事都有了对应实现，但**运维责任也一并转移**了：钥匙串/环境变量要自己管、
+launchd 要自己装、投递失败要自己看日志、事件订阅要自己盯连接。
+只有当你确实要在**没有 Hermes 的机器**上跑，这套独立形态才值得启用。

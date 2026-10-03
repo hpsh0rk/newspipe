@@ -15,7 +15,13 @@ dependencies = [
 
 [project.optional-dependencies]
 # 只有声明 http2: true 的信源需要它（Cloudflare 按 HTTP 版本放行：h2 才 200）
-h2 = ["httpx>=0.28"]
+# 注意：必须写成 httpx[http2]，光写 httpx>=0.28 不会装 h2（实测踩过）
+h2 = ["httpx[http2]>=0.28"]
+# 长连接入站（inbound.mode: ws）——飞书事件订阅，不需要公网地址
+feishu = ["lark-oapi>=1.7"]
+# 仅当飞书应用配置了 Encrypt Key（事件体 AES 加密）才需要
+crypto = ["pycryptodome>=3.20"]
+all = ["httpx[http2]>=0.28", "lark-oapi>=1.7", "pycryptodome>=3.20"]
 
 [project.scripts]
 newspipe = "newspipe.cli:main"

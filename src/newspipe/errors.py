@@ -24,3 +24,11 @@ class DeliveryError(NewsError):
 
 class ModelError(NewsError):
     """模型调用失败（网络/鉴权/响应不可解析/超预算）。可降级：不加工继续发卡。"""
+
+
+class InboundError(NewsError):
+    """入站失败（签名校验不过 / 解密失败 / 缺可选依赖 / 长连接建立不了）。
+
+    与 DeliveryError 分开：入站坏了不影响发卡，但**绝不能静默**——卡片点击没反应时
+    用户看到的是「点了没动静」，任何静默都会让排查从几分钟变成几小时。
+    """
