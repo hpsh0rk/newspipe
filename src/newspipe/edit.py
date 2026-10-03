@@ -186,7 +186,7 @@ def set_hook(news_dir: Path, hook: dict[str, Any], *, base_hash: str | None = No
     if hook_id not in [h.id for h in check.hooks]:
         problem = next((p for p in check.problems if hook_id in p), None) or "声明未通过校验"
         return {"code": "E_VALIDATION", "message": f"hook 未生效：{problem}",
-                "hint": "handler 必须是存在的可执行文件；action 必须带命名空间（如 hermes.x）",
+                "hint": "handler 必须是存在的可执行文件；action 必须带命名空间（如 myapp.x）",
                 "details": {"problems": check.problems}}
     result = _apply(news_dir, path, candidate, dry_run=dry_run, validate="hooks")
     if result.get("ok"):

@@ -2,14 +2,14 @@
 
 布局（v1 的 digests/ + pushed-ids/ + cursors/ + _status/ 四散布局在这里收敛成一个 state/）：
 
-    info/news/state/
+    <news_dir>/state/
       batches/<date>/<source>-<slot>.json   批次 state（含 items / view / card_id / seq）
       cursors/<source>.json                 poll 的时间闸（兼节流计时）
       pushed/<source>.jsonl                 幂等闸（跨天，只增不删）
       pending/<source>.jsonl                显式顺延队列（超元素预算的条目）
       status/<source>.json                  心跳
       budget/<date>.json                    当日发卡计数（打扰预算）
-    info/news/llm/
+    <news_dir>/llm/
       receipts/<sha256>.json                回执：同 prompt 版本 + 同输入 → 复用结果
       usage/<date>.json                     当日用量（预算熔断）
 

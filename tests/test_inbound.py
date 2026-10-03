@@ -93,6 +93,16 @@ class ExtractActionTests(unittest.TestCase):
                       {"event": {"action": {"value": "not-json"}}}, "not-a-dict"):
             self.assertIsNone(inbound.extract_action(event))
 
+    def test_router_envelope_shape(self) -> None:
+        """宿主转发器（hermes.card-router）的信封：网关只给它 tag + value，所以 value 在顶层。"""
+        envelope = {"protocol_version": 1, "source": "hermes.card-router", "domain": "news",
+                    "tag": "button", "value": {"domain": "news", "id": "n01",
+                                               "news_action": "open_detail"}}
+        self.assertEqual(inbound.extract_action(envelope)["news_action"], "open_detail")
+        # 别的域不能被本项目认领
+        foreign = dict(envelope, domain="other", value={"domain": "other"})
+        self.assertIsNone(inbound.extract_action(foreign))
+
     def test_challenge_recognised(self) -> None:
         self.assertEqual(inbound.dispatch({"type": "url_verification", "challenge": "abc"}),
                          {"challenge": "abc"})
@@ -118,6 +128,18 @@ class DispatchTests(unittest.TestCase):
                     "domain": "news", "digest": DIGEST,
                     "batch": f"state/batches/{DIGEST}/s-am.json",
                     "id": item, "news_action": action}}}}
+
+    def test_router_envelope_really_dispatches(self) -> None:
+        """宿主转发器（hermes.card-router）的信封也要真跑通：网关 → 转发器 → 本项目。"""
+        envelope = {"protocol_version": 1, "source": "hermes.card-router", "domain": "news",
+                    "tag": "button",
+                    "value": {"domain": "news", "digest": DIGEST,
+                              "batch": f"state/batches/{DIGEST}/s-am.json",
+                              "id": "n01", "news_action": "open_detail"}}
+        self.assertEqual(inbound.dispatch(envelope, news_dir=self.news_dir), {})
+        _path, batch = self.store.load_batch_by_rel(f"state/batches/{DIGEST}/s-am.json")
+        self.assertEqual(batch["view"], {"item": "n01"})
+        self.assertEqual(batch["items"][0]["status"], "read")
 
     def test_open_detail_really_updates_batch(self) -> None:
         """不 mock 业务：真读真写临时 news_dir 里的批次。"""

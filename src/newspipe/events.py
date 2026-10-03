@@ -1,8 +1,8 @@
 """事件流 —— 项目对外说话的唯一通道（**追加写，永不改写历史**）。
 
 ```
-info/news/state/events/<YYYY-MM-DD>.jsonl   事件：一行一个
-info/news/state/events/acks.jsonl           消费确认：一行一个
+<news_dir>/state/events/<YYYY-MM-DD>.jsonl   事件：一行一个
+<news_dir>/state/events/acks.jsonl           消费确认：一行一个
 ```
 
 为什么两边都是追加写：事件文件可能正被常驻服务写入，ack 若去改写事件行就是竞态。

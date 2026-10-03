@@ -5,11 +5,11 @@
 
 | 端口 | 现状实现 | 契约 |
 |---|---|---|
-| `ModelResolver` | `backends.model_hermes`（跟随 Hermes 主模型） | 把 capability 解析成一个可调用的 `ModelRef` |
+| `ModelResolver` | `backends.model_host`（跟随宿主主模型） | 把 capability 解析成一个可调用的 `ModelRef` |
 | `CardChannel` | `backends.feishu_lark_cli`（subprocess 调 lark-cli） | 建卡片实体 / 发卡 / 全量更新实体 / 发纯文本 |
 | 入站回调 | **不是接口，是 CLI 入口** | 宿主把回调载荷交给 `newspipe card <payload>` |
 
-第三个刻意不做成 Protocol：回调的边界本来就是一个进程调用（现在是 Hermes 插件 shell 出
+第三个刻意不做成 Protocol：回调的边界本来就是一个进程调用（宿主侧 shell 出
 `cli.py --card`，将来可以是飞书事件订阅直接调同一个函数）。给它套一层接口只会多一层间接。
 
 新增一个实现时，只要它满足下面的 Protocol，就不需要改核心任何一行；`tests/test_ports.py`

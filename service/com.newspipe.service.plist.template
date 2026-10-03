@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  newspipe 常驻服务（macOS launchd）—— **模板**，不要直接安装。
+
+  用 service/install.sh 实例化（它会把下面的 __占位符__ 换成真实路径）：
+      ./service/install.sh
+  卸载：
+      launchctl bootout gui/$(id -u)/com.newspipe.service
+
+  三条都是踩过的坑：
+  1. launchd 会 sanitize 环境变量 —— 需要什么这里显式给全，别指望 shell rc 文件。
+  2. 数据目录（NEWSPIPE_NEWS_DIR）必须显式给：服务的 cwd 不一定是数据目录，
+     不显式给会去 `<cwd>/news` 找配置，表现为「启动就报找不到 sources.yaml」。
+  3. 密钥**不写在这里**。凭据走 service.yaml / 进程环境 / dotenv / 系统钥匙串
+     （见 src/newspipe/credentials.py 的解析顺序）。本文件因此可以进仓库。
+
+  可选：NEWSPIPE_HOST_HOME —— 只有「复用宿主 Agent 的模型配置」时才需要（见 AGENTS.md）。
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.newspipe.service</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON__</string>
+    <string>-m</string>
+    <string>newspipe.cli</string>
+    <string>--serve</string>
+    <string>--verbose</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>NEWSPIPE_NEWS_DIR</key>
+    <string>__NEWS_DIR__</string>
+    <key>NEWSPIPE_HOME</key>
+    <string>__NEWS_DIR__</string>
+    <key>NEWSPIPE_HOST_HOME</key>
+    <string>__HOST_HOME__</string>
+    <key>NEWSPIPE_SDK_LOG</key>
+    <string>info</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/newspipe.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/newspipe.err.log</string>
+</dict>
+</plist>

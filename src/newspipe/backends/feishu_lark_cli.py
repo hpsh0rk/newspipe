@@ -9,11 +9,12 @@
 - 一个卡片实体**只能发送一次**；实体有效期 14 天；`sequence` 必须严格递增；
 - 整卡 ≤200 元素、≤30KB；回调交互进行中卡片不可更新（200810）。
 
-cron/launchd 的 env 被 sanitize：`HERMES_HOME` 缺失时 lark-cli 会静默回落另一个 bot app
-（不在资讯群）→ 持续性 230002 "out of the chat"。所以这里显式兜底，并把 node 的目录补进 PATH。
+调度器的 env 会被 sanitize：外部 CLI 靠环境变量定位自己的配置目录，变量丢了就会静默回落到
+另一个应用身份（不在目标群里）→ 持续性 230002 "out of the chat"。所以启动时把宿主目录
+同步给它（见 `hostenv.export_host_home_for_child`），并把 node 的目录补进 PATH。
 
-**这是宿主耦合的一半**：换成直连飞书 OpenAPI（阶段 2）只需另写一个满足
-`ports.CardChannel` 的类，核心一行不用改。
+**这是宿主耦合的一半**：换成直连飞书 OpenAPI 只需另写一个满足 `ports.CardChannel` 的类，
+核心一行不用改。
 """
 
 from __future__ import annotations
@@ -25,12 +26,14 @@ import subprocess
 import uuid
 from pathlib import Path
 
+from newspipe import hostenv
 from newspipe.errors import DeliveryError
 
 _extra = ["/opt/homebrew/bin", "/usr/local/bin", str(Path.home() / ".local/bin")]
 _p = os.environ.get("PATH", "").split(":")
 os.environ["PATH"] = ":".join(_p + [x for x in _extra if x not in _p])
-os.environ.setdefault("HERMES_HOME", str(Path.home() / ".hermes"))
+# 补上外部 CLI 需要的宿主目录（没配宿主就不猜，让它用自己的默认）
+hostenv.export_host_home_for_child()
 
 
 def _lark_cli() -> str:

@@ -1,27 +1,28 @@
-# 独立运行配置 —— 只在「脱离 Hermes 自己跑」时才需要本文件
+# 常驻服务配置 —— 只在「让项目自己跑起来（定时 + 收入卡片点击）」时才需要本文件。
 #
-# 本文件缺失时，行为与阶段 1 完全一致（默认通道 = lark-cli，不启入站、不启服务）。
+# 本文件缺失时按最小形态运行：不发卡、不启入站，只做单次命令行调用（run / status / events）。
 # 密钥**不要写进本文件**：用环境变量或同目录的 .env（.gitignore 已排除）。
 
-channel: feishu_direct        # feishu_direct（直连 OpenAPI）| feishu_lark_cli（默认，靠宿主）
+channel: feishu_direct        # feishu_direct（直连 OpenAPI，自带凭据）
+                              # | feishu_lark_cli（把发送委托给外部 CLI，靠宿主环境）
 
 feishu:
   app_id: ""                  # 留空则从 NEWSPIPE_FEISHU_APP_ID / FEISHU_APP_ID 读
   domain: feishu              # feishu（open.feishu.cn）| lark（open.larksuite.com）
   # 密钥解析顺序（取到即停）：
   #   1. 进程环境 NEWSPIPE_FEISHU_APP_SECRET / FEISHU_APP_SECRET
-  #   2. dotenv：$NEWSPIPE_HOME/.env → <news_dir>/.env → ~/.hermes/.env（迁移桥）
+  #   2. dotenv：$NEWSPIPE_HOME/.env → <news_dir>/.env → 宿主 .env（配了 NEWSPIPE_HOST_HOME 才有）
   #   3. 钥匙串（填了下面两项才走）：
-  # keychain_service: "lark-cli"
+  # keychain_service: "your-keychain-service"
   # keychain_account: "appsecret=cli_xxxxxxxx"
   verification_token_env: NEWSPIPE_FEISHU_VERIFICATION_TOKEN
   encrypt_key_env: NEWSPIPE_FEISHU_ENCRYPT_KEY   # 未配置 Encrypt Key 时留空即可（载荷为明文 JSON）
 
 inbound:
-  mode: ws                    # ws（长连接，无需公网）| http（webhook，需公网/隧道）| none
+  mode: ws                    # ws（自带长连接，无需公网）| http（宿主转发/webhook）| none
   http:
     host: 127.0.0.1
-    port: 8787
+    port: 8787                # 0 = 让内核挑一个空闲端口（多实例/测试用）
     path: /feishu/events
   ws:
     reconnect_seconds: 5      # 断线重连退避起点
@@ -31,5 +32,5 @@ schedule:
   timezone: Asia/Shanghai
 
 log:
-  path: ""                    # 留空则只写 stdout（交给 launchd 收集）
+  path: ""                    # 留空则只写 stdout（交给 launchd/systemd 收集）
   level: info

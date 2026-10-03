@@ -165,14 +165,14 @@ class SubcommandSurfaceTests(unittest.TestCase):
 
     def test_hooks_surface(self) -> None:
         code, payload = self._cli("hooks", "add", "--from-json",
-                                  '{"id":"hermes.wiki","label":"⭐","action":"hermes.wiki",'
+                                  '{"id":"myapp.wiki","label":"⭐","action":"myapp.wiki",'
                                   '"handler":"/bin/echo"}')
         self.assertEqual(code, 0, payload)
         self.assertTrue(payload["changed"])
         code, payload = self._cli("hooks", "list")
-        self.assertEqual([h["id"] for h in payload["data"]["hooks"]], ["hermes.wiki"])
+        self.assertEqual([h["id"] for h in payload["data"]["hooks"]], ["myapp.wiki"])
         self.assertEqual(payload["data"]["problems"], [])
-        code, payload = self._cli("hooks", "remove", "hermes.wiki")
+        code, payload = self._cli("hooks", "remove", "myapp.wiki")
         self.assertEqual(code, 0, payload)
         code, payload = self._cli("hooks", "add", "--from-json",
                                   '{"id":"x.y","label":"x","action":"x.y","handler":"/nope"}')

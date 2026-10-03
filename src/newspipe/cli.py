@@ -72,12 +72,12 @@ CONTRACT: list[dict[str, Any]] = [
     {"name": "hooks add", "summary": "新增或替换一个 hook（按 id）",
      "usage": "newspipe hooks add --from-json <json|-> [--dry-run] [--base-hash H]",
      "args": ["--from-json", "--dry-run", "--base-hash"], "writes": True,
-     "examples": ["newspipe hooks add --from-json '{\"id\":\"hermes.wiki\","
-                  "\"label\":\"⭐ 入库\",\"action\":\"hermes.wiki\",\"handler\":\"~/x.sh\"}' --json"]},
+     "examples": ["newspipe hooks add --from-json '{\"id\":\"myapp.wiki\","
+                  "\"label\":\"⭐ 入库\",\"action\":\"myapp.wiki\",\"handler\":\"~/x.sh\"}' --json"]},
     {"name": "hooks remove", "summary": "删除一个 hook",
      "usage": "newspipe hooks remove <id> [--dry-run] [--base-hash H]",
      "args": ["id", "--dry-run", "--base-hash"], "writes": True,
-     "examples": ["newspipe hooks remove hermes.wiki --json"]},
+     "examples": ["newspipe hooks remove myapp.wiki --json"]},
     {"name": "events list", "summary": "读事件流（投递结果、点击、降级、失败）",
      "usage": "newspipe events list [--type T] [--unconsumed] [--days N] [--limit N] [--json]",
      "args": ["--type", "--unconsumed", "--days", "--limit"], "writes": False,
@@ -86,7 +86,7 @@ CONTRACT: list[dict[str, Any]] = [
     {"name": "events ack", "summary": "确认消费事件（明确区分 acked/already/unknown）",
      "usage": "newspipe events ack <id...> [--by NAME] [--note TEXT] [--json]",
      "args": ["ids", "--by", "--note"], "writes": True,
-     "examples": ["newspipe events ack ev_20261003T180000_ab12 --by hermes --json"]},
+     "examples": ["newspipe events ack ev_20261003T180000_ab12 --by agent --json"]},
     {"name": "events prune", "summary": "删除过期事件日文件",
      "usage": "newspipe events prune [--keep-days N] [--json]",
      "args": ["--keep-days"], "writes": True, "examples": ["newspipe events prune --json"]},
@@ -97,7 +97,7 @@ CONTRACT: list[dict[str, Any]] = [
      "usage": "newspipe queue ack <event_id> [--note <入库路径>] [--by NAME] [--json]",
      "args": ["event_id", "--note", "--by"], "writes": True,
      "examples": ["newspipe queue ack ev_20261003T180000_ab12 --note "
-                  "wiki/ai/xxx.md --by hermes --json"]},
+                  "notes/xxx.md --by agent --json"]},
     {"name": "run", "summary": "跑一轮（槽位 / 轮询 / 单源 / 补加工）",
      "usage": "newspipe run --slot am|noon|pm | --poll | --source NAME | --enrich-only "
               "[--dry] [--json]",
@@ -353,7 +353,7 @@ def _sub_doctor(args: argparse.Namespace, news_dir: Path) -> result.Result:
         cfg, store = _load(news_dir)
     except ConfigError as exc:
         return result.fail("doctor", "E_CONFIG", str(exc),
-                           hint="修好 info/news/ 下的 YAML；`newspipe status --json` 也会报同样的错",
+                           hint="修好配置目录下的 YAML；`newspipe status --json` 也会报同样的错",
                            details={"news_dir": str(news_dir)})
 
     data["sources"] = {"total": len(cfg.sources), "enabled": len(cfg.enabled_sources()),
@@ -655,11 +655,11 @@ def _build_sub_parser() -> argparse.ArgumentParser:
     common.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                         help="机器可读输出（结果信封）")
     common.add_argument("--news-dir", default=argparse.SUPPRESS,
-                        help="覆盖数据目录（默认 NEWSPIPE_HOME/info/news）")
+                        help="覆盖数据目录（默认 NEWSPIPE_NEWS_DIR，其次 <NEWSPIPE_HOME>/news）")
 
     ap = argparse.ArgumentParser(prog="newspipe", description="资讯管线（子命令风格）")
     ap.add_argument("--json", action="store_true", help="机器可读输出（结果信封）")
-    ap.add_argument("--news-dir", help="覆盖数据目录（默认 NEWSPIPE_HOME/info/news）")
+    ap.add_argument("--news-dir", help="覆盖数据目录（默认 NEWSPIPE_NEWS_DIR，其次 <NEWSPIPE_HOME>/news）")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def add(name: str, **kw: Any) -> argparse.ArgumentParser:
@@ -694,7 +694,7 @@ def _build_sub_parser() -> argparse.ArgumentParser:
     ev.add_argument("--unconsumed", action="store_true", help="只看未消费的")
     ev.add_argument("--days", type=int, default=7)
     ev.add_argument("--limit", type=int)
-    ev.add_argument("--by", default="hermes", help="消费方名字（写进 acks）")
+    ev.add_argument("--by", default="agent", help="消费方名字（写进 acks）")
     ev.add_argument("--note", help="备注（例如入库路径）")
     ev.add_argument("--keep-days", type=int, default=30, help="prune 保留天数")
 
@@ -702,7 +702,7 @@ def _build_sub_parser() -> argparse.ArgumentParser:
     qu.add_argument("action", choices=["list", "ack"])
     qu.add_argument("event_id", nargs="?", help="ack 的事件 id")
     qu.add_argument("--days", type=int, default=30)
-    qu.add_argument("--by", default="hermes")
+    qu.add_argument("--by", default="agent")
     qu.add_argument("--note", help="入库路径等")
 
     rn = add("run")
@@ -794,7 +794,7 @@ def _build_legacy_parser() -> argparse.ArgumentParser:
     ap.add_argument("--retry-degraded", action="store_true",
                     help="--enrich-only 时连加工失败过的条目一起重来（修完模型/预算后用）")
     ap.add_argument("--force", action="store_true", help="跳过节流闸（手工调试）")
-    ap.add_argument("--news-dir", help="覆盖数据目录（默认 NEWSPIPE_HOME/info/news）")
+    ap.add_argument("--news-dir", help="覆盖数据目录（默认 NEWSPIPE_NEWS_DIR，其次 <NEWSPIPE_HOME>/news）")
     return ap
 
 

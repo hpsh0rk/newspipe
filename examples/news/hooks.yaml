@@ -1,12 +1,12 @@
-# 卡片 hook —— 第三方（Hermes 侧）往资讯卡片里加按钮，以及接住这些按钮的点击。
+# 卡片 hook —— 让第三方（宿主 Agent、你自己的脚本）往资讯卡片里加按钮并接住点击。
 #
-# 这份文件是**示例模板**：真正的声明要放到数据目录（`NEWSPIPE_HOME/info/news/hooks.yaml`），
+# 这份文件是**示例模板**：真正的声明要放到数据目录（`NEWSPIPE_NEWS_DIR/hooks.yaml`），
 # 且只能通过 CLI 写入（先校验后落盘）：
 #
-#   newspipe hooks add --from-json '{"id":"hermes.wiki","label":"⭐ 入库",
-#       "action":"hermes.wiki","handler":"~/bin/news_hook_wiki.sh"}' --json
+#   newspipe hooks add --from-json '{"id":"myapp.wiki","label":"⭐ 入库",
+#       "action":"myapp.wiki","handler":"~/bin/news_hook_wiki.sh"}' --json
 #   newspipe hooks list --json      # 看声明 + 被跳过的声明（problems）
-#   newspipe hooks remove hermes.wiki --json
+#   newspipe hooks remove myapp.wiki --json
 #
 # 硬规则（写错会被拒绝，或按钮点了没反应）：
 #
@@ -23,10 +23,10 @@
 #    payload 与事件流说话。这是防腐层的全部内容。
 hooks:
   # 示例：详情页多一个「⭐ 入库」按钮。点击后项目记录一条 `favorite` 事件并进
-  # state/events 队列；宿主消费队列 → 人确认 → 才真的入库（wiki promote 必须人工确认）。
-  - id: hermes.wiki
+  # state/events 队列；宿主消费队列 → 人确认 → 才真的入库（知识库写入必须人工确认）。
+  - id: myapp.wiki
     label: "⭐ 入库"
-    action: hermes.wiki
+    action: myapp.wiki
     scope: detail
     handler: /bin/echo          # ← 换成你的脚本，例如 ~/bin/news_hook_wiki.sh
     timeout_s: 10
@@ -34,9 +34,9 @@ hooks:
 
   # 示例：详情页多一个「🔕 屏蔽这个词」。默认 enabled: false —— 声明先放着，
   # 想用时 `newspipe hooks add --from-json ...` 覆盖同一 id 即可。
-  - id: hermes.mute
+  - id: myapp.mute
     label: "🔕 屏蔽"
-    action: hermes.mute
+    action: myapp.mute
     scope: detail
     handler: /bin/echo
     enabled: false

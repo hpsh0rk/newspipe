@@ -144,7 +144,7 @@ def guard(command: str, fn: Callable[[], Result], *, json_out: bool,
 
         if isinstance(exc, ConfigError):
             result = fail(command, "E_CONFIG", str(exc),
-                          hint="检查 info/news/ 下的 YAML；`newspipe doctor --json` 会列出问题")
+                          hint="检查配置目录下的 YAML；`newspipe doctor --json` 会列出问题")
         elif isinstance(exc, DeliveryError):
             result = fail(command, "E_DELIVERY", str(exc),
                           hint="`newspipe status --json` 看通道与最近一轮；凭据问题用 --probe-channel")

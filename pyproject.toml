@@ -5,10 +5,23 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "newspipe"
 version = "0.1.0"
-description = "资讯管线：多信源采集 → AI 加工 → 卡片投递（核心与宿主解耦，可选跟随 Hermes）"
+description = "多信源采集 → AI 加工 → 卡片投递：一条可运维的资讯管线（自带调度与事件入站）"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Proprietary" }
+license = { text = "MIT" }
+keywords = ["news", "pipeline", "rss", "digest", "feishu", "lark", "agent"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Text Processing :: Filters",
+]
 dependencies = [
     "PyYAML>=6.0",
 ]
@@ -17,9 +30,9 @@ dependencies = [
 # 只有声明 http2: true 的信源需要它（Cloudflare 按 HTTP 版本放行：h2 才 200）
 # 注意：必须写成 httpx[http2]，光写 httpx>=0.28 不会装 h2（实测踩过）
 h2 = ["httpx[http2]>=0.28"]
-# 长连接入站（inbound.mode: ws）——飞书事件订阅，不需要公网地址
+# 长连接入站（inbound.mode: ws）——IM 事件订阅，不需要公网地址
 feishu = ["lark-oapi>=1.7"]
-# 仅当飞书应用配置了 Encrypt Key（事件体 AES 加密）才需要
+# 仅当 IM 应用配置了 Encrypt Key（事件体 AES 加密）才需要
 crypto = ["pycryptodome>=3.20"]
 all = ["httpx[http2]>=0.28", "lark-oapi>=1.7", "pycryptodome>=3.20"]
 

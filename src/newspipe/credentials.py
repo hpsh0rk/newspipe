@@ -4,8 +4,9 @@
 
 1. `service.yaml` 的显式值（`feishu.app_id` / `feishu.app_secret`）—— 仅 app_id 建议写这里；
 2. 进程环境：`NEWSPIPE_FEISHU_*` → 回落宿主命名 `FEISHU_*`；
-3. dotenv 文件：`$NEWSPIPE_HOME/.env` → `<news_dir>/.env` → `~/.hermes/.env`（**迁移桥**：
-   与宿主共用同一个飞书应用时，独立服务能直接复用既有密钥，无需重新粘贴）；
+3. dotenv 文件：`$NEWSPIPE_HOME/.env` → `<news_dir>/.env` → 宿主 `.env`（**迁移桥**：
+   与宿主共用同一个飞书应用时，独立服务能直接复用既有密钥，无需重新粘贴。
+   宿主目录由 `NEWSPIPE_HOST_HOME` 给出，见 `newspipe.hostenv`）；
 4. macOS 钥匙串（仅当 `service.yaml` 填了 `keychain_service` 才走）。
 
 `describe()` 只回「是否已设置」，任何日志/输出路径都不得出现密钥值——这是硬约束，
@@ -19,6 +20,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from newspipe import hostenv
 from newspipe.errors import ConfigError
 
 APP_ID_KEYS = ("NEWSPIPE_FEISHU_APP_ID", "FEISHU_APP_ID")
@@ -79,7 +81,9 @@ def default_dotenv_paths(news_dir: Path | None = None) -> list[Path]:
         paths.append(Path(home).expanduser() / ".env")
     if news_dir is not None:
         paths.append(Path(news_dir) / ".env")
-    paths.append(Path.home() / ".hermes" / ".env")
+    host_env = hostenv.host_env_path()          # 没配宿主目录就不猜
+    if host_env is not None:
+        paths.append(host_env)
     return paths
 
 

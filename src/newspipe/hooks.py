@@ -7,7 +7,7 @@
 三条硬规则：
 
 1. **hook 只能新增，不能覆盖核心动作。** `action` 必须带命名空间（含 `.`，如
-   `hermes.wiki_favorite`），核心动作是 `open_detail`/`back_to_list`/`wiki`/`dismiss`，
+   `myapp.wiki_favorite`），核心动作是 `open_detail`/`back_to_list`/`wiki`/`dismiss`，
    不带点 ⇒ 天然不会撞。
 2. **hook 失败绝不影响核心按钮。** handler 挂了只记事件 + 日志，用户点「返回列表」照常工作。
 3. **坏 hook 不许静默。** 声明有问题（缺字段、handler 不可执行、id 重复）时：

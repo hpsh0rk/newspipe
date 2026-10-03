@@ -34,6 +34,10 @@ from newspipe.errors import InboundError
 # 飞书卡片动作事件类型（v2 schema）
 CARD_ACTION_EVENT = "card.action.trigger"
 
+# 本项目拥有的卡片域（按钮 value.domain 的值）。宿主侧的转发器就是按这个域把事件路由
+# 过来的 —— 协议与宿主接入示例见仓库根目录的 AGENTS.md。
+DOMAIN = "news"
+
 
 # --------------------------------------------------------------------- 校验
 def verify_signature(*, timestamp: str, nonce: str, encrypt_key: str, body: bytes,
@@ -97,14 +101,24 @@ def decrypt_payload(encrypt_key: str, encrypted: str) -> dict[str, Any]:
 def extract_action(event: dict[str, Any]) -> dict[str, Any] | None:
     """从事件体里取出**我们自己的**卡片动作 payload（`domain: news`）。
 
-    兼容两种形状：v2 `{"header":…,"event":{"action":{"value":{…}}}}`、
-    以及老回调把 `action` 放在顶层的形状。`value` 也可能是 JSON 字符串。
+    兼容三种形状：
+
+    1. v2 回调：`{"header":…,"event":{"action":{"value":{…}}}}`；
+    2. 老回调把 `action` 放在顶层；
+    3. **宿主转发器信封**（见 AGENTS.md 的宿主接入示例）：`{"domain":"news","tag":…,"value":{…}}`
+       —— 转发器拿不到原始回调体（网关只给它 tag + value），所以 value 在顶层。
+
+    `value` 也可能是 JSON 字符串。
     """
     if not isinstance(event, dict):
         return None
+    candidates: list[Any] = []
     node: Any = event.get("event") if isinstance(event.get("event"), dict) else event
-    for candidate in (node.get("action") if isinstance(node, dict) else None,
-                      event.get("action")):
+    if isinstance(node, dict):
+        candidates.append(node.get("action"))
+    candidates.append(event.get("action"))
+    candidates.append({"value": event.get("value")})       # 形状 3
+    for candidate in candidates:
         if not isinstance(candidate, dict):
             continue
         value = candidate.get("value")
@@ -113,7 +127,7 @@ def extract_action(event: dict[str, Any]) -> dict[str, Any] | None:
                 value = json.loads(value)
             except json.JSONDecodeError:
                 continue
-        if isinstance(value, dict) and value.get("domain") == "news":
+        if isinstance(value, dict) and value.get("domain") == DOMAIN:
             return value
     return None
 
@@ -213,14 +227,28 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds, news_dir: Path |
     return Handler
 
 
+DEFAULT_HTTP_PORT = 8787
+
+
+def http_bind(service_cfg: dict[str, Any]) -> tuple[str, int, str]:
+    """解析 `service.yaml: inbound.http` 的绑定参数。
+
+    `port: 0` 是「让内核挑一个空闲端口」，**不能**被 `or` 吃掉（否则测试与多实例会撞在默认
+    端口上）—— 所以这里显式区分「没配」与「配了 0」。
+    """
+    http_cfg = dict(service_cfg.get("http") or {})
+    host = str(http_cfg.get("host") or "127.0.0.1")
+    raw_port = http_cfg.get("port")
+    port = DEFAULT_HTTP_PORT if raw_port is None else int(raw_port)
+    path = str(http_cfg.get("path") or "/feishu/events")
+    return host, port, path
+
+
 def start_http(*, service_cfg: dict[str, Any], creds: credentials.FeishuCreds,
                news_dir: Path | None = None, hook_set: Any = None,
                logger: Callable[[str], None] = print) -> tuple[ThreadingHTTPServer, str]:
     """起 HTTP 回调服务器（返回 server 与路径；调用方负责 serve_forever 线程）。"""
-    http_cfg = dict(service_cfg.get("http") or {})
-    host = str(http_cfg.get("host") or "127.0.0.1")
-    port = int(http_cfg.get("port") or 8787)
-    path = str(http_cfg.get("path") or "/feishu/events")
+    host, port, path = http_bind(service_cfg)
     handler = _make_handler(path=path, creds=creds, news_dir=news_dir,
                             hook_set=hook_set, logger=logger)
     server = ThreadingHTTPServer((host, port), handler)

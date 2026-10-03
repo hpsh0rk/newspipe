@@ -151,13 +151,13 @@ class EventStreamTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             news = Path(tmp)
             event = events.append(news, "delivered")
-            out = events.ack(news, [event["id"]], by="hermes")
+            out = events.ack(news, [event["id"]], by="agent")
             self.assertEqual(out["acked"], [event["id"]])
             self.assertEqual(out["already"], [])
-            again = events.ack(news, [event["id"]], by="hermes")
+            again = events.ack(news, [event["id"]], by="agent")
             self.assertEqual(again["already"], [event["id"]])      # 幂等，不算错
             self.assertEqual(again["acked"], [])
-            missing = events.ack(news, ["ev_nope"], by="hermes")
+            missing = events.ack(news, ["ev_nope"], by="agent")
             self.assertEqual(missing["unknown"], ["ev_nope"])      # 必须让 agent 知道
 
     def test_queue_is_only_unacked_favorites(self) -> None:
@@ -167,18 +167,18 @@ class EventStreamTests(unittest.TestCase):
             events.append(news, "clicked", payload={"item_id": "n02"})
             queued = events.queue(news)
             self.assertEqual([e["id"] for e in queued], [fav["id"]])
-            events.ack(news, [fav["id"]], by="hermes", note="wiki/x.md")
+            events.ack(news, [fav["id"]], by="agent", note="notes/x.md")
             self.assertEqual(events.queue(news), [])
             # 确认记录里带上了入库路径（人确认过才写）
             ack_line = json.loads(events.acks_path(news).read_text(encoding="utf-8").strip())
-            self.assertEqual(ack_line["note"], "wiki/x.md")
+            self.assertEqual(ack_line["note"], "notes/x.md")
 
     def test_unconsumed_filter_uses_acks(self) -> None:
         with TemporaryDirectory() as tmp:
             news = Path(tmp)
             a = events.append(news, "delivered")
             b = events.append(news, "delivered")
-            events.ack(news, [a["id"]], by="hermes")
+            events.ack(news, [a["id"]], by="agent")
             left = events.list_events(news, days=1, unconsumed=True)
             self.assertEqual([e["id"] for e in left], [b["id"]])
             self.assertEqual(events.stats(news, days=1)["unconsumed"], 1)
@@ -224,15 +224,15 @@ class HookFrameworkTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             loaded = self._load(
                 "hooks:\n"
-                "  - {id: hermes.wiki, label: '⭐ 入库', action: hermes.wiki, handler: /bin/echo}\n"
-                "  - {id: hermes.list, label: '列表页', action: hermes.list, scope: list,"
+                "  - {id: myapp.wiki, label: '⭐ 入库', action: myapp.wiki, handler: /bin/echo}\n"
+                "  - {id: myapp.list, label: '列表页', action: myapp.list, scope: list,"
                 " handler: /bin/echo}\n",
                 Path(tmp))
             self.assertEqual(loaded.problems, [])
-            self.assertEqual([h.id for h in loaded.buttons("detail")], ["hermes.wiki"])
-            self.assertEqual([h.id for h in loaded.buttons("list")], ["hermes.list"])
-            self.assertIn("hermes.wiki", loaded.actions())
-            self.assertIsNotNone(loaded.by_action("hermes.wiki"))
+            self.assertEqual([h.id for h in loaded.buttons("detail")], ["myapp.wiki"])
+            self.assertEqual([h.id for h in loaded.buttons("list")], ["myapp.list"])
+            self.assertIn("myapp.wiki", loaded.actions())
+            self.assertIsNotNone(loaded.by_action("myapp.wiki"))
 
     def test_run_handler_receives_payload_on_stdin(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -390,7 +390,7 @@ class EditLayerTests(unittest.TestCase):
     def test_hooks_add_rejects_a_dead_handler(self) -> None:
         with TemporaryDirectory() as tmp:
             news = self._news(Path(tmp))
-            out = edit.set_hook(news, {"id": "hermes.wiki", "label": "⭐", "action": "hermes.wiki",
+            out = edit.set_hook(news, {"id": "myapp.wiki", "label": "⭐", "action": "myapp.wiki",
                                        "handler": "/nonexistent/h.sh"})
             self.assertEqual(out["code"], "E_VALIDATION")
             self.assertFalse((news / "hooks.yaml").is_file())
@@ -398,12 +398,12 @@ class EditLayerTests(unittest.TestCase):
     def test_hooks_add_list_remove(self) -> None:
         with TemporaryDirectory() as tmp:
             news = self._news(Path(tmp))
-            out = edit.set_hook(news, {"id": "hermes.wiki", "label": "⭐ 入库",
-                                       "action": "hermes.wiki", "handler": "/bin/echo"})
+            out = edit.set_hook(news, {"id": "myapp.wiki", "label": "⭐ 入库",
+                                       "action": "myapp.wiki", "handler": "/bin/echo"})
             self.assertTrue(out["ok"], out)
             loaded = hooks.load(news / "hooks.yaml")
-            self.assertEqual([h.id for h in loaded.hooks], ["hermes.wiki"])
-            self.assertTrue(edit.remove_hook(news, "hermes.wiki")["ok"])
+            self.assertEqual([h.id for h in loaded.hooks], ["myapp.wiki"])
+            self.assertTrue(edit.remove_hook(news, "myapp.wiki")["ok"])
             self.assertEqual(hooks.load(news / "hooks.yaml").hooks, [])
 
     def test_file_hash_is_stable_and_changes_on_write(self) -> None:
@@ -430,7 +430,7 @@ class HookRenderTests(unittest.TestCase):
                 "view": "list", "form": "card"}
 
     def _hooks(self, tmp: str, scope: str = "detail") -> hooks.HookSet:
-        text = ("hooks:\n  - {id: hermes.wiki, label: '⭐ 入库', action: hermes.wiki,"
+        text = ("hooks:\n  - {id: myapp.wiki, label: '⭐ 入库', action: myapp.wiki,"
                 " scope: " + scope + ", handler: /bin/echo}\n")
         path = Path(tmp) / "hooks.yaml"
         path.write_text(text, encoding="utf-8")
@@ -442,13 +442,13 @@ class HookRenderTests(unittest.TestCase):
             batch = self._batch()
             card = render.detail_card(batch, batch["items"][0], hs)
             blob = json.dumps(card, ensure_ascii=False)
-            self.assertIn("hermes.wiki", blob)          # 点击时回传的 action
+            self.assertIn("myapp.wiki", blob)          # 点击时回传的 action
             self.assertIn("⭐ 入库", blob)               # 按钮上显示的字
 
     def test_list_page_has_no_hook_button_by_default(self) -> None:
         with TemporaryDirectory() as tmp:
             card = render.list_card(self._batch(), self._hooks(tmp))    # scope: detail
-            self.assertNotIn("hermes.wiki", json.dumps(card, ensure_ascii=False))
+            self.assertNotIn("myapp.wiki", json.dumps(card, ensure_ascii=False))
 
     def test_no_hooks_means_identical_output(self) -> None:
         """没配 hook 时逐字节一致（默认路径零变化）。"""

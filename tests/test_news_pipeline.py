@@ -99,7 +99,7 @@ def _write_registry(tmp: Path, sources: dict, *, chat: str = "oc_test_chat",
         {"chat": chat, "slots": slots or {"am": "08:15", "noon": "12:35", "pm": "18:35"},
          "sources": sources}, allow_unicode=True), encoding="utf-8")
     (tmp / "models.yaml").write_text(yaml.safe_dump(
-        {"default": "hermes", "capabilities": {"summarize": {"model": "hermes"}},
+        {"default": "host", "capabilities": {"summarize": {"model": "host"}},
          "budget": {"max_calls_per_day": 100, "max_calls_per_hour": 20}}, allow_unicode=True),
         encoding="utf-8")
     return tmp
@@ -141,7 +141,7 @@ class ConfigTests(unittest.TestCase):
                 "chat: oc_x\nslots:\n  am: '08:15'\nsources:\n  s:\n    adapter: aihot\n"
                 "    fetch: {trigger: slot, slots: [am]}\n    enrich:\n      summary: off\n",
                 encoding="utf-8")
-            (Path(tmp) / "models.yaml").write_text("default: hermes\n", encoding="utf-8")
+            (Path(tmp) / "models.yaml").write_text("default: host\n", encoding="utf-8")
             cfg = config.load(Path(tmp))
             self.assertEqual(cfg.sources["s"].enrich.summary, "off")
 
@@ -756,17 +756,17 @@ class LlmTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def test_hermes_follows_current_model_and_prefers_env_key(self) -> None:
-        ref = llm.resolve_model("summarize", {"default": "hermes"},
-                               hermes_config_path=self.cfg, env_path=self.env)
+    def test_host_follows_current_model_and_prefers_env_key(self) -> None:
+        ref = llm.resolve_model("summarize", {"default": "host"},
+                               host_config_path=self.cfg, env_path=self.env)
         self.assertEqual(ref.model, "cloud-model")
         self.assertEqual(ref.base_url, "http://localhost:7863/v1")
         self.assertEqual(ref.api_key, "fresh-key")     # env 优先于 config.model.api_key
         self.assertEqual(ref.describe()["key"], "有")   # describe 不含密钥
 
     def test_describe_never_leaks_key(self) -> None:
-        ref = llm.resolve_model("summarize", {"default": "hermes"},
-                               hermes_config_path=self.cfg, env_path=self.env)
+        ref = llm.resolve_model("summarize", {"default": "host"},
+                               host_config_path=self.cfg, env_path=self.env)
         self.assertNotIn("fresh-key", json.dumps(ref.describe(), ensure_ascii=False))
 
     def test_missing_key_raises_config_error(self) -> None:
@@ -775,8 +775,8 @@ class LlmTests(unittest.TestCase):
             encoding="utf-8")
         (self.home / ".env").write_text("", encoding="utf-8")
         with self.assertRaises(ConfigError):
-            llm.resolve_model("summarize", {"default": "hermes"},
-                              hermes_config_path=self.cfg, env_path=self.env)
+            llm.resolve_model("summarize", {"default": "host"},
+                              host_config_path=self.cfg, env_path=self.env)
 
     def test_over_budget(self) -> None:
         budget = {"max_calls_per_day": 2, "max_calls_per_hour": 1}
@@ -795,7 +795,7 @@ class LlmTests(unittest.TestCase):
         store = state.Store(self.home / "news")
         store.add_usage(state.today(), calls=999)
         result = llm.chat_json("summarize", system="s", user="u", prompt_version="v",
-                               store=store, models_cfg={"default": "hermes"},
+                               store=store, models_cfg={"default": "host"},
                                budget={"max_calls_per_day": 1, "max_calls_per_hour": 1,
                                        "timeout_seconds": 1})
         self.assertFalse(result.ok)
@@ -839,7 +839,7 @@ class LlmTests(unittest.TestCase):
         opener = self._fake_urlopen([empty, good])
         with patch.object(llm.urllib.request, "urlopen", opener):
             result = llm.chat_json("summarize", system="s", user="u", prompt_version="v1",
-                                   store=store, models_cfg={"default": "hermes"},
+                                   store=store, models_cfg={"default": "host"},
                                    budget={"max_calls_per_day": 10, "max_calls_per_hour": 10,
                                            "max_tokens": 1024, "max_tokens_ceiling": 8192,
                                            "timeout_seconds": 5}, now=NOW)
@@ -855,7 +855,7 @@ class LlmTests(unittest.TestCase):
         opener = self._fake_urlopen([empty])
         with patch.object(llm.urllib.request, "urlopen", opener):
             result = llm.chat_json("summarize", system="s", user="u", prompt_version="v2",
-                                   store=store, models_cfg={"default": "hermes"},
+                                   store=store, models_cfg={"default": "host"},
                                    budget={"max_calls_per_day": 10, "max_calls_per_hour": 10,
                                            "max_tokens": 8192, "max_tokens_ceiling": 8192,
                                            "timeout_seconds": 5}, now=NOW)

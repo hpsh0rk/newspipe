@@ -1,15 +1,15 @@
 """加工层 —— 模型客户端（模型解析 / 回执 / 预算熔断）。
 
-**模型解析已抽到 `backends/`**（宿主耦合的那一半）：
-  - `backends.model_hermes`：跟随 Hermes 当前主模型（读 `~/.hermes/config.yaml` 的 `model.*`）；
+**模型解析已抽到 `backends/`**（可替换的那一半）：
+  - `backends.model_host`：跟随**宿主 Agent** 当前主模型（读宿主配置目录的 `model.*`，见 `hostenv`）；
   - `backends.model_openai`：纯显式配置，不读任何宿主文件。
 本模块只负责**发请求**：HTTP 调用、回执复用、预算熔断——两种后端完全共用。
 `resolve_model` 保留原签名并转发给选中的后端，调用方与测试无需改动。
 
 解析顺序（见 `models.yaml` 注释）：
-  1. `capabilities.<cap>.model` 显式指定：可以是 `hermes`、model_aliases 的别名（tr/ds/dsv4/qw）、
+  1. `capabilities.<cap>.model` 显式指定：可以是 `host`、宿主 `model_aliases` 里的别名、
      `<provider>:<model>`，或裸模型名（用 default_provider）；
-  2. `hermes` = 跟随 Hermes 当前主模型；
+  2. `host` = 跟随宿主当前主模型；
   3. 解析不出来 → 调用方降级（不加工，用原文标题），**绝不阻塞发卡**。
 
 回执（receipt）：键 = sha256(prompt_version + model + system + user)。同一 prompt 版本 + 同一输入
@@ -34,15 +34,15 @@ from newspipe.state import now_iso, today
 
 _FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.MULTILINE)
 def resolve_model(capability: str, models_cfg: dict, *,
-                  hermes_config_path: Path | None = None,
+                  host_config_path: Path | None = None,
                   env_path: Path | None = None) -> ModelRef:
     """转发给选中的模型后端（`backends/`）；签名与原实现一致，调用方与测试无需改动。
 
-    宿主专属参数（`hermes_config_path` / `env_path`）只有 hermes 后端会用到，
+    宿主专属参数（`host_config_path` / `env_path`）只有 host 后端会用到，
     显式配置后端用 `**kwargs` 吸收——两者都满足 `ports.ModelResolver`。
     """
     return get_model_resolver(models_cfg).resolve(
-        capability, models_cfg, hermes_config_path=hermes_config_path, env_path=env_path)
+        capability, models_cfg, host_config_path=host_config_path, env_path=env_path)
 
 
 

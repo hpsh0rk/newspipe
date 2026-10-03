@@ -25,7 +25,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
-from newspipe import backends, config, credentials, inbound as inbound_mod, pipeline, state
+from newspipe import (backends, config, credentials, hostenv, inbound as inbound_mod, pipeline,
+                      state)
 from newspipe._atomic import write_json_atomic
 from newspipe.errors import ConfigError, InboundError, NewsError
 
@@ -198,8 +199,8 @@ def start_inbound_for(cfg: config.Config, *, news_dir: Path, hook_set: Any,
 
 
 def host_dotenv_path() -> Path:
-    """宿主 `.env` 的位置（飞书应用归属的宿主侧真相）。"""
-    return Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes")) / ".env"
+    """宿主 `.env` 的位置（飞书应用归属的宿主侧真相）。没配宿主目录则返回空路径。"""
+    return hostenv.host_env_path() or Path(os.devnull)
 
 
 def shared_app_ws_conflict(cfg: config.Config, *, news_dir: Path | None = None,
@@ -242,7 +243,7 @@ def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None
                 reload_fn: Callable[[], config.Config] | None = None) -> int:
     """常驻主循环。`once=True` 跑一轮就返回（给系统 cron / 测试用）。
 
-    **每轮重新读配置**（`sources.yaml` / `service.yaml` / `hooks.yaml`）：Hermes 或用户改完
+    **每轮重新读配置**（`sources.yaml` / `service.yaml` / `hooks.yaml`）：用户或宿主改完
     配置不必重启进程。改坏了也不会静默——重载失败时沿用上一份并**吵一声**。
 
     等待用 `stop_event.wait()`（可被信号打断），`wait_fn` 可注入以便测试不真等：

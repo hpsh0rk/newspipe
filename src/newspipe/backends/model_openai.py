@@ -1,7 +1,7 @@
 """模型解析实现 —— 纯显式配置，**不读任何宿主文件**。
 
 这是抽离后的默认目标形态：`models.yaml` 自带 provider 的 `base_url` 与 `key_env`，
-密钥从进程环境（或显式指定的 dotenv 文件）取。没有 `~/.hermes` 就完全可运行。
+密钥从进程环境（或显式指定的 dotenv 文件）取。**不读任何宿主文件，完全可独立运行。**
 
 解析顺序：
   1. `capabilities.<cap>.model`（或 `default`）：`<provider>:<model>` / 裸模型名 / `default_provider`；

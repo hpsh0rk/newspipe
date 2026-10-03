@@ -22,11 +22,11 @@ from newspipe import hooks as hooks_lib
 from newspipe.errors import ConfigError  # noqa: E402
 
 def data_root() -> Path:
-    """数据根目录（放 `info/news/` 的那一层）。
+    """数据根目录。
 
-    抽离前这里写死 `Path(__file__).resolve().parents[2]`（= Vault 根）。包化后 `__file__`
+    包化前这里写死 `Path(__file__).resolve().parents[2]`（= 宿主仓库根）。包化后 `__file__`
     指向安装位置，那个式子会指向包自己 —— 所以改成「环境变量优先，其次当前工作目录」：
-      - 在 Vault 里跑（cwd = 仓库根）→ 与抽离前完全一致；
+      - 在宿主仓库里跑（cwd = 仓库根）→ 与包化前一致；
       - 独立部署 → 设 `NEWSPIPE_HOME` 指向数据目录。
     """
     env = os.environ.get("NEWSPIPE_HOME")
@@ -36,8 +36,14 @@ def data_root() -> Path:
 
 
 def default_news_dir() -> Path:
-    """`<data_root>/info/news` —— 配置与状态的默认位置。"""
-    return data_root() / "info" / "news"
+    """配置与状态的默认位置：`NEWSPIPE_NEWS_DIR` 优先，其次 `<data_root>/news`。
+
+    显式给 `NEWSPIPE_NEWS_DIR` 是推荐做法：数据目录放哪由部署决定，不靠猜。
+    """
+    env = os.environ.get("NEWSPIPE_NEWS_DIR")
+    if env:
+        return Path(env).expanduser().resolve()
+    return data_root() / "news"
 
 
 # 兼容常量：导入时求值一次（调用点应优先用 default_news_dir()，它每次都重新解析环境变量）

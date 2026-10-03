@@ -1,4 +1,7 @@
+# 系统 / 编辑器
 .DS_Store
+
+# Python
 __pycache__/
 *.py[cod]
 .venv/
@@ -6,5 +9,23 @@ venv/
 build/
 dist/
 *.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# 密钥与本地配置（凭据永不进仓库）
 .env
 .env.*
+*.pem
+*_secret*
+credentials.json
+
+# 运行时数据（配置 + 状态；不该进版本库）
+news/
+info/
+state/
+llm/
+*.log
+
+# 生成物
+com.newspipe.service.plist

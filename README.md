@@ -1,160 +1,224 @@
-# newspipe —— 资讯管线（独立包）
+# newspipe
 
-**一句话**：多信源采集 → AI 加工（中文标题/摘要/翻译）→ 飞书卡片投递（列表页 ↔ 详情页可点），
-**可以不依赖 Hermes 独立运行**（直连飞书 OpenAPI 投递 + 自建长连接入站 + 自带调度），
-默认行为仍是「跟随 Hermes 主模型 + 经 lark-cli 投递」（缺 `service.yaml` 时与抽离前逐字节一致）。
+**把一堆信源变成一张可以点开的卡片。**
 
-从 Knowledge Vault 的 `scripts/news/` 抽离而来。设计权威源在 Vault，本仓库是代码的家。
+多信源采集 → AI 加工（中文标题 / 摘要 / 翻译）→ 卡片投递（列表页 ↔ 详情页原地翻页），
+**自带调度与事件入站，可以完全独立运行**。
 
-## 现状表
+```
+信源（RSS / 站点 API / 论坛 / 社交）
+   → 采集（四轴配置：何时拉 / 留什么 / 加工什么 / 怎么发）
+   → AI 加工（标题、摘要、翻译；失败降级为原文，绝不阻塞投递）
+   → 卡片投递（一张卡 = 一个卡片实体，原地翻页，点击有回显）
+   → 事件流（投递 / 点击 / 收藏 / 屏蔽 / 降级 / 失败，落成 JSONL）
+```
 
-| 维度 | 现状 |
+---
+
+## 项目背景
+
+每天要看的信源越来越多，而它们分散在不同平台、不同格式、不同语言里。已有的方案要么是
+「一个 RSS 阅读器」（只能读，不能筛、不能加工、不能推给团队），要么是「一个爬虫脚本」
+（跑起来容易，跑稳很难：重复推送、失败静默、投递限流、状态丢失）。
+
+newspipe 想解决的是**中间那一层**：把「采集 → 判断 → 加工 → 推送」做成一条**可运维**的管线。
+它来自一个真实需求（作者自己每天在用的资讯简报），所以里面很多设计不是拍脑袋，而是被故障
+逼出来的 —— 例如「缺配置」与「真故障」必须分开记账（否则每 5 分钟的轮询会变成告警轰炸）、
+「一张卡片实体只能发送一次」（否则翻页会不断堆新消息）、「AI 加工失败绝不能阻塞投递」。
+
+它被刻意设计成**不绑定任何宿主**：可以自己跑（自带调度 + 自带长连接），
+也可以寄生在一个已有 IM 机器人背后（宿主转发卡片点击）。两种方式见
+[`AGENTS.md`](AGENTS.md)（给 Agent 的使用说明）与
+[`docs/host-integration.md`](docs/host-integration.md)（宿主接入协议 + 参考实现）。
+
+---
+
+## 能做什么
+
+| 能力 | 说明 |
 |---|---|
-| 设计讨论 | Vault：`thinkings/资讯管线架构-v2-2026-10-03.md`（设计权威）+ 研讨 6 轮 + 交接单 |
-| 代码 | 本仓库：23 个模块 + 5 个后端 + 159 个测试（全绿） |
-| 真实用户验证 | 1 人（作者自用）：在 Vault 里每天真跑，3 个槽位 + 每 5 分钟轮询 + 痛点提炼 |
-| 独立运行 | ✅ 通道直连真机跑通（token→建实体→发卡→更新）+ 长连接真机握手 + `ping success` |
-| 前置调研 | 已完成：决策模型 Jev（TypeSafe AI）调研，对应 `priority_judge` 位置（见 Vault Round 5） |
-| 与宿主耦合 | **全部收进端口/开关**：模型解析、投递通道、入站来源、数据根目录 |
+| **多信源采集** | 任意 HTTP JSON / RSS / 需要分页与游标的站点。内置 `slot`（定点）与 `poll`（轮询）两种触发，配置里写时刻，进程自己算下一次触发 |
+| **四轴正交过滤** | `fetch` 何时拉 / `filter` 留什么（关键词闸、条数上下限、排序）/ `enrich` 加工什么 / `deliver` 怎么发。改配置即改行为，不用重启 |
+| **AI 加工** | 中文标题 + 摘要 + 正文翻译；支持「跟随宿主已有模型配置」或「自带 provider」。有**回执缓存**（同一输入不重复付费）与**预算熔断**（日/小时/单次 token） |
+| **卡片投递** | 列表页 ↔ 详情页**同一条消息换页**（更新卡片实体，不是发新消息）；元素预算自检；按钮可扩展（第三方 hook） |
+| **事件流** | 每次投递 / 点击 / 收藏 / 降级 / 失败都落 `state/events/<date>.jsonl`；消费确认幂等。**hook 实时推送 + 事件流补漏**两条路都有 |
+| **可运维** | 心跳（区分「缺配置」与「故障」）、投递去重、失败重试、状态原子写、`doctor` 自检 |
+| **给 Agent 的接口** | 所有命令输出**统一结果信封**（`ok`/`changed`/`data`/`error`/`next`）+ 语义化退出码；写操作先校验后落盘，支持 `--dry-run` |
 
-## 核心设计（30 秒版）
+### 不做什么
 
-四轴正交配置（`fetch` 何时拉 / `filter` 留什么 / `enrich` 加工什么 / `deliver` 怎么发），
-单向分层：配置 → 采集 → 加工 → 投递 → 状态，`pipeline.py` 是唯一知道全序的地方，`render.py` 是纯函数。
+- **不替人做决定。** 「⭐ 收藏」这类动作只**进队列**，是否真的写进知识库由人确认。
+- **不绑宿主。** 不 import 宿主任何模块，也不被宿主 import；两边只通过 CLI 契约、hook 声明、
+  事件流说话（防腐层）。
+- **不在转发路径上做重活。** 卡片回调有 3 秒预算，转发链路只做「查表 + 转发」。
 
-四条不变量：① `delivery.plan` 先于 `enrich`（先定展示集再花钱）；② enrich 失败**绝不阻塞投递**；
-③ `interaction` 不直接发消息（只写状态 + 更新卡片实体）；④ 一张卡 = 一个卡片实体且只能发一次。
+---
 
-## 与宿主的边界（`src/newspipe/ports.py`）
+## 技术实现
 
-| 端口 | 跟随 Hermes（默认） | 独立运行 |
+### 分层
+
+```
+配置层 (config.py)      sources.yaml / models.yaml / service.yaml / hooks.yaml —— 唯一人工编辑入口
+采集层 (pipeline.py)    按四轴取数、去重、写 state
+加工层 (llm.py)         模型调用 + 回执复用 + 预算熔断（解析器可替换：自带配置 / 跟随宿主）
+投递层 (render + backends)  纯函数渲染卡片 + 通道实现（直连 OpenAPI / 委托外部 CLI）
+交互层 (interaction.py) 卡片点击 → 改状态 + 更新卡片实体（自己不直接发消息）
+入站层 (inbound.py)     长连接 ws 或 HTTP，两条入口共用同一个 dispatch()
+服务层 (service.py)     一个常驻进程：调度线程 + 入站线程
+```
+
+`pipeline.py` 是唯一知道全序的地方，`render.py` 是纯函数 —— 其余模块只依赖 `ports.py`
+定义的端口，因此每个可替换点都能独立测试。
+
+### 四条不变量（都是故障换来的）
+
+1. **先定展示集再花钱**：`delivery.plan` 先于 `enrich`，避免为不会被展示的内容付费。
+2. **加工失败不阻塞投递**：模型挂了就降级用原文标题，卡片照发（`on_exceeded: degrade`）。
+3. **交互层不发消息**：点击只改状态 + 更新卡片实体，避免「点一次多一条消息」。
+4. **一张卡 = 一个卡片实体且只能发送一次**：翻页靠更新实体；`sequence` 严格递增。
+
+### 卡片的两条硬约束
+
+- 整卡 **≤200 元素 / ≤30KB**（超了飞书报 11310）。列表页每行按钮会 ×行数，所以
+  默认只在详情页挂扩展按钮，`doctor --json` 会报元素预算余量。
+- 交互进行中的卡片不可更新（错误码 200810）—— 所以回显走响应里的 `toast`，不走改卡片。
+
+### 两种入站方式（关键设计）
+
+卡片点击必须有人接住，而**飞书长连接是集群模式、不支持广播**：同一个应用起两个 client，
+事件只会随机落到其中一个。所以「一个机器人」= 「一条长连接」：
+
+| | 自带长连接 | 宿主转发 |
 |---|---|---|
-| `ModelResolver` | `backends/model_hermes.py`（读 `~/.hermes/config.yaml` + `.env`） | `backends/model_openai.py`（纯显式配置） |
-| `CardChannel` | `backends/feishu_lark_cli.py`（subprocess 调 lark-cli） | `backends/feishu_direct.py`（直连 OpenAPI，已真机验证） |
-| 入站回调 | Hermes 插件 → `newspipe card <payload>` | `inbound.py`（长连接 ws / HTTP 回调，已真机握手） |
-| 调度 | Hermes cron（5 条 job） | `service.py`（一个常驻进程，自带槽位 + 轮询节流） |
+| 谁持连接 | 本项目（`inbound.mode: ws`） | 宿主 Agent（`inbound.mode: http`） |
+| 需要公网 | 否（出网即可） | 否（宿主转 `127.0.0.1`） |
+| 适用 | 独立部署 | 用户已经有别的机器人 |
+
+两种方式的业务代码**完全相同**，差别只在事件从哪个入口进来；项目启动时会检测
+「同一应用 + 双方都要长连接」的冲突并直接报错。协议与参考实现见
+[`docs/host-integration.md`](docs/host-integration.md)。
+
+### 状态布局
+
+```
+<news_dir>/
+  sources.yaml models.yaml service.yaml hooks.yaml   配置（只能经 CLI 改）
+  state/batches/<date>/<source>-<slot>.json          每批内容
+  state/pushed/<source>.jsonl                        去重（推过就不再推）
+  state/cursors/                                     分页游标
+  state/status/                                      各源心跳
+  state/budget/<date>.json                           模型预算与用量
+  state/events/<date>.jsonl + acks.jsonl             事件流与消费确认
+  llm/receipts/  llm/usage/<date>.json               回执缓存与账单
+```
+
+---
 
 ## 快速上手
 
 ```bash
-python -m venv .venv && .venv/bin/pip install -e .          # 或 pip install -e '.[h2,feishu,crypto]'
-export NEWSPIPE_HOME=/path/to/data          # 放 info/news/ 的那一层（配置 + 状态）
-cp examples/news/*.yaml $NEWSPIPE_HOME/info/news/           # 示例配置，改 chat 即可
-.venv/bin/newspipe --list-sources
-.venv/bin/newspipe --slot am --dry --verbose                # 演练：真采集，不投递
-.venv/bin/newspipe --status                                 # 运行态 + 模型用量与失败原因
+python -m venv .venv && .venv/bin/pip install -e '.[feishu,crypto,h2]'
+
+export NEWSPIPE_NEWS_DIR=$HOME/.newspipe/news        # 配置 + 状态放哪（显式给，不靠猜）
+mkdir -p "$NEWSPIPE_NEWS_DIR"
+cp examples/news/*.yaml "$NEWSPIPE_NEWS_DIR"/       # 示例配置：改 chat / 信源 / provider 即可
+
+newspipe api describe --json                          # 权威契约：命令、参数、退出码
+newspipe doctor --json                                # 自检：配置 / 凭据 / 元素预算 / 事件积压
+newspipe run --slot am --dry --verbose                # 演练：真采集、真加工、不投递
+newspipe run --slot am                                # 真发一张卡
 ```
 
-> 用 `uv` 的话：`uv venv --seed .venv` 后跑 `.venv/bin/pip install -e .`——实测 `uv pip install -e .`
-> **不生成 console script**（包能 import，但 `.venv/bin/newspipe` 不存在）。
-> 任何情况下 `python -m newspipe.cli` 都等价可用。
+> 用 `uv` 的话：`uv venv --seed .venv` 之后再 `pip install -e .`（实测 `uv pip install -e .`
+> 不生成 console script；任何情况下 `python -m newspipe.cli` 都等价可用）。
 
-环境变量：`NEWSPIPE_HOME`（数据根，默认 cwd）、`NEWSPIPE_NEWS_DIR`、`NEWSPIPE_STAGING_QUEUE`、
-`NEWSPIPE_MODEL_BACKEND`（`hermes`|`explicit`）、`NEWSPIPE_CHANNEL`、
-`NEWSPIPE_FEISHU_*`（凭据）、`NEWSPIPE_SDK_LOG`（`info`|`debug`，调试长连接用）。
-
-## 独立运行（阶段 2 + 3）
-
-三步：**填 `service.yaml` → 自检通道 → 起常驻服务**。
+### 跑成常驻服务
 
 ```bash
-# 1. 服务配置（密钥不要写在这里）
-cat > $NEWSPIPE_HOME/info/news/service.yaml <<'YAML'
-channel: feishu_direct        # 默认 feishu_lark_cli；显式开才脱离 lark-cli
-inbound: {mode: ws}           # ws（长连接，只需出网）| http（需公网）| none
-schedule: {tick_seconds: 300} # 轮询节流粒度
-YAML
+# service.yaml：channel + inbound.mode + 调度时区
+newspipe serve --verbose            # 一个进程：调度线程 + 入站线程
+newspipe serve --once --dry         # 演练：跑一轮到期任务就退出
 
-# 2. 通道自检：真发一张卡，输出里不含任何密钥
-.venv/bin/newspipe --probe-channel --chat oc_xxxxxxxx
-
-# 3. 常驻服务（自带调度 + 入站，一个进程）
-.venv/bin/newspipe --serve --verbose
-.venv/bin/newspipe --serve --once --dry     # 演练：跑一轮到期任务就退出
+./service/install.sh                # macOS launchd 常驻（生成 plist、装、启）
 ```
 
-凭据解析顺序（`src/newspipe/credentials.py`，**永不打印值**）：
-`service.yaml` 显式值 → env `NEWSPIPE_FEISHU_*` → 回落宿主命名 `FEISHU_*` → dotenv（`$NEWSPIPE_HOME/.env`、
-`~/.hermes/.env`）→ macOS 钥匙串。缺关键项时报 `ConfigError` 并给可执行的修法。
+### 环境变量
 
-开机自启（launchd）：
+| 变量 | 作用 |
+|---|---|
+| `NEWSPIPE_NEWS_DIR` | 配置与状态目录（推荐显式给） |
+| `NEWSPIPE_HOME` | 数据根目录（未给 `NEWS_DIR` 时用 `<HOME>/news`） |
+| `NEWSPIPE_MODEL_BACKEND` | `explicit`（自带配置）/ `host`（跟随宿主） |
+| `NEWSPIPE_CHANNEL` | `feishu_direct` / `feishu_lark_cli` |
+| `NEWSPIPE_HOST_HOME` | 宿主配置目录（只有用 `host` 后端/宿主凭据时才需要） |
+| `NEWSPIPE_FEISHU_*` | 凭据（也可用 dotenv 或系统钥匙串） |
+| `NEWSPIPE_SDK_LOG` | `info` / `debug`（调长连接用） |
+
+**凭据永不写进配置或仓库**：解析顺序是 显式配置 → 进程环境 → dotenv → 系统钥匙串，
+所有探测命令只输出「有没有」，不输出值。
+
+---
+
+## 给 Agent 用的 CLI
+
+所有命令支持 `--json`，返回同一个信封：
+
+```json
+{"ok": true, "command": "status", "contract_version": 1, "changed": false,
+ "data": {…}, "error": null, "warnings": [], "next": ["newspipe run --slot am --json"]}
+```
+
+- `ok=true` ⇔ `error` 为空；`ok=false` ⇔ `data` 为空。
+- `changed` = 这次调用到底改没改东西；`next` = 建议的下一步命令。
+- 退出码：`0` 成功 / `1` 运行时故障 / `2` 用法或配置错 / `3` 网络或投递错 / `4` 校验失败。
+- 写配置**只能**走 CLI（`source set|enable|remove`、`hooks add|remove`）：先校验后落盘、
+  支持 `--dry-run` 与 `--base-hash`。直接手改 YAML 会被校验拦下。
 
 ```bash
-cp service/com.newspipe.service.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.newspipe.service.plist
-launchctl kickstart -k gui/$(id -u)/com.newspipe.service
-tail -f ~/Library/Logs/newspipe.log
+newspipe api describe --json                              # 完整命令面（自取，不会过期）
+newspipe status --json                                    # 各源心跳、AI 用量、降级原因、事件积压
+newspipe source set hn --from-json - --dry-run --json     # 演练
+newspipe hooks add --from-json '{"id":"myapp.wiki","label":"⭐ 入库",
+    "action":"myapp.wiki","handler":"~/bin/hook.sh"}' --json
+newspipe events list --unconsumed --json                  # 未消费事件
+newspipe queue list --json                                # 待入库（人确认后才 ack）
 ```
 
-### 两个必须知道的运行事实
+细节与硬规则见 [`AGENTS.md`](AGENTS.md)。
 
-1. **入站事件只发给应用的其中一条长连接**。如果 Hermes 网关（也用同一个 app）在跑，
-   点击回调可能落到它那边——不是故障，但会让你以为「自建入站没生效」。
-   切换期先停一侧（`launchctl bootout` / 停 Hermes 网关），别两边同时跑。
-2. **飞书应用的卡片回调必须指向「长连接」模式**（`FEISHU_CONNECTION_MODE=websocket`）。
-   `http` 模式需要公网可达地址 + 事件订阅回调 URL + `encrypt_key`（签名校验与 AES 解密）。
+---
 
-## 给 Agent 的 CLI（防腐层）
-
-Hermes **不直接改这个仓库的文件**，只通过 CLI 说话；CLI 只通过**结果对象**回话。
-Agent 的第一个动作永远是：
+## 测试
 
 ```bash
-newspipe api describe --json     # 权威契约：命令、参数、退出码、示例
-newspipe doctor --json           # 自检：配置 / hooks / 凭据 / 元素预算 / 事件积压
+python -m unittest discover -s tests        # 241 个用例，无第三方测试框架依赖
 ```
 
-常用：
+覆盖：四轴配置与校验、采集与去重、预算熔断与回执复用、卡片渲染与元素预算、
+卡片交互（翻页/收藏/屏蔽）、**两种入站方式的装配**（含「handler 没注册到 SDK 上」这类
+静默故障）、CLI 契约与退出码、状态原子写。
 
-```bash
-newspipe status --json                                    # 运行态（各源心跳、AI 用量与降级原因）
-newspipe source list --json                               # 信源 + 文件 hash（乐观并发用）
-newspipe source set <name> --from-json - --dry-run --json # 演练，不落盘
-newspipe hooks add --from-json '{"id":"hermes.wiki","label":"⭐ 入库",
-    "action":"hermes.wiki","handler":"~/bin/news_hook_wiki.sh"}' --json
-newspipe events list --unconsumed --json                  # 投递结果/点击/降级/失败
-newspipe queue list --json                                # ⭐ 待入库（人确认后才 ack）
-newspipe queue ack <event_id> --note wiki/ai/x.md --by hermes --json
-```
+---
 
-**硬规则**
+## 文档
 
-1. 任何命令都输出**一个**结构化结果：`ok` / `command` / `changed` / `data` / `error` /
-   `warnings` / `next`。未捕获异常变成 `E_INTERNAL`，**不吐堆栈**——agent 要能据此决断。
-2. 退出码：`0` 成功 / `1` 运行时故障 / `2` 用法或配置错 / `3` 网络或投递错 / `4` 校验失败。
-3. 写配置**只能**走 `source set|enable|disable|remove` 与 `hooks add|remove`：先校验后落盘
-   （候选配置真的跑一遍 `config.load`），支持 `--dry-run`、`--base-hash`。
-   **直接编辑 `sources.yaml` / `hooks.yaml` 被禁止**——校验会拦下静默失效的配置。
-4. 写入是**文本级块编辑**：被替换的块内注释会丢，**块外逐字节不动**（`source enable/disable`
-   只改一行）。`--dry-run` 恒不落盘。
-5. `⭐ 收藏` 只进 `state/events/` 队列，**不直接入库**——人确认后才 `queue ack`。
-6. 旧 flag 风格（`--slot am` / `--card '<json>'` / `--status` / `--serve`）保留给 4 个 cron
-   wrapper 与插件薄壳，行为不变；它们**成功时 stdout 为空**（no_agent cron 任务把非空 stdout
-   当告警投递给用户）。子命令则一律输出结果对象——两种受众，两套约定，别混。
+| 文档 | 内容 |
+|---|---|
+| [`AGENTS.md`](AGENTS.md) | 给 Agent 的使用说明：两种入站方式、CLI 契约、事件流、硬规则、排障 |
+| [`docs/host-integration.md`](docs/host-integration.md) | 宿主接入协议 v1 + 两份参考实现（通用宿主 / 插件式宿主） |
+| `examples/news/*.yaml` | 配置示例（信源 / 模型 / 服务 / 卡片按钮） |
+| `newspipe api describe --json` | 命令面契约（运行时自取） |
 
-## 文档索引
+---
 
-| 文档 | 内容 | 来源 |
-|---|---|---|
-| `docs/migration.md` | 抽离方案：耦合面清单 + 三阶段路线 + 每阶段代价 | 本项目 |
-| `specs/stage1-package-extraction.md` | 阶段 1 规格与验收（已交付） | 本项目 |
-| `specs/stage1-brainstorming.md` | 阶段 1 的设计决策与取舍 | 本项目 |
-| `specs/stage2-3-standalone.md` | 阶段 2/3 规格与验收（已交付） | 本项目 |
-| `handoff.md` | 交接单：现状 / 改动文件 / 坑 / 下一步 | 本项目 |
-| `docs/vault-snapshot/` | Vault 设计文档的只读快照（含 sha256 清单） | Vault |
+## 边界与运维责任
 
-## 落地顺序
+独立运行意味着下面四件事从「宿主帮你做」变成「你自己做」：
+**凭据存储、进程守护、投递重试、事件订阅**。代码里都有对应实现，但运维责任一并转移 ——
+钥匙串/环境变量自己管、launchd/systemd 自己装、投递失败自己看日志、事件订阅自己盯连接。
+如果你已经有一个稳定的宿主 Agent，用「宿主转发」那条路会省掉大部分运维。
 
-| 阶段 | 内容 | 状态 |
-|---|---|---|
-| P0 | 包化 + 端口化（行为不变） | ✅ 交付，`specs/stage1-package-extraction.md` |
-| P1 | Vault 接线方式定案（editable install vs 独立部署） | ⏳ 待决策（不阻塞 P2/P3） |
-| P2 | 通道直连飞书 OpenAPI，去掉 `lark-cli` 依赖 | ✅ 交付并真机验证，`specs/stage2-3-standalone.md` |
-| P3 | 入站自建 + 自带调度（常驻服务） | ✅ 交付并真机握手；点击端到端待切换期实测 |
+## 许可
 
-## 风险提醒（照抄自讨论，勿淡化）
-
-抽离会把 Hermes 已经解决的四件事变成自己要维护的：**凭据存储、进程守护、投递重试、事件订阅**。
-代码里这四件事都有了对应实现，但**运维责任也一并转移**了：钥匙串/环境变量要自己管、
-launchd 要自己装、投递失败要自己看日志、事件订阅要自己盯连接。
-只有当你确实要在**没有 Hermes 的机器**上跑，这套独立形态才值得启用。
+MIT（见 `LICENSE`）。
