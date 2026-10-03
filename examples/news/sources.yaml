@@ -1,0 +1,82 @@
+# 信源注册表 —— 资讯管线唯一人工编辑入口（示例配置）
+#
+# 复制到你的配置目录（默认 `info/news/`）后改 `chat` 即可跑。
+# 改这里即改行为；引擎每次运行读取，无需重启任何东西。
+#
+# 四轴正交：
+#   fetch   何时拉：trigger=slot（定时槽位）| poll（分钟级轮询）| manual
+#   filter  留什么：关键词闸 / 条数上下限 / 排序
+#   enrich  加工什么：summary=off|title|post|article + 可选抓正文 + 可选译正文
+#   deliver 怎么发：form=card|append_card|state_only + priority + quiet_hours + budget
+
+chat: oc_replace_with_your_chat_id   # 投递目标群/会话 id
+
+slots:                # slot 触发器的时点（cron 与这里对齐；改槽位先改调度）
+  am: "08:15"
+  noon: "12:35"
+  pm: "18:35"
+
+sources:
+  # ① 定时槽位 + 信源自带中文 → 零加工成本
+  aihot:
+    adapter: aihot
+    enabled: true
+    fetch:
+      trigger: slot
+      slots: [am, noon, pm]
+    filter:
+      min_items: 1
+      max_items: 13              # 飞书卡片 ≤200 元素：每行 14 + 固定 5 ⇒ 上限 13（config.CARD_MAX_ITEMS 同值）
+      rank: score_desc
+    enrich:
+      summary: "off"             # 条目自带中文标题与摘要，无需再加工
+    deliver:
+      form: card
+      priority: normal
+    card:
+      title: "AI 热点简报"
+
+  # ② 定时槽位 + 抓正文 + AI 写中文标题/摘要（英文源的标准形态）
+  hackernews:
+    adapter: hn                # Algolia front_page，免 key
+    enabled: true
+    fetch:
+      trigger: slot
+      slots: [am, pm]
+    filter:
+      min_items: 3
+      max_items: 12
+      rank: score_desc
+    enrich:
+      summary: article           # 英文标题 → 抓正文后写中文标题 + 摘要
+      fetch_body: true
+      max_body_chars: 6000
+    deliver:
+      form: card
+      priority: normal
+    card:
+      title: "HN 热榜精选"
+
+  # ③ 分钟级轮询 + 追加进当日同一张卡（限量抢领类必须实时）
+  example_poll:
+    adapter: rsshub
+    enabled: false               # 示例：换成自己的 feed 再打开
+    fetch:
+      trigger: poll
+      interval_min: 30           # 每 5 分钟触发，真抓取压到 30 分钟一次
+    filter:
+      min_items: 1
+      max_items: 10
+      include_keywords: [token, api, 额度, 大模型, 算力]
+      exclude_keywords: [已失效]
+    enrich:
+      summary: "off"
+    deliver:
+      form: append_card
+      priority: normal
+      quiet_hours: "23:30-07:30"
+    http2: true                  # CF Bot Management 对 HTTP/1.1 指纹一律 403
+    feeds: ["https://example.com/feed.rss"]
+    feed_label: "示例 feed"
+    card:
+      title: "实时情报"

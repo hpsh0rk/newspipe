@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "newspipe"
+version = "0.1.0"
+description = "资讯管线：多信源采集 → AI 加工 → 卡片投递（核心与宿主解耦，可选跟随 Hermes）"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+# 只有声明 http2: true 的信源需要它（Cloudflare 按 HTTP 版本放行：h2 才 200）
+h2 = ["httpx>=0.28"]
+
+[project.scripts]
+newspipe = "newspipe.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+newspipe = ["prompts/*.md"]
