@@ -188,8 +188,8 @@ class ConfigTests(unittest.TestCase):
     def test_live_registry_is_valid(self) -> None:
         """真实配置必须能加载，且发卡源的条数上限不超过元素预算。
 
-        配置目录来源：环境变量 `NEWSPIPE_LIVE_CONFIG`（部署时指向真实配置，例如 Vault 的
-        `info/news/`）→ 否则用随包示例 `examples/news/`。这样这条断言在独立仓库里依然有效，
+        配置目录来源：环境变量 `NEWSPIPE_LIVE_CONFIG`（部署时指向真实配置目录）
+        → 否则用随包示例 `examples/news/`。这样这条断言在独立仓库里依然有效，
         不会因为找不到宿主目录而红。
         """
         live = os.environ.get("NEWSPIPE_LIVE_CONFIG")
@@ -918,7 +918,7 @@ class InteractionTests(unittest.TestCase):
         self.assertEqual(batch["seq"], 3)                 # sequence 严格递增
 
     def test_wiki_records_favorite_event_not_host_file(self) -> None:
-        """⭐ 收藏 → 项目自己的事件队列（不再写宿主的 _staging/news-wiki-queue.md）。"""
+        """⭐ 收藏 → 项目自己的事件队列（不再写宿主的队列文件）。"""
         msg = self._handle("wiki")
         batch = self.store.read_batch("2026-10-03", "s", "am")
         self.assertEqual(batch["items"][0]["status"], "wiki")

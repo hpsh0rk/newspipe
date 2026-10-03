@@ -237,9 +237,9 @@ class HookFrameworkTests(unittest.TestCase):
     def test_run_handler_receives_payload_on_stdin(self) -> None:
         with TemporaryDirectory() as tmp:
             loaded = self._load(
-                "hooks:\n  - {id: echo, label: e, action: hermes.echo, handler: /bin/cat}\n",
+                "hooks:\n  - {id: echo, label: e, action: myapp.echo, handler: /bin/cat}\n",
                 Path(tmp))
-            out = hooks.run_handler(loaded.hooks[0], {"item_id": "n01", "action": "hermes.echo"})
+            out = hooks.run_handler(loaded.hooks[0], {"item_id": "n01", "action": "myapp.echo"})
             self.assertTrue(out["ok"], out)
             self.assertIn("n01", out["stdout"])
 
@@ -250,7 +250,7 @@ class HookFrameworkTests(unittest.TestCase):
             script.write_text("#!/bin/sh\nexit 7\n", encoding="utf-8")
             script.chmod(0o755)
             loaded = self._load(
-                f"hooks:\n  - {{id: hermes.no, label: n, action: hermes.no, handler: {script}}}\n",
+                f"hooks:\n  - {{id: myapp.no, label: n, action: myapp.no, handler: {script}}}\n",
                 Path(tmp))
             self.assertEqual(loaded.problems, [], loaded.problems)
             out = hooks.run_handler(loaded.hooks[0], {})
@@ -261,7 +261,7 @@ class HookFrameworkTests(unittest.TestCase):
         """`python3 x.py` 这种写法必须被接受——只查 `Path(argv[0]).exists()` 会误判。"""
         with TemporaryDirectory() as tmp:
             loaded = self._load(
-                "hooks:\n  - {id: hermes.py, label: p, action: hermes.py,"
+                "hooks:\n  - {id: myapp.py, label: p, action: myapp.py,"
                 " handler: \"python3 -c pass\"}\n",
                 Path(tmp))
             self.assertEqual(loaded.problems, [], loaded.problems)

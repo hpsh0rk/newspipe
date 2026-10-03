@@ -94,8 +94,8 @@ class ExtractActionTests(unittest.TestCase):
             self.assertIsNone(inbound.extract_action(event))
 
     def test_router_envelope_shape(self) -> None:
-        """宿主转发器（hermes.card-router）的信封：网关只给它 tag + value，所以 value 在顶层。"""
-        envelope = {"protocol_version": 1, "source": "hermes.card-router", "domain": "news",
+        """宿主转发器的信封：网关只给它 tag + value，所以 value 在顶层。"""
+        envelope = {"protocol_version": 1, "source": "host.card-router", "domain": "news",
                     "tag": "button", "value": {"domain": "news", "id": "n01",
                                                "news_action": "open_detail"}}
         self.assertEqual(inbound.extract_action(envelope)["news_action"], "open_detail")
@@ -130,8 +130,8 @@ class DispatchTests(unittest.TestCase):
                     "id": item, "news_action": action}}}}
 
     def test_router_envelope_really_dispatches(self) -> None:
-        """宿主转发器（hermes.card-router）的信封也要真跑通：网关 → 转发器 → 本项目。"""
-        envelope = {"protocol_version": 1, "source": "hermes.card-router", "domain": "news",
+        """宿主转发器的信封也要真跑通：网关 → 转发器 → 本项目。"""
+        envelope = {"protocol_version": 1, "source": "host.card-router", "domain": "news",
                     "tag": "button",
                     "value": {"domain": "news", "digest": DIGEST,
                               "batch": f"state/batches/{DIGEST}/s-am.json",

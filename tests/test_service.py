@@ -389,7 +389,7 @@ class ServiceConfigTests(unittest.TestCase):
                 config.load_service(Path(tmp))
 
     def test_load_uses_service_yaml_when_present(self) -> None:
-        """config.load() 会把 service.yaml 一起吃进来（Vault 无此文件 → 行为不变）。"""
+        """config.load() 会把 service.yaml 一起吃进来（没有此文件时 → 行为不变）。"""
         import yaml
         with TemporaryDirectory() as tmp:
             news = Path(tmp) / "info" / "news"

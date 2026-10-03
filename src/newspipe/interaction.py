@@ -15,7 +15,7 @@ payload 转到这里（独立部署时由 `inbound.py` 直接调）。**本模�
 | `<hook action>` | 由第三方 handler 决定 | `clicked` 事件（带 hook id 与 handler 结果） |
 
 **边界（防腐层）**：本模块只写**项目自己的**数据（`<news_dir>/` 下的 state/actions.log/
-preferences.md）。它**不再往宿主写文件**——收藏不再直接写 Vault 的待办队列，而是记一条
+preferences.md）。它**不再往宿主写文件**——收藏不再直接写宿主的待办队列，而是记一条
 `favorite` 事件，由宿主用 `newspipe queue list --json` 读、人确认后再入库。
 
 成功返回空字符串（静默，不在聊天里插消息）；失败/需要人知道时返回一行可读文本

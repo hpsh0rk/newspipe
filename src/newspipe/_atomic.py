@@ -1,7 +1,7 @@
-"""原子写原语（从 Vault 的 `scripts/vault_lib/fsutil.py` 内联而来）。
+"""原子写原语（从内部工具库内联而来）。
 
-为什么内联而不是依赖 Vault：`state.py` 需要「崩溃不产生空文件」的持久写。这是 30 行
-标准库代码，把它留成外部依赖会让整个包绑死在 Vault 上——而抽离的目的正是解开这层绑定。
+为什么内联而不是依赖外部工具库：`state.py` 需要「崩溃不产生空文件」的持久写。这是 30 行
+标准库代码，把它留成外部依赖会让整个包绑死在别人的仓库上。
 实现逐字保留（`fsync` 临时文件后再 `os.replace`），行为不变。
 
 `atomic_append_line` 是给 append-only 操作日志用的：它先拒绝「最后一行已被截断」的文件，
@@ -34,7 +34,7 @@ def atomic_write_bytes(
     """Replace `path` with `data` durably.
 
     Existing permission bits are preserved; `mode` forces them instead, which
-    private state files outside the vault rely on.
+    private state files rely on.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

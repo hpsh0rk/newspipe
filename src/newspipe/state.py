@@ -13,7 +13,7 @@
       receipts/<sha256>.json                回执：同 prompt 版本 + 同输入 → 复用结果
       usage/<date>.json                     当日用量（预算熔断）
 
-所有写入都走 `scripts/vault_lib/fsutil` 的原子写（共享原语，不另起一份）。
+所有写入都走 `_atomic.py` 的原子写（不另起一份）。
 """
 from __future__ import annotations
 

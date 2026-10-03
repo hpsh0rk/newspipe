@@ -276,7 +276,7 @@ INBOUND_MODES = ("ws", "http", "none")
 class ServiceCfg:
     """独立运行配置（`service.yaml`）。**文件缺失时全部取默认值 = 与阶段 1 行为完全一致**。
 
-    默认 `channel=feishu_lark_cli`、`inbound.mode=none`，所以 Vault 里那份配置一行不用改。
+    默认 `channel=feishu_direct`、`inbound.mode=none`，所以只跑单次命令的用法一行配置都不用改。
     """
 
     channel: str = "feishu_lark_cli"
