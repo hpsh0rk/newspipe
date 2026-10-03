@@ -18,6 +18,7 @@ from typing import Any
 
 import yaml  # noqa: E402
 
+from newspipe import hooks as hooks_lib
 from newspipe.errors import ConfigError  # noqa: E402
 
 def data_root() -> Path:
@@ -331,6 +332,9 @@ class Config:
     sources: dict[str, SourceConfig]
     models: dict[str, Any] = field(default_factory=dict)
     service: ServiceCfg = field(default_factory=ServiceCfg)
+    #: 第三方卡片 hook（`hooks.yaml`）。缺失 = 空集合 = 行为与没有 hook 时逐字节一致。
+    #: `hooks.problems` 里是被跳过的声明（doctor 会报出来，不静默）。
+    hooks: hooks_lib.HookSet = field(default_factory=hooks_lib.HookSet)
 
     def enabled_sources(self) -> list[SourceConfig]:
         return [s for s in self.sources.values() if s.enabled]
@@ -380,15 +384,21 @@ def _parse_sources(raw: Any, *, news_dir: Path) -> dict[str, SourceConfig]:
     return out
 
 
-def load(news_dir: Path | None = None) -> Config:
-    """读 + 校验配置。任何问题都抛 ConfigError（含可执行的修法提示）。"""
+def load(news_dir: Path | None = None, *, sources_text: str | None = None,
+         hooks_text: str | None = None) -> Config:
+    """读 + 校验配置。任何问题都抛 ConfigError（含可执行的修法提示）。
+
+    `sources_text` / `hooks_text` 是**校验用覆盖**：编辑命令把候选文本喂进来先跑一遍真校验，
+    通过了才落盘——「先验证再写」比「写完发现坏了」便宜得多。
+    """
     news_dir = Path(news_dir or default_news_dir())
     sources_path = news_dir / "sources.yaml"
     models_path = news_dir / "models.yaml"
-    if not sources_path.is_file():
+    if sources_text is None and not sources_path.is_file():
         raise ConfigError(f"缺少 {sources_path}")
     try:
-        raw = yaml.safe_load(sources_path.read_text(encoding="utf-8")) or {}
+        raw = (yaml.safe_load(sources_text) if sources_text is not None
+               else yaml.safe_load(sources_path.read_text(encoding="utf-8"))) or {}
     except yaml.YAMLError as exc:
         raise ConfigError(f"{sources_path} 解析失败：{exc}") from exc
     if not isinstance(raw, dict):
@@ -419,7 +429,8 @@ def load(news_dir: Path | None = None) -> Config:
             raise ConfigError(f"{models_path}: 顶层需要映射")
 
     return Config(chat=chat, slots=slots, sources=sources, models=models,
-                  service=load_service(news_dir))
+                  service=load_service(news_dir),
+                  hooks=hooks_lib.load_from(news_dir / "hooks.yaml", text=hooks_text))
 
 
 def summarize(cfg: Config) -> list[dict[str, Any]]:

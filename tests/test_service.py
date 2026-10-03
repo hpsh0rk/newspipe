@@ -240,6 +240,60 @@ class RunForeverTests(unittest.TestCase):
             self.assertEqual(waits[0], 300.0)
 
 
+    def test_config_is_reloaded_every_round(self) -> None:
+        """改了配置不必重启进程（原缺口：只在启动读一次，改了不生效且**不报错**）。
+
+        用「下一轮等待时间」当观测量：tick 从 300 变 120 只能来自重载后的新配置。
+        """
+        with TemporaryDirectory() as tmp:
+            news_dir = Path(tmp)
+            first = _cfg()
+            second = _cfg(service=config.ServiceCfg(schedule={"tick_seconds": 120}))
+            waits: list[float] = []
+            calls = {"n": 0}
+
+            def reloader() -> config.Config:
+                calls["n"] += 1
+                return second if calls["n"] > 1 else first
+
+            def fake_wait(seconds: float) -> bool:
+                waits.append(seconds)
+                return len(waits) >= 2
+
+            with mock.patch.object(pipeline, "run_slot", return_value=[]), \
+                 mock.patch.object(config.Config, "poll_sources", return_value=[]):
+                code = service.run_forever(first, state.Store(news_dir), news_dir=news_dir,
+                                           dry=True, with_inbound=False, logger=lambda _m: None,
+                                           wait_fn=fake_wait, reload_fn=reloader,
+                                           now_fn=lambda: datetime(2026, 10, 3, 10, 0))
+            self.assertEqual(code, 0)
+            self.assertEqual(waits, [300.0, 120.0])
+
+    def test_broken_config_keeps_the_previous_one_and_complains(self) -> None:
+        with TemporaryDirectory() as tmp:
+            news_dir = Path(tmp)
+            logs: list[str] = []
+            calls = {"n": 0}
+
+            def reloader() -> config.Config:
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return None
+                raise ConfigError("sources.yaml 坏了")
+
+            def fake_wait(_seconds: float) -> bool:
+                return calls["n"] >= 2
+
+            with mock.patch.object(pipeline, "run_slot", return_value=[]), \
+                 mock.patch.object(config.Config, "poll_sources", return_value=[]):
+                code = service.run_forever(_cfg(), state.Store(news_dir), news_dir=news_dir,
+                                           dry=True, with_inbound=False, logger=logs.append,
+                                           wait_fn=fake_wait, reload_fn=reloader,
+                                           now_fn=lambda: datetime(2026, 10, 3, 10, 0))
+            self.assertEqual(code, 0)                       # 沿用上一份配置继续跑
+            self.assertTrue(any("重载失败" in line for line in logs), logs)
+
+
 class ServiceConfigTests(unittest.TestCase):
     def _write(self, tmp: str, body: str) -> Path:
         path = Path(tmp) / "service.yaml"

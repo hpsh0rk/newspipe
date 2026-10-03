@@ -94,6 +94,44 @@ tail -f ~/Library/Logs/newspipe.log
 2. **飞书应用的卡片回调必须指向「长连接」模式**（`FEISHU_CONNECTION_MODE=websocket`）。
    `http` 模式需要公网可达地址 + 事件订阅回调 URL + `encrypt_key`（签名校验与 AES 解密）。
 
+## 给 Agent 的 CLI（防腐层）
+
+Hermes **不直接改这个仓库的文件**，只通过 CLI 说话；CLI 只通过**结果对象**回话。
+Agent 的第一个动作永远是：
+
+```bash
+newspipe api describe --json     # 权威契约：命令、参数、退出码、示例
+newspipe doctor --json           # 自检：配置 / hooks / 凭据 / 元素预算 / 事件积压
+```
+
+常用：
+
+```bash
+newspipe status --json                                    # 运行态（各源心跳、AI 用量与降级原因）
+newspipe source list --json                               # 信源 + 文件 hash（乐观并发用）
+newspipe source set <name> --from-json - --dry-run --json # 演练，不落盘
+newspipe hooks add --from-json '{"id":"hermes.wiki","label":"⭐ 入库",
+    "action":"hermes.wiki","handler":"~/bin/news_hook_wiki.sh"}' --json
+newspipe events list --unconsumed --json                  # 投递结果/点击/降级/失败
+newspipe queue list --json                                # ⭐ 待入库（人确认后才 ack）
+newspipe queue ack <event_id> --note wiki/ai/x.md --by hermes --json
+```
+
+**硬规则**
+
+1. 任何命令都输出**一个**结构化结果：`ok` / `command` / `changed` / `data` / `error` /
+   `warnings` / `next`。未捕获异常变成 `E_INTERNAL`，**不吐堆栈**——agent 要能据此决断。
+2. 退出码：`0` 成功 / `1` 运行时故障 / `2` 用法或配置错 / `3` 网络或投递错 / `4` 校验失败。
+3. 写配置**只能**走 `source set|enable|disable|remove` 与 `hooks add|remove`：先校验后落盘
+   （候选配置真的跑一遍 `config.load`），支持 `--dry-run`、`--base-hash`。
+   **直接编辑 `sources.yaml` / `hooks.yaml` 被禁止**——校验会拦下静默失效的配置。
+4. 写入是**文本级块编辑**：被替换的块内注释会丢，**块外逐字节不动**（`source enable/disable`
+   只改一行）。`--dry-run` 恒不落盘。
+5. `⭐ 收藏` 只进 `state/events/` 队列，**不直接入库**——人确认后才 `queue ack`。
+6. 旧 flag 风格（`--slot am` / `--card '<json>'` / `--status` / `--serve`）保留给 4 个 cron
+   wrapper 与插件薄壳，行为不变；它们**成功时 stdout 为空**（no_agent cron 任务把非空 stdout
+   当告警投递给用户）。子命令则一律输出结果对象——两种受众，两套约定，别混。
+
 ## 文档索引
 
 | 文档 | 内容 | 来源 |

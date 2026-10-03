@@ -60,6 +60,25 @@ def _tiny_button(content: str, action: str, tip: str, batch: dict, item: dict) -
     }
 
 
+def _hook_button(hook: Any, batch: dict, item: dict) -> dict:
+    """第三方 hook 的按钮。label 来自 `hooks.yaml`，action 带命名空间（不会撞核心动作）。
+
+    样式刻意与核心按钮不同（`default` 而不是 `text`）——用户一眼能看出这是"外挂"按钮。
+    """
+    return {
+        "tag": "button", "text": {"tag": "plain_text", "content": str(hook.label)[:20]},
+        "type": "default", "size": "tiny",
+        "hover_tips": {"tag": "plain_text", "content": f"第三方：{hook.id}"},
+        "behaviors": [{"type": "callback", "value": _value(batch, item, hook.action)}],
+    }
+
+
+def _hook_buttons(hook_set: Any, scope: str, batch: dict, item: dict) -> list[dict]:
+    if not hook_set:
+        return []
+    return [_hook_button(hook, batch, item) for hook in hook_set.buttons(scope)]
+
+
 def _link_button(content: str, item: dict, *, kind: str = "primary", size: str = "small") -> dict:
     return {
         "tag": "button", "text": {"tag": "plain_text", "content": content},
@@ -69,7 +88,7 @@ def _link_button(content: str, item: dict, *, kind: str = "primary", size: str =
     }
 
 
-def _row(batch: dict, item: dict) -> dict:
+def _row(batch: dict, item: dict, hook_set: Any = None) -> dict:
     badge = BADGE.get(str(item.get("status") or "unread"), "")
     title = display_title(item) or "（无标题）"
     if item.get("status") not in (None, "unread"):
@@ -85,6 +104,9 @@ def _row(batch: dict, item: dict) -> dict:
         })
     buttons.append(_tiny_button("⭐", "wiki", "存进 wiki 知识库", batch, item))
     buttons.append(_tiny_button("🚫", "dismiss", "不感兴趣（降权该来源/话题）", batch, item))
+    # 第三方 hook：list 作用域的按钮**每行**都会出现，所以它直接吃元素预算（×行数）。
+    # 超限由 assert_within_limit 在发卡前拦下；`newspipe doctor` 会预先算出剩余预算。
+    buttons.extend(_hook_buttons(hook_set, "list", batch, item))
     return {
         "tag": "interactive_container",
         "element_id": f"row_{item.get('id')}",
@@ -106,7 +128,7 @@ def _row(batch: dict, item: dict) -> dict:
 SLOT_LABEL = {"am": "早间", "noon": "午间", "pm": "晚间", "alert": "实时", "manual": "手动"}
 
 
-def list_card(batch: dict) -> dict:
+def list_card(batch: dict, hook_set: Any = None) -> dict:
     items = batch.get("items") or []
     done = sum(1 for i in items if i.get("status") not in (None, "unread"))
     total = len(items)
@@ -132,11 +154,11 @@ def list_card(batch: dict) -> dict:
         },
         "body": {"direction": "vertical", "padding": "12px 12px 16px 12px",
                  "vertical_spacing": "2px",
-                 "elements": [_row(batch, i) for i in items]},
+                 "elements": [_row(batch, i, hook_set) for i in items]},
     }
 
 
-def detail_card(batch: dict, item: dict) -> dict:
+def detail_card(batch: dict, item: dict, hook_set: Any = None) -> dict:
     title = display_title(item) or "（无标题）"
     summary = display_summary(item)
     body_zh = str(item.get("body_zh") or "").strip()
@@ -171,6 +193,8 @@ def detail_card(batch: dict, item: dict) -> dict:
         buttons.append(_link_button("🔗 查看原文", item))
     buttons.append(_tiny_button("⭐ 入库", "wiki", "存进 wiki 知识库", batch, item))
     buttons.append(_tiny_button("🚫 不感兴趣", "dismiss", "降权该来源/话题", batch, item))
+    # 第三方 hook：详情页按钮（推荐放这里——只有一条条目，不吃 ×行数 的预算）
+    buttons.extend(_hook_buttons(hook_set, "detail", batch, item))
     buttons.append(_tiny_button("← 返回列表", "back_to_list", "回到资讯列表页", batch, item))
     elements.append({"tag": "column_set", "flex_mode": "flow",
                      "columns": [{"tag": "column", "width": "auto", "elements": [b]}
@@ -190,14 +214,29 @@ def detail_card(batch: dict, item: dict) -> dict:
     }
 
 
-def render(batch: dict) -> dict:
-    """按批次 state 的 view 字段渲染当前页。"""
+def render(batch: dict, hook_set: Any = None) -> dict:
+    """按批次 state 的 view 字段渲染当前页。
+
+    `hook_set` 决定第三方按钮出现在哪些页（`scope: detail` / `list`）。默认 None = 与
+    没有 hook 时逐字节一致——这是"不加 hook 的部署行为不变"的保证。
+    """
     view = batch.get("view") or "list"
     if isinstance(view, dict) and view.get("item"):
         item = next((i for i in (batch.get("items") or []) if i.get("id") == view["item"]), None)
         if item is not None:
-            return detail_card(batch, item)
-    return list_card(batch)
+            return detail_card(batch, item, hook_set)
+    return list_card(batch, hook_set)
+
+
+def projected_elements(n_items: int, hook_set: Any = None) -> dict[str, int]:
+    """给 `doctor` 用：按当前配置算 N 条时的列表页元素数（超限前就该知道）。"""
+    batch = {"digest": "2026-01-01", "slot": "am", "source": "probe", "batch": "probe",
+             "view": "list",
+             "items": [{"id": f"p{i:02d}", "title": f"标题 {i}", "url": "https://example.com",
+                        "source": "probe", "status": "unread"} for i in range(n_items)]}
+    card = list_card(batch, hook_set)
+    return {"items": n_items, "elements": count_elements(card), "limit": CARD_ELEMENT_LIMIT,
+            "headroom": CARD_ELEMENT_LIMIT - count_elements(card)}
 
 
 def assert_within_limit(card: dict, *, what: str) -> int:

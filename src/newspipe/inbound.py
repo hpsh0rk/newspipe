@@ -28,7 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 
-from newspipe import credentials, interaction
+from newspipe import credentials, hooks as hooks_mod, interaction
 from newspipe.errors import InboundError
 
 # 飞书卡片动作事件类型（v2 schema）
@@ -118,8 +118,24 @@ def extract_action(event: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _resolve_hooks(hook_set: Any) -> Any:
+    """允许传 `HookSet` 或 `() -> HookSet`。
+
+    常驻服务传 lambda（读的是**当前**配置）⇒ 热加载的 hooks 立刻对点击生效，
+    不必重启进程。解析失败按「没有 hook」处理：核心按钮必须照常工作。
+    """
+    if hook_set is None or isinstance(hook_set, hooks_mod.HookSet):
+        return hook_set
+    if callable(hook_set):
+        try:
+            return hook_set()
+        except Exception:                                # noqa: BLE001
+            return None
+    return hook_set
+
+
 def dispatch(event: dict[str, Any], *, news_dir: Path | None = None,
-             staging_path: Path | None = None) -> dict[str, Any] | None:
+             hook_set: Any = None) -> dict[str, Any] | None:
     """事件 → 响应体。返回 None 表示「不是我们的事件」，调用方应静默忽略。
 
     - URL 校验（`url_verification`）→ 回 challenge；
@@ -135,13 +151,13 @@ def dispatch(event: dict[str, Any], *, news_dir: Path | None = None,
     if value is None:
         return None
     message = interaction.handle_json(json.dumps(value, ensure_ascii=False),
-                                     news_dir=news_dir, staging_path=staging_path)
+                                     news_dir=news_dir, hook_set=_resolve_hooks(hook_set))
     return {"toast": {"type": "info", "content": message}} if message else {}
 
 
 # --------------------------------------------------------------------- HTTP
 def _make_handler(*, path: str, creds: credentials.FeishuCreds, news_dir: Path | None,
-                  staging_path: Path | None, logger: Callable[[str], None]) -> type:
+                  hook_set: Any, logger: Callable[[str], None]) -> type:
     class Handler(BaseHTTPRequestHandler):
         server_version = "newspipe"
 
@@ -181,7 +197,7 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds, news_dir: Path |
                 self._send(400, {"error": "bad request"})
                 return
             try:
-                result = dispatch(payload, news_dir=news_dir, staging_path=staging_path)
+                result = dispatch(payload, news_dir=news_dir, hook_set=hook_set)
             except Exception as exc:                       # 回调绝不能让进程崩
                 logger(f"入站：处理失败（{type(exc).__name__}: {exc}）")
                 self._send(500, {"error": "handler failed"})
@@ -198,7 +214,7 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds, news_dir: Path |
 
 
 def start_http(*, service_cfg: dict[str, Any], creds: credentials.FeishuCreds,
-               news_dir: Path | None = None, staging_path: Path | None = None,
+               news_dir: Path | None = None, hook_set: Any = None,
                logger: Callable[[str], None] = print) -> tuple[ThreadingHTTPServer, str]:
     """起 HTTP 回调服务器（返回 server 与路径；调用方负责 serve_forever 线程）。"""
     http_cfg = dict(service_cfg.get("http") or {})
@@ -206,7 +222,7 @@ def start_http(*, service_cfg: dict[str, Any], creds: credentials.FeishuCreds,
     port = int(http_cfg.get("port") or 8787)
     path = str(http_cfg.get("path") or "/feishu/events")
     handler = _make_handler(path=path, creds=creds, news_dir=news_dir,
-                            staging_path=staging_path, logger=logger)
+                            hook_set=hook_set, logger=logger)
     server = ThreadingHTTPServer((host, port), handler)
     return server, path
 
@@ -234,7 +250,7 @@ def load_sdk() -> _Sdk:
 
 
 def make_action_handler(*, sdk: _Sdk, news_dir: Path | None = None,
-                        staging_path: Path | None = None,
+                        hook_set: Any = None,
                         logger: Callable[[str], None] = print,
                         state: dict[str, Any] | None = None) -> Callable[[Any], Any]:
     """把 SDK 的 `P2CardActionTrigger` 转成我们的 payload 并 dispatch。
@@ -254,7 +270,7 @@ def make_action_handler(*, sdk: _Sdk, news_dir: Path | None = None,
                 return sdk.response_cls()
             result = dispatch({"header": {"event_type": CARD_ACTION_EVENT},
                                "event": {"action": {"value": value}}},
-                              news_dir=news_dir, staging_path=staging_path)
+                              news_dir=news_dir, hook_set=hook_set)
             if result is None:
                 counters["ignored"] = counters.get("ignored", 0) + 1
                 return sdk.response_cls()
@@ -273,7 +289,7 @@ def make_action_handler(*, sdk: _Sdk, news_dir: Path | None = None,
 
 
 def run_ws(creds: credentials.FeishuCreds, *, news_dir: Path | None = None,
-           staging_path: Path | None = None, logger: Callable[[str], None] = print,
+           hook_set: Any = None, logger: Callable[[str], None] = print,
            sdk: _Sdk | None = None, client: Any | None = None,
            state: dict[str, Any] | None = None,
            log_level: str | None = None) -> Any:
@@ -283,7 +299,7 @@ def run_ws(creds: credentials.FeishuCreds, *, news_dir: Path | None = None,
     `NEWSPIPE_SDK_LOG=debug` 打开 ping/pong 与消息类型（含事件体，仅本地调试用）。
     """
     sdk = sdk or load_sdk()
-    on_action = make_action_handler(sdk=sdk, news_dir=news_dir, staging_path=staging_path,
+    on_action = make_action_handler(sdk=sdk, news_dir=news_dir, hook_set=hook_set,
                                     logger=logger, state=state)
     if client is None:
         wanted = (log_level or os.environ.get("NEWSPIPE_SDK_LOG") or "info").strip().lower()
@@ -342,7 +358,7 @@ class InboundHandle:
 
 
 def start_inbound(*, mode: str, service_cfg: dict[str, Any], creds: credentials.FeishuCreds,
-                  news_dir: Path | None = None, staging_path: Path | None = None,
+                  news_dir: Path | None = None, hook_set: Any = None,
                   logger: Callable[[str], None] = print, sdk: _Sdk | None = None,
                   client: Any | None = None) -> InboundHandle:
     """按模式起入站（daemon 线程），返回句柄。`mode=none` 直接返回空句柄。"""
@@ -351,7 +367,7 @@ def start_inbound(*, mode: str, service_cfg: dict[str, Any], creds: credentials.
     state: dict[str, Any] = {}
     if mode == "http":
         server, path = start_http(service_cfg=service_cfg, creds=creds, news_dir=news_dir,
-                                  staging_path=staging_path, logger=logger)
+                                  hook_set=hook_set, logger=logger)
         thread = threading.Thread(target=server.serve_forever, name="newspipe-inbound-http",
                                   daemon=True)
         thread.start()
@@ -362,7 +378,7 @@ def start_inbound(*, mode: str, service_cfg: dict[str, Any], creds: credentials.
 
         def _run() -> None:
             try:
-                holder["client"] = run_ws(creds, news_dir=news_dir, staging_path=staging_path,
+                holder["client"] = run_ws(creds, news_dir=news_dir, hook_set=hook_set,
                                           logger=logger, sdk=sdk, client=client, state=state)
             except Exception as exc:                       # 连接失败要留痕，不许静默
                 holder["error"] = f"{type(exc).__name__}: {exc}"

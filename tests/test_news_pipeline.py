@@ -37,6 +37,7 @@ from newspipe import (  # noqa: E402
     config,
     delivery,
     enrich,
+    events,
     filter as filter_mod,
     interaction,
     llm,
@@ -880,7 +881,6 @@ class InteractionTests(unittest.TestCase):
                       "items": items, "card_id": "c1", "message_id": "om1", "seq": 1,
                       "view": "list", "form": "card"}
         self.store.write_batch(self.batch)
-        self.staging = self.news / "staging.md"
         self.updated: list[tuple[str, int]] = []
         self._patch = patch.object(channel, "update_entity",
                                    lambda cid, seq, card: (self.updated.append((cid, seq)) or True))
@@ -896,9 +896,8 @@ class InteractionTests(unittest.TestCase):
                 "news_action": action}
 
     def _handle(self, action: str, item_id: str = "n01") -> str:
-        """始终注入 staging_path：单测绝不写真实的 _staging/news-wiki-queue.md。"""
-        return interaction.handle(self._payload(action, item_id), news_dir=self.news,
-                                  staging_path=self.staging)
+        """单测只写临时目录：收藏改记事件，不再写宿主的待办队列。"""
+        return interaction.handle(self._payload(action, item_id), news_dir=self.news)
 
     def test_open_detail_sets_view_marks_read_and_updates_entity(self) -> None:
         msg = self._handle("open_detail")
@@ -918,11 +917,17 @@ class InteractionTests(unittest.TestCase):
         self.assertEqual(batch["view"], "list")
         self.assertEqual(batch["seq"], 3)                 # sequence 严格递增
 
-    def test_wiki_writes_staging_queue(self) -> None:
-        self._handle("wiki")
+    def test_wiki_records_favorite_event_not_host_file(self) -> None:
+        """⭐ 收藏 → 项目自己的事件队列（不再写宿主的 _staging/news-wiki-queue.md）。"""
+        msg = self._handle("wiki")
         batch = self.store.read_batch("2026-10-03", "s", "am")
         self.assertEqual(batch["items"][0]["status"], "wiki")
-        self.assertIn("Title 1", self.staging.read_text(encoding="utf-8"))
+        self.assertIn("待入库队列", msg)          # 给用户明确的回执
+        pending = events.queue(self.news)
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["type"], "favorite")
+        self.assertEqual(pending[0]["payload"]["item_id"], "n01")
+        self.assertFalse((self.news.parent / "_staging").exists(), "不许写宿主目录")
 
     def test_dismiss_writes_preferences(self) -> None:
         self._handle("dismiss", "n02")
@@ -931,18 +936,15 @@ class InteractionTests(unittest.TestCase):
         self.assertIn("Title 2", (self.news / "preferences.md").read_text(encoding="utf-8"))
 
     def test_unknown_domain_or_action_is_silent(self) -> None:
-        self.assertEqual(interaction.handle({"domain": "other"}, news_dir=self.news,
-                                            staging_path=self.staging), "")
+        self.assertEqual(interaction.handle({"domain": "other"}, news_dir=self.news), "")
         self.assertEqual(self._handle("nope"), "")
-        self.assertEqual(interaction.handle_json("not json", news_dir=self.news,
-                                                 staging_path=self.staging), "")
+        self.assertEqual(interaction.handle_json("not json", news_dir=self.news), "")
 
     def test_missing_batch_is_silent(self) -> None:
         payload = self._payload("open_detail")
         payload["batch"] = "state/batches/2026-10-03/absent.json"
         payload["digest"] = "1999-01-01"
-        self.assertEqual(interaction.handle(payload, news_dir=self.news,
-                                            staging_path=self.staging), "")
+        self.assertEqual(interaction.handle(payload, news_dir=self.news), "")
 
     def test_entity_update_failure_still_records_state(self) -> None:
         with patch.object(channel, "update_entity", side_effect=RuntimeError("300317")):

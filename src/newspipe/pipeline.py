@@ -22,9 +22,23 @@ from datetime import datetime
 from typing import Any
 
 from newspipe import channel, dedup, delivery, enrich as enrich_mod, filter as filter_mod
-from newspipe import render, scheduler, state
+from newspipe import events, render, scheduler, state
 from newspipe.errors import ConfigError, DeliveryError
 from newspipe.state import now_iso, today
+
+
+def _record_event(store: state.Store, event_type: str, *, payload: dict[str, Any],
+                  source: str, slot: str, digest: str, now: datetime | None = None) -> None:
+    """记一条事件。**事件写失败不能让投递失败**（卡已经发出去了），但也不许静默。
+
+    契约里 `--dry` 零副作用：调用方负责不要在没有副作用时调它。
+    """
+    try:
+        events.append(store.news_dir, event_type, payload=payload, source=source,
+                      slot=slot, digest=digest, ts=now)
+    except Exception as exc:                             # noqa: BLE001
+        print(f"⚠️ 事件写入失败（{event_type} {source}-{slot}）："
+              f"{type(exc).__name__}: {exc}"[:300])
 
 ID_PREFIX = {"append_card": "a", "card": "n", "state_only": "s"}
 # 这些状态不推进游标：条目还没被消费（下轮要重取），推进了就等于丢掉
@@ -266,13 +280,16 @@ def _process(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slot: str,
         return run
 
     try:
-        card = render.render(batch)
+        card = render.render(batch, getattr(cfg, "hooks", None))
         render.assert_within_limit(card, what=f"{scfg.name}-{slot}")
     except ValueError as exc:
         # 元素超限（飞书 11310）：整批顺延，不记 pushed —— 这正是 v1 静默失败的那个坑
         queued = _queue(store, scfg.name, batch["items"])
         run.status, run.note, run.queued = "overflow", str(exc)[:200], queued
         store.heartbeat(scfg.name, status="overflow", digest=digest, note=run.note, queued=queued)
+        _record_event(store, "failed", payload={"status": "overflow", "error": run.note,
+                                                "queued": queued},
+                      source=scfg.name, slot=slot, digest=digest, now=now)
         return run
 
     try:
@@ -292,6 +309,9 @@ def _process(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slot: str,
         queued = _queue(store, scfg.name, batch["items"])
         run.status, run.note, run.queued = "send_failed", f"{type(exc).__name__}: {exc}"[:200], queued
         store.heartbeat(scfg.name, status="send_failed", digest=digest, note=run.note, queued=queued)
+        _record_event(store, "failed", payload={"status": "send_failed", "error": run.note,
+                                                "queued": queued},
+                      source=scfg.name, slot=slot, digest=digest, now=now)
         return run
 
     store.write_batch(batch)
@@ -300,6 +320,16 @@ def _process(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slot: str,
     run.queued = _queue(store, scfg.name, [*plan.overflow_items, *excess])
     store.note_card(digest)
     run.status = "ok"
+    _record_event(store, "delivered",
+                  payload={"card": run.card, "card_id": batch.get("card_id"),
+                           "message_id": batch.get("message_id"), "chat": cfg.chat,
+                           "items": len(batch.get("items") or []), "queued": run.queued,
+                           "title": (batch.get("card") or {}).get("title") or batch.get("title")},
+                  source=scfg.name, slot=slot, digest=digest, now=now)
+    degraded = int((run.enrich or {}).get("degraded") or 0)
+    if degraded:
+        _record_event(store, "degraded", payload={"count": degraded, "enrich": run.enrich},
+                      source=scfg.name, slot=slot, digest=digest, now=now)
     store.heartbeat(scfg.name, status="ok", digest=digest, fetched=run.fetched, kept=run.kept,
                     new=run.new, planned=run.planned, queued=run.queued, card=run.card,
                     card_id=batch.get("card_id"), enrich=run.enrich)

@@ -105,7 +105,6 @@ class DispatchTests(unittest.TestCase):
         self.news_dir = Path(self._tmp.name)
         self.store = state.Store(self.news_dir)
         self.store.write_batch(_batch())
-        self.staging = self.news_dir / "_staging" / "queue.md"
         self.channel = _FakeChannel()
         backends.set_channel(self.channel)
 
@@ -123,7 +122,7 @@ class DispatchTests(unittest.TestCase):
     def test_open_detail_really_updates_batch(self) -> None:
         """不 mock 业务：真读真写临时 news_dir 里的批次。"""
         result = inbound.dispatch(self._event("open_detail"), news_dir=self.news_dir,
-                                  staging_path=self.staging)
+)
         self.assertEqual(result, {})
         _path, batch = self.store.load_batch_by_rel(f"state/batches/{DIGEST}/s-am.json")
         self.assertEqual(batch["view"], {"item": "n01"})
@@ -136,9 +135,9 @@ class DispatchTests(unittest.TestCase):
 
     def test_back_to_list_after_detail(self) -> None:
         inbound.dispatch(self._event("open_detail"), news_dir=self.news_dir,
-                         staging_path=self.staging)
+                         )
         inbound.dispatch(self._event("back_to_list"), news_dir=self.news_dir,
-                         staging_path=self.staging)
+                         )
         _path, batch = self.store.load_batch_by_rel(f"state/batches/{DIGEST}/s-am.json")
         self.assertEqual(batch["view"], "list")
 
@@ -147,10 +146,12 @@ class DispatchTests(unittest.TestCase):
                                             "event": {"message": {}}},
                                            news_dir=self.news_dir))
 
-    def test_wiki_action_writes_staging(self) -> None:
-        inbound.dispatch(self._event("wiki"), news_dir=self.news_dir, staging_path=self.staging)
-        self.assertTrue(self.staging.is_file())
-        self.assertIn("Title 1", self.staging.read_text(encoding="utf-8"))
+    def test_wiki_action_records_favorite_event(self) -> None:
+        from newspipe import events
+
+        inbound.dispatch(self._event("wiki"), news_dir=self.news_dir)
+        pending = events.queue(self.news_dir)
+        self.assertEqual([e["payload"]["item_id"] for e in pending], ["n01"])
 
 
 class SignatureTests(unittest.TestCase):
@@ -212,7 +213,7 @@ class HttpServerTests(unittest.TestCase):
         self.server, self.path = inbound.start_http(
             service_cfg={"http": {"host": "127.0.0.1", "port": 0, "path": "/feishu/events"}},
             creds=_creds(), news_dir=self.news_dir,
-            staging_path=self.news_dir / "queue.md", logger=lambda _m: None)
+            logger=lambda _m: None)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
@@ -287,7 +288,7 @@ class WsHandlerTests(unittest.TestCase):
         self.state: dict = {}
         self.handler = inbound.make_action_handler(
             sdk=self._Sdk(), news_dir=self.news_dir,
-            staging_path=self.news_dir / "queue.md", logger=lambda _m: None, state=self.state)
+            logger=lambda _m: None, state=self.state)
 
     def tearDown(self) -> None:
         backends.set_channel(None)

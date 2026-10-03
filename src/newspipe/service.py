@@ -183,7 +183,7 @@ def make_logger(cfg: config.Config) -> Callable[[str], None]:
     return log
 
 
-def start_inbound_for(cfg: config.Config, *, news_dir: Path, staging_path: Path | None,
+def start_inbound_for(cfg: config.Config, *, news_dir: Path, hook_set: Any,
                       logger: Callable[[str], None]) -> inbound_mod.InboundHandle:
     """按 `service.yaml: inbound.mode` 起入站。缺凭据/缺依赖都抛错（不静默降级）。"""
     mode = cfg.service.inbound_mode
@@ -193,16 +193,20 @@ def start_inbound_for(cfg: config.Config, *, news_dir: Path, staging_path: Path 
 
     creds = credentials.resolve_feishu(cfg.service.feishu, news_dir=news_dir)
     return inbound_mod.start_inbound(mode=mode, service_cfg=cfg.service.inbound, creds=creds,
-                                     news_dir=news_dir, staging_path=staging_path, logger=logger)
+                                     news_dir=news_dir, hook_set=hook_set, logger=logger)
 
 
 def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None = None,
-                staging_path: Path | None = None, dry: bool = False, once: bool = False,
+                dry: bool = False, once: bool = False,
                 with_inbound: bool = True, logger: Callable[[str], None] | None = None,
                 now_fn: Callable[[], datetime] = datetime.now,
                 wait_fn: Callable[[float], bool] | None = None,
-                stop_event: threading.Event | None = None) -> int:
+                stop_event: threading.Event | None = None,
+                reload_fn: Callable[[], config.Config] | None = None) -> int:
     """常驻主循环。`once=True` 跑一轮就返回（给系统 cron / 测试用）。
+
+    **每轮重新读配置**（`sources.yaml` / `service.yaml` / `hooks.yaml`）：Hermes 或用户改完
+    配置不必重启进程。改坏了也不会静默——重载失败时沿用上一份并**吵一声**。
 
     等待用 `stop_event.wait()`（可被信号打断），`wait_fn` 可注入以便测试不真等：
     返回 True 表示「要求停止」。
@@ -211,27 +215,46 @@ def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None
     logger = logger or make_logger(cfg)
     stop_event = stop_event or threading.Event()
     waiter = wait_fn or stop_event.wait
-    tick = cfg.service.tick_seconds
+    reloader = reload_fn or (lambda: config.load(news_dir))
+    # 入站线程按需读 hooks（lambda 而不是快照）⇒ 热加载的 hooks 立刻对点击生效
+    live: dict[str, config.Config] = {"cfg": cfg}
 
     prepare_channel(cfg, news_dir=news_dir)
+    channel_sig = _channel_sig(cfg)
     handle = inbound_mod.InboundHandle(mode="none")
     if with_inbound and not dry:
         try:
-            handle = start_inbound_for(cfg, news_dir=news_dir, staging_path=staging_path,
-                                       logger=logger)
+            handle = start_inbound_for(cfg, news_dir=news_dir,
+                                       hook_set=lambda: live["cfg"].hooks, logger=logger)
         except (ConfigError, InboundError) as exc:
             # 入站起不来不等于服务不能跑：发卡照旧，但必须吵（否则「点了没反应」又要排查半天）
             logger(f"⚠️ 入站未启动：{type(exc).__name__}: {exc}")
     if handle.mode != "none":
         logger(f"入站已启动：{handle.describe()}")
 
-    logger(f"服务启动：通道={cfg.service.channel} 入站={handle.mode} tick={tick:g}s "
+    logger(f"服务启动：通道={cfg.service.channel} 入站={handle.mode} tick={cfg.service.tick_seconds:g}s "
            f"槽位={{{', '.join(f'{k}:{v}' for k, v in cfg.slots.items())}}}"
            f"{' [dry]' if dry else ''}{' [once]' if once else ''}")
 
     exit_code = 0
     while not stop_event.is_set():
         now = now_fn()
+        try:
+            fresh = reloader()
+        except ConfigError as exc:
+            logger(f"⚠️ 配置重载失败，沿用上一份：{exc}")
+        else:
+            if fresh is not None and fresh is not cfg:
+                cfg = fresh
+                live["cfg"] = cfg
+                if _channel_sig(cfg) != channel_sig:
+                    # 通道/凭据变了才重建（重建会丢掉 tenant_access_token 缓存，所以别每轮都建）
+                    try:
+                        prepare_channel(cfg, news_dir=news_dir)
+                        channel_sig = _channel_sig(cfg)
+                        logger(f"通道已按新配置重建：{cfg.service.channel}")
+                    except (ConfigError, DeliveryError) as exc:
+                        logger(f"⚠️ 新通道配置不可用，沿用上一份：{type(exc).__name__}: {exc}")
         try:
             runs = run_once(cfg, store, now=now, news_dir=news_dir, dry=dry, logger=logger)
             report(runs, logger)
@@ -240,7 +263,7 @@ def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None
             logger(f"⚠️ 本轮失败：{type(exc).__name__}: {exc}")
         if once:
             break
-        wait = compute_wait(cfg, now_fn(), tick)
+        wait = compute_wait(cfg, now_fn(), cfg.service.tick_seconds)
         logger(f"下一轮：{wait:.0f}s 后（{now_fn().isoformat(timespec='seconds')}）")
         if waiter(wait):
             break
@@ -248,6 +271,12 @@ def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None
         handle.stop()
     logger("服务退出")
     return exit_code
+
+
+def _channel_sig(cfg: config.Config) -> tuple[str, tuple[tuple[str, str], ...]]:
+    """通道签名：通道名 + 凭据配置。变了才重建通道实例（保住 token 缓存）。"""
+    return (cfg.service.channel,
+            tuple(sorted((str(k), str(v)) for k, v in (cfg.service.feishu or {}).items())))
 
 
 def describe_service(cfg: config.Config, *, news_dir: Path | None = None) -> dict[str, Any]:
