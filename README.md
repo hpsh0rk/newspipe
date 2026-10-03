@@ -42,6 +42,10 @@ cp examples/news/*.yaml $NEWSPIPE_HOME/info/news/           # 示例配置，改
 .venv/bin/newspipe --status                                 # 运行态 + 模型用量与失败原因
 ```
 
+> 用 `uv` 的话：`uv venv --seed .venv` 后跑 `.venv/bin/pip install -e .`——实测 `uv pip install -e .`
+> **不生成 console script**（包能 import，但 `.venv/bin/newspipe` 不存在）。
+> 任何情况下 `python -m newspipe.cli` 都等价可用。
+
 环境变量：`NEWSPIPE_HOME`（数据根，默认 cwd）、`NEWSPIPE_NEWS_DIR`、`NEWSPIPE_STAGING_QUEUE`、
 `NEWSPIPE_MODEL_BACKEND`（`hermes`|`explicit`）、`NEWSPIPE_CHANNEL`。
 
