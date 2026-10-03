@@ -362,6 +362,13 @@ def _sub_doctor(args: argparse.Namespace, news_dir: Path) -> result.Result:
     data["channel"] = cfg.service.channel
     data["inbound"] = cfg.service.inbound_mode
 
+    # 同一应用第二个长连接 ⇒ 飞书随机投递（普通聊天消息可能被本项目静默丢弃）。
+    # 这条是**警告不是硬失败**：本机没有第二个 client（比如在别的机器上独立跑）时是合法的。
+    conflict = service.shared_app_ws_conflict(cfg, news_dir=news_dir)
+    data["inbound_conflict"] = conflict
+    if conflict:
+        warnings.append(conflict)
+
     # hooks：被跳过的声明必须报出来（否则"按钮没出现"没人知道为什么）
     data["hooks"] = {"count": len(cfg.hooks.hooks),
                      "actions": cfg.hooks.actions(),

@@ -19,12 +19,13 @@ newspipe --serve
 from __future__ import annotations
 
 import json
+import os
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
-from newspipe import backends, config, inbound as inbound_mod, pipeline, state
+from newspipe import backends, config, credentials, inbound as inbound_mod, pipeline, state
 from newspipe._atomic import write_json_atomic
 from newspipe.errors import ConfigError, InboundError, NewsError
 
@@ -196,6 +197,42 @@ def start_inbound_for(cfg: config.Config, *, news_dir: Path, hook_set: Any,
                                      news_dir=news_dir, hook_set=hook_set, logger=logger)
 
 
+def host_dotenv_path() -> Path:
+    """宿主 `.env` 的位置（飞书应用归属的宿主侧真相）。"""
+    return Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes")) / ".env"
+
+
+def shared_app_ws_conflict(cfg: config.Config, *, news_dir: Path | None = None,
+                           host_env: Path | None = None,
+                           dotenv_paths: list[Path] | None = None,
+                           env: dict[str, str] | None = None) -> str | None:
+    """`inbound.mode: ws` 且与宿主用**同一个飞书应用** ⇒ 硬冲突，必须报出来。
+
+    飞书长连接是**集群模式、不支持广播**：同一应用部署多个 client 时，事件只会随机落到其中
+    一个。后果不对称——资讯卡片回调落到哪边都能处理，但**普通聊天消息**只有宿主认识；落到
+    本项目这一侧会被 `extract_action()` 静默丢弃，用户看到的是「机器人不回话」。
+
+    所以「一个机器人」和「一条长连接」是同一件事：一个应用只能有一个 client 持有连接。
+    `mode: http` 不占长连接，没有这个问题（由持有连接的一方转发过来）。
+
+    返回 `None` = 没冲突或无法判定（无法判定时不抢话，交给 doctor 的凭据检查去报）。
+    """
+    if cfg.service.inbound_mode != "ws":
+        return None
+    try:
+        creds = credentials.resolve_feishu(cfg.service.feishu, news_dir=news_dir,
+                                          dotenv_paths=dotenv_paths, env=env)
+    except ConfigError:
+        return None
+    host_app = credentials.read_dotenv(host_env or host_dotenv_path()).get("FEISHU_APP_ID", "")
+    if not host_app or not creds.app_id or host_app != creds.app_id:
+        return None
+    return (f"入站用了长连接（inbound.mode=ws），且 app_id 与宿主网关相同（{creds.app_id}）。"
+            "飞书长连接是集群模式：同一应用的多个 client 只会随机投递，"
+            "普通聊天消息可能落到本项目并被静默丢弃。"
+            "改成 inbound.mode=http（由持有连接的一方转发），或确保本机没有第二个 client。")
+
+
 def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None = None,
                 dry: bool = False, once: bool = False,
                 with_inbound: bool = True, logger: Callable[[str], None] | None = None,
@@ -235,6 +272,10 @@ def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None
     logger(f"服务启动：通道={cfg.service.channel} 入站={handle.mode} tick={cfg.service.tick_seconds:g}s "
            f"槽位={{{', '.join(f'{k}:{v}' for k, v in cfg.slots.items())}}}"
            f"{' [dry]' if dry else ''}{' [once]' if once else ''}")
+    # 同一个应用两个 client ⇒ 飞书随机投递（聊天消息可能被本项目静默吃掉）。启动即吵。
+    conflict = shared_app_ws_conflict(cfg, news_dir=news_dir)
+    if conflict:
+        logger(f"⚠️ {conflict}")
 
     exit_code = 0
     while not stop_event.is_set():

@@ -294,6 +294,57 @@ class RunForeverTests(unittest.TestCase):
             self.assertTrue(any("重载失败" in line for line in logs), logs)
 
 
+class SharedAppWsConflictTests(unittest.TestCase):
+    """「一个机器人」= 「一个应用只能有一个 client 持有长连接」。
+
+    飞书长连接是集群模式、不支持广播：同一应用多个 client 时事件只随机落到一个。
+    这条约束必须有代码守着（doctor 警告 + 服务启动告警），不能只写在文档里。
+    """
+
+    def _env_file(self, tmp: str, app_id: str) -> Path:
+        path = Path(tmp) / ".env"
+        path.write_text(f"FEISHU_APP_ID={app_id}\nFEISHU_APP_SECRET=fake-secret-value\n",
+                        encoding="utf-8")
+        return path
+
+    def _cfg(self, mode: str, app_id: str) -> config.Config:
+        return _cfg(service=config.ServiceCfg(inbound={"mode": mode},
+                                              feishu={"app_id": app_id}))
+
+    def test_same_app_ws_is_reported(self) -> None:
+        with TemporaryDirectory() as tmp:
+            env = self._env_file(tmp, "cli_same")
+            msg = service.shared_app_ws_conflict(self._cfg("ws", "cli_same"),
+                                                 dotenv_paths=[env], host_env=env, env={})
+            self.assertIsNotNone(msg)
+            self.assertIn("集群", msg)
+            self.assertIn("静默丢弃", msg)
+            self.assertIn("cli_same", msg)              # app_id 不是密钥，可以出现
+
+    def test_different_app_is_fine(self) -> None:
+        with TemporaryDirectory() as tmp:
+            env = self._env_file(tmp, "cli_host")
+            self.assertIsNone(service.shared_app_ws_conflict(self._cfg("ws", "cli_other"),
+                                                             dotenv_paths=[env], host_env=env,
+                                                             env={}))
+
+    def test_http_and_none_modes_never_conflict(self) -> None:
+        """HTTP 入站不占长连接 ⇒ 天然没有这个问题（这正是推荐它的原因）。"""
+        with TemporaryDirectory() as tmp:
+            env = self._env_file(tmp, "cli_same")
+            for mode in ("http", "none"):
+                self.assertIsNone(service.shared_app_ws_conflict(self._cfg(mode, "cli_same"),
+                                                                 dotenv_paths=[env], host_env=env,
+                                                                 env={}))
+
+    def test_missing_host_env_or_creds_is_silent(self) -> None:
+        with TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "absent.env"
+            self.assertIsNone(service.shared_app_ws_conflict(self._cfg("ws", "cli_same"),
+                                                             dotenv_paths=[missing],
+                                                             host_env=missing, env={}))
+
+
 class ServiceConfigTests(unittest.TestCase):
     def _write(self, tmp: str, body: str) -> Path:
         path = Path(tmp) / "service.yaml"
