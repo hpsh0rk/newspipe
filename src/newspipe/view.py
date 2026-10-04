@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -220,6 +221,98 @@ def history(store: state.Store, *, days: int = HISTORY_DAYS,
             "sources": sorted(set(produced) | set(day_pushed)),
         })
     return out
+
+
+#: 条目浏览的回看天数与硬上限。14 天全量能把页面拉成几 MB，所以先给 7 天、再截断渲染。
+ITEMS_DAYS = 7
+ITEMS_CAP = 2000
+ITEMS_RENDER_CAP = 200
+
+#: 批次详情路由只认这种文件名 —— 防路径穿越（`/` 与「以点开头」都不允许）。
+#: 真正的越界拦截在 `state.Store.load_batch_by_rel()`，这里只是第一道形状校验。
+BATCH_STEM_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,80}$")
+DIGEST_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+#: 条目行里要展示的字段（批次里每条有 13 个键，页面只取这些）。
+ITEM_FIELDS = ("ext_id", "title", "url", "original_url", "source", "summary",
+               "category", "score", "status", "enrich_state")
+
+
+def recent_items(store: state.Store, *, days: int = ITEMS_DAYS, limit: int = ITEMS_CAP,
+                 now: datetime | None = None) -> list[dict[str, Any]]:
+    """近 N 天批次里的**条目**（带批次身份），最新在前。
+
+    为什么不在 `/view` 契约里：那是给宿主/面板的只读契约，形状要稳、也不该背几百条条目。
+    条目面是「我自己的页面要渲染」的数据，跟 `action_snapshot()` 同一类。
+
+    `batch_source` 是配置里的源名（`aihot`），`source` 是条目自己的发布者
+    （`LMSYS：Blog`）—— 两个都叫 source 会串味，所以分开命名。
+    """
+    moment = now or datetime.now()
+    out: list[dict[str, Any]] = []
+    for back in range(days - 1, -1, -1):
+        day = (moment - timedelta(days=back)).strftime("%Y-%m-%d")
+        batch_dir = store.root / "batches" / day
+        if not batch_dir.is_dir():
+            continue
+        for path in sorted(batch_dir.glob("*.json")):
+            batch = _read_json(path)
+            raw = batch.get("items") or []
+            if not isinstance(raw, list):
+                continue
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                row: dict[str, Any] = {
+                    "date": day,
+                    "slot": str(batch.get("slot") or ""),
+                    "batch_source": str(batch.get("source") or path.stem),
+                    "batch_title": str(batch.get("title") or ""),
+                    "batch_file": path.stem,
+                    "has_card": bool(batch.get("card_id")),
+                }
+                for key in ITEM_FIELDS:
+                    row[key] = item.get(key)
+                out.append(row)
+    out.sort(key=lambda r: (str(r.get("date") or ""), str(r.get("slot") or "")), reverse=True)
+    return out[:limit]
+
+
+def filter_items(items: list[dict[str, Any]], *, q: str = "", source: str = "",
+                 status: str = "") -> list[dict[str, Any]]:
+    """页面筛选：关键词（标题/摘要/发布者/分类/批次标题）+ 配置源 + 状态。
+
+    全部在服务端做 —— 这样页面不用 JS，`curl` 也能筛（和「自包含」这条底线一致）。
+    """
+    needle = q.strip().lower()
+    out: list[dict[str, Any]] = []
+    for row in items:
+        if source and str(row.get("batch_source") or "") != source:
+            continue
+        if status and str(row.get("status") or "unread") != status:
+            continue
+        if needle:
+            hay = " ".join(str(row.get(k) or "") for k in
+                           ("title", "summary", "source", "category", "batch_title")).lower()
+            if needle not in hay:
+                continue
+        out.append(row)
+    return out
+
+
+def items_snapshot(news_dir: Path, *, days: int = ITEMS_DAYS,
+                   now: datetime | None = None) -> dict[str, Any]:
+    """「条目」Tab 与驾驶舱「最近入库」的数据面（页面专用）。"""
+    cfg = config.load(news_dir)
+    items = recent_items(state.Store(news_dir), days=days, now=now)
+    return {
+        "days": days,
+        "items": items,
+        "total": len(items),
+        "sources": sorted(cfg.sources),
+        # 状态取值从数据里现取，不硬编码一份清单（有新的就自动出现）
+        "statuses": sorted({str(i.get("status") or "unread") for i in items}),
+    }
 
 
 def pending_items(store: state.Store, source: str, *, limit: int = 12) -> list[dict[str, Any]]:
@@ -480,9 +573,10 @@ def _link(title: str, url: str, *, limit: int = 110) -> str:
     return f'<a href="{html.escape(url)}" target="_blank" rel="noopener">{text}</a>'
 
 
-#: 三个 Tab：服务端路由（可深链、可加书签、无 JS）。`GET /view` 仍是同一进程里的 JSON 契约。
+#: 四个 Tab：服务端路由（可深链、可加书签、无 JS）。`GET /view` 仍是同一进程里的 JSON 契约。
 TABS: tuple[tuple[str, str, str], ...] = (
     ("cockpit", "驾驶舱", "/"),
+    ("items", "条目", "/items"),
     ("config", "配置", "/config"),
     ("ops", "运维", "/ops"),
 )
@@ -607,7 +701,8 @@ def _drawer_html(view: dict[str, Any]) -> str:
 
 
 def as_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
-            flash: dict[str, Any] | None = None, tab: str = "cockpit") -> str:
+            flash: dict[str, Any] | None = None, tab: str = "cockpit",
+            page: dict[str, Any] | None = None) -> str:
     """同一份视图的服务端渲染（`GET /`）：不引前端、不发任何外部请求。
 
     面板（宿主）走 JSON 契约；这一页是给「从服务门户点进来」的场景用的。
@@ -737,6 +832,8 @@ def as_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
     svc = view["service"]
     history_section = _history_html(view)
     drawer_section = _drawer_html(view)
+    # 「最近入库」只放驾驶舱：运维页要的是动作，不是内容浏览。
+    recent_section = _recent_html(page) if tab == "cockpit" else ""
     read_rate = "—" if s["read_rate"] is None else f"{round(s['read_rate'] * 100)}%"
     if on:
         write_note = ("写操作走 <code>POST /api/actions/*</code> → CLI 的同一份 handler；"
@@ -767,6 +864,7 @@ def as_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
   <div class="stat"><b>{view['llm']['degraded']}</b><span>AI 降级</span></div>
 </div>
 {history_section}
+{recent_section}
 {queue_section}
 <h2>信源</h2>
 <table><thead><tr><th>源</th><th>卡片标题</th><th>节奏</th><th>形态/加工</th><th>心跳</th>
@@ -784,9 +882,10 @@ def as_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
 """
 
 
-def cockpit_html(view: dict[str, Any], *, flash: dict[str, Any] | None = None) -> str:
+def cockpit_html(view: dict[str, Any], *, flash: dict[str, Any] | None = None,
+                 page: dict[str, Any] | None = None) -> str:
     """驾驶舱：全局总览，**只读**（没有 actions 就没有任何表单）。"""
-    return as_html(view, actions=None, flash=flash, tab="cockpit")
+    return as_html(view, actions=None, flash=flash, tab="cockpit", page=page)
 
 
 def ops_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
@@ -979,6 +1078,142 @@ def config_html(view: dict[str, Any], *, schema: dict[str, Any], actions: dict[s
     return _page(tab="config", sub_meta=view, svc=svc, body=body,
                  footer_extra="本页的表单由 <code>newspipe config describe --json</code> 生成"
                               "（字段的唯一事实来源），落盘一律经 CLI。")
+
+
+# ------------------------------------------------------------------ 内容层（条目浏览）
+def _item_rows(rows: list[dict[str, Any]], *, show_batch: bool = False,
+               with_summary: bool = True) -> str:
+    """条目表格行。
+
+    标题链 **`original_url` 优先** —— 那才是真实出处；`url` 常是抓取侧的代理页
+    （aihot 那种 `/items/<id>`）。两个都没有就不加链接。
+    """
+    out = []
+    for idx, row in enumerate(rows, 1):
+        title = _link(str(row.get("title") or row.get("ext_id") or "（无标题）"),
+                      str(row.get("original_url") or row.get("url") or ""))
+        meta = [html.escape(str(row[k])) for k in ("source", "category") if row.get(k)]
+        if row.get("score") not in (None, ""):
+            meta.append(f"分 {html.escape(str(row['score']))}")
+        status = str(row.get("status") or "unread")
+        tone = {"read": "ok", "favorite": "warn", "dismissed": "muted"}.get(status, "muted")
+        cells = [f"<td>{idx}</td>", f"<td>{_pill(tone, html.escape(status))}</td>"]
+        if show_batch:
+            date = html.escape(str(row.get("date") or ""))
+            stem = html.escape(str(row.get("batch_file") or ""))
+            label = (f'{date[5:]} {html.escape(str(row.get("batch_source") or ""))}'
+                     f'/{html.escape(str(row.get("slot") or ""))}')
+            cells.append(f'<td><a href="/batch/{date}/{stem}"><code>{label}</code></a></td>')
+        cells.append(f"<td>{title}</td>")
+        cells.append(f'<td class="hint">{" · ".join(meta) or "—"}</td>')
+        if with_summary:
+            cells.append(f'<td class="note">{html.escape(str(row.get("summary") or "")[:180])}</td>')
+        out.append("<tr>" + "".join(cells) + "</tr>")
+    return "".join(out)
+
+
+def _recent_html(page: dict[str, Any] | None) -> str:
+    """驾驶舱的「最近入库」—— 之前整页只有计数，看不到收进来的任何一条标题。"""
+    pg = page or {}
+    rows = pg.get("recent") or []
+    if not rows:
+        return ('<h2>最近入库</h2><p class="empty">近 7 天没有条目落盘。'
+                '（<a href="/items">条目</a> 页可回看更多天、也能筛选）</p>')
+    total = pg.get("recent_total")
+    tail = f"，近 7 天共 {total} 条" if isinstance(total, int) and total > len(rows) else ""
+    return (
+        f'<h2>最近入库 <span class="hint">最新 {len(rows)} 条{tail} · '
+        '全部与筛选在 <a href="/items">条目</a> 页</span></h2>'
+        "<table><thead><tr><th>#</th><th>状态</th><th>标题</th><th>发布者/分类/分</th></tr></thead>"
+        f'<tbody>{_item_rows(rows, with_summary=False)}</tbody></table>')
+
+
+def items_html(view: dict[str, Any], *, page: dict[str, Any] | None = None,
+               flash: dict[str, Any] | None = None) -> str:
+    """「条目」Tab：近 N 天全部条目 + 服务端筛选（无 JS，`curl` 也能筛）。"""
+    pg = page or {}
+    all_rows = pg.get("items") or []
+    q = str(pg.get("q") or "")
+    source = str(pg.get("source") or "")
+    status = str(pg.get("status") or "")
+    days = int(pg.get("days") or ITEMS_DAYS)
+    rows = filter_items(all_rows, q=q, source=source, status=status)
+    shown = rows[:ITEMS_RENDER_CAP]
+
+    def opts(values: list[str], current: str) -> str:
+        return "".join(
+            f'<option value="{html.escape(v)}"{" selected" if v == current else ""}>'
+            f"{html.escape(v)}</option>" for v in values)
+
+    day_opts = "".join(
+        f'<option value="{d}"{" selected" if d == days else ""}>{d} 天</option>' for d in (3, 7, 14))
+    truncation = (f"，只渲染前 {ITEMS_RENDER_CAP} 条（用筛选缩小范围）"
+                  if len(rows) > ITEMS_RENDER_CAP else "")
+    form = (
+        '<form method="get" action="/items" class="toolbar">'
+        f'<label class="f">关键词 <input type="text" name="q" value="{html.escape(q)}" size="24" '
+        'placeholder="标题 / 摘要 / 发布者 / 分类"></label>'
+        f'<label class="f">源 <select name="source"><option value="">全部</option>'
+        f'{opts(list(pg.get("sources") or []), source)}</select></label>'
+        f'<label class="f">状态 <select name="status"><option value="">全部</option>'
+        f'{opts(list(pg.get("statuses") or []), status)}</select></label>'
+        f'<label class="f">回看 <select name="days">{day_opts}</select></label>'
+        '<button class="btn primary" type="submit">筛选</button> '
+        '<a class="btn" href="/items">清空</a>'
+        f'<span class="hint">近 {days} 天共 {len(all_rows)} 条，命中 {len(rows)} 条{truncation}</span>'
+        "</form>")
+    fallback = ('<tr><td colspan="6" class="empty">没有命中的条目'
+                "（换个关键词、放宽天数，或去 <a href=\"/config\">配置</a> 加信源）</td></tr>")
+    body = (
+        f'{_banner(flash)}{form}'
+        "<table><thead><tr><th>#</th><th>状态</th><th>批次</th><th>标题</th>"
+        "<th>发布者/分类/分</th><th>摘要</th></tr></thead>"
+        f'<tbody>{_item_rows(shown, show_batch=True) or fallback}</tbody></table>')
+    return _page(tab="items", sub_meta=view, svc=view["service"], body=body,
+                 footer_extra="条目来自 <code>state/batches/&lt;日期&gt;/</code>（页面专用，不进契约）。")
+
+
+def batch_html(view: dict[str, Any], *, page: dict[str, Any] | None = None,
+               flash: dict[str, Any] | None = None) -> str:
+    """批次详情：这一个批次里到底有哪些条目（标题/发布者/分类/分数/摘要/原文链接/状态）。"""
+    pg = page or {}
+    batch = pg.get("batch") or {}
+    items = pg.get("items") or []
+    date = str(pg.get("date") or "")
+    stem = str(pg.get("stem") or "")
+    if not batch:
+        body = (f'{_banner(flash)}<p class="empty">没有这个批次：'
+                f"<code>{html.escape(date)}/{html.escape(stem)}</code></p>"
+                '<p class="note">批次文件在 <code>state/batches/&lt;日期&gt;/&lt;源&gt;-&lt;槽位&gt;.json</code>。'
+                '列表见 <a href="/">驾驶舱</a>「今日批次」，或去 <a href="/items">条目</a> 页。</p>')
+        return _page(tab="items", sub_meta=view, svc=view["service"], body=body)
+
+    marked = sum(1 for i in items if str(i.get("status") or "unread") != "unread")
+    stats = "".join([
+        f'<div class="stat"><b>{len(items)}</b><span>条目</span></div>',
+        f'<div class="stat"><b>{marked}</b><span>已标记</span></div>',
+        f'<div class="stat"><b>{"已发卡" if batch.get("card_id") else "仅原料"}</b><span>卡片</span></div>',
+        f'<div class="stat"><b>{batch.get("overflow") or 0}</b><span>顺延</span></div>',
+    ])
+    meta = " · ".join(filter(None, [
+        f'源 <code>{html.escape(str(batch.get("source") or ""))}</code>',
+        f'槽位 <code>{html.escape(str(batch.get("slot") or ""))}</code>',
+        f'适配器 <code>{html.escape(str(batch.get("adapter") or ""))}</code>',
+        f'形态 <code>{html.escape(str(batch.get("form") or ""))}</code>',
+        f'生成 <code>{html.escape(str(batch.get("created_at") or ""))}</code>',
+        f'更新 <code>{html.escape(str(batch.get("updated_at") or ""))}</code>',
+    ]))
+    fallback = '<tr><td colspan="5" class="empty">这个批次没有条目</td></tr>'
+    body = (
+        f'{_banner(flash)}'
+        '<p class="note"><a href="/items">← 条目</a> · <a href="/">驾驶舱</a> · '
+        f'<code>state/batches/{html.escape(date)}/{html.escape(stem)}.json</code></p>'
+        f'<h2>{html.escape(str(batch.get("title") or stem))}</h2>'
+        f'<p class="sub">{meta}</p><div class="stats">{stats}</div>'
+        "<h2>条目</h2><table><thead><tr><th>#</th><th>状态</th><th>标题</th>"
+        "<th>发布者/分类/分</th><th>摘要</th></tr></thead>"
+        f'<tbody>{_item_rows(items) or fallback}</tbody></table>')
+    return _page(tab="items", sub_meta=view, svc=view["service"], body=body)
 
 
 def _page(*, tab: str, sub_meta: dict[str, Any], svc: dict[str, Any], body: str,

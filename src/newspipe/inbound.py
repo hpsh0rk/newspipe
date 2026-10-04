@@ -242,6 +242,52 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
 
             return view_mod.build(news_dir)
 
+        def _recent_page(self) -> dict[str, Any]:
+            """驾驶舱「最近入库」：只取最新几条 —— 总览页不该背几百条条目。"""
+            from newspipe import config as config_mod
+            from newspipe import view as view_mod
+
+            snap = view_mod.items_snapshot(news_dir or config_mod.default_news_dir())
+            return {"recent": snap["items"][:8], "recent_total": snap["total"]}
+
+        def _items_page(self, payload: dict[str, Any],
+                        query: dict[str, list[str]]) -> str:
+            """「条目」Tab 的输入装配：快照 + 三个筛选参数（全服务端）。"""
+            from newspipe import config as config_mod
+            from newspipe import view as view_mod
+
+            try:
+                days = int((query.get("days") or [""])[0] or view_mod.ITEMS_DAYS)
+            except ValueError:                              # 手改 URL 传了非数字
+                days = view_mod.ITEMS_DAYS
+            days = min(max(days, 1), 30)
+            snap = view_mod.items_snapshot(news_dir or config_mod.default_news_dir(), days=days)
+            snap.update({k: (query.get(k) or [""])[0] for k in ("q", "source", "status")})
+            return view_mod.items_html(payload, page=snap)
+
+        def _batch_page(self, payload: dict[str, Any], date: str,
+                        stem: str) -> tuple[int, str]:
+            """批次详情。**两道路径校验**：形状（正则）+ 越界（`load_batch_by_rel` 会拒）。
+
+            这条路由的输入直接来自 URL，所以宁可多拒：`..`、`/`、非日期形状一律 400，
+            真越界的路径在 `load_batch_by_rel()` 里连 IO 都不会发生。
+            """
+            from newspipe import config as config_mod
+            from newspipe import state as state_mod
+            from newspipe import view as view_mod
+
+            page: dict[str, Any] = {"date": date, "stem": stem}
+            if not (view_mod.DIGEST_RE.match(date) and view_mod.BATCH_STEM_RE.match(stem)):
+                return 400, view_mod.batch_html(payload, page=page)
+            loaded = state_mod.Store(news_dir or config_mod.default_news_dir()).load_batch_by_rel(
+                f"state/batches/{date}/{stem}.json")
+            if loaded is None:
+                return 404, view_mod.batch_html(payload, page=page)
+            _path, batch = loaded
+            items = [i for i in (batch.get("items") or []) if isinstance(i, dict)]
+            page.update({"batch": batch, "items": items})
+            return 200, view_mod.batch_html(payload, page=page)
+
         def _config_page(self, payload: dict[str, Any], act: dict[str, Any] | None,
                          flash: dict[str, Any] | None, query: dict[str, list[str]]) -> str:
             """配置页的输入装配：schema + 目录搜索 + URL 发现 + 预填 + 编辑预填。"""
@@ -300,7 +346,8 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
         def do_GET(self) -> None:                          # noqa: N802（stdlib 命名）
             route = self.path.split("?")[0]
             query = parse_qs(urlparse(self.path).query)
-            if route in ("/", "/ops", "/config", view_path):
+            is_batch = route.startswith("/batch/")
+            if route in ("/", "/ops", "/config", "/items", view_path) or is_batch:
                 try:
                     payload = self._view()
                 except Exception as exc:                   # 配置坏了要说清楚，别回空壳
@@ -325,12 +372,22 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                         logger(f"写操作面构建失败（{type(exc).__name__}: {exc}）")
                         act = None
                     flash = view_mod.flash_decode((query.get("r") or [""])[0])
+                if is_batch:
+                    parts = route.split("/")
+                    if len(parts) == 4 and parts[2] and parts[3]:
+                        status, page = self._batch_page(payload, parts[2], parts[3])
+                    else:
+                        status, page = 404, view_mod.batch_html(payload, page={})
+                    self._send_html(status, page)
+                    return
                 if route == "/ops":
                     page = view_mod.ops_html(payload, actions=act, flash=flash)
                 elif route == "/config":
                     page = self._config_page(payload, act, flash, query)
+                elif route == "/items":
+                    page = self._items_page(payload, query)
                 else:
-                    page = view_mod.cockpit_html(payload, flash=flash)
+                    page = view_mod.cockpit_html(payload, flash=flash, page=self._recent_page())
                 self._send_html(200, page)
                 return
             self._send(200, {"ok": True, "service": "newspipe", "inbound": "http",
