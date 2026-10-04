@@ -101,7 +101,13 @@ newspipe probe-channel --json                      # 真发一张卡（输出不
 ```sh
 docker compose up -d --build        # ① 容器（restart: unless-stopped 兜崩溃）
 ./service/install.sh                # ② macOS launchd
+./service/uninstall.sh              # 切回容器前先跑：bootout + 把 plist 移出加载路径
 ```
+
+**切换时最容易漏的一步**：plist 带 `RunAtLoad` + `KeepAlive`，只要它还躺在
+`~/Library/LaunchAgents/`，**下次登录就会自己起来**，于是容器和 launchd 双跑、每张卡发两遍
+——而且当天看不出问题，故障要等到下次登录才出现。所以 `install.sh` 在容器运行时直接拒绝安装
+（`NEWSPIPE_ALLOW_DOUBLE_RUNNER=1` 可强制），`uninstall.sh` 负责反向清理。
 
 容器里必须显式给三个「部署事实」（`compose.yaml` 已给，原因见 §5 排障表）：绑定地址、回环别名、出网代理。
 凭据走挂载的 dotenv（容器里没有钥匙串），**密钥不进镜像、不进 Git**。
