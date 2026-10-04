@@ -9,7 +9,7 @@ description = "多信源采集 → AI 加工 → 卡片投递：一条可运维�
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "sh0rk", url = "https://github.com/hpsh0rk" }]
+authors = [{ name = "sh0rk" }]
 keywords = ["news", "pipeline", "rss", "digest", "feishu", "lark", "agent"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -39,6 +39,10 @@ all = ["httpx[http2]>=0.28", "lark-oapi>=1.7", "pycryptodome>=3.20"]
 
 [project.scripts]
 newspipe = "newspipe.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/hpsh0rk/newspipe"
+Repository = "https://github.com/hpsh0rk/newspipe"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

@@ -93,6 +93,21 @@ newspipe doctor --json                             # 当前模式 + 冲突检测
 newspipe probe-channel --json                      # 真发一张卡（输出不含任何密钥）
 ```
 
+### ③ 常驻方式：容器或 launchd（**二选一，不能同时跑**）
+
+两个 runner 同时开着会各发一遍卡（重复投递）。选容器通常是因为 launchd job 会**静默消失**
+（plist 还在 `~/Library/LaunchAgents/`、`launchctl list` 里没有、端口空着，管线就这么停着不报警）。
+
+```sh
+docker compose up -d --build        # ① 容器（restart: unless-stopped 兜崩溃）
+./service/install.sh                # ② macOS launchd
+```
+
+容器里必须显式给三个「部署事实」（`compose.yaml` 已给，原因见 §5 排障表）：绑定地址、回环别名、出网代理。
+凭据走挂载的 dotenv（容器里没有钥匙串），**密钥不进镜像、不进 Git**。
+
+判断「活着」永远看**端口 + 心跳时间戳**（`doctor --json` / `view --json`），不看 plist 是否存在。
+
 ---
 
 ## 2. CLI 契约（Agent 靠这个做判断）
@@ -122,9 +137,22 @@ newspipe probe-channel --json                      # 真发一张卡（输出不
 | 队列 | `queue list` / `queue ack <id>` |
 | 跑一轮 | `run --slot am` / `run --poll` / `run --source <id>` / `run --poll --dry` |
 | 服务 | `serve`（常驻：自带调度 + 入站） |
+| 展示 | `view [--html]`（只读视图契约 / 服务端渲染页） |
 
 **约定**：`set/remove/add/ack` 这类写操作都「先校验再落盘」，被拒绝时 `ok=false` 且退出码 `4`，
 同时给出 `hint`。Agent 不要绕过 CLI 直接改 YAML —— 校验与原子写都在 CLI 里。
+
+### 2.1 只读视图契约：宿主要展示，就读这里
+
+`newspipe view --json`、`GET /view`（需 `service.yaml: view.enabled`）、`newspipe view --html`
+三条出口用的是**同一份** builder，自带 `contract_version`。内容：每个源的心跳（原始状态 +
+中文标签 + 语气 + 是否超期）、今日批次、去重台账、AI 调用与降级计数、通道与入站方式。
+
+**不要**去读 `<news_dir>/state/**` —— 那是本项目的私有布局。宿主一旦解析它，改一次布局就会让
+宿主**静默读空**：页面显示成「从未运行」，看着像没跑，其实是读错了地方，全程不报错。要展示就读契约。
+
+`view --html`（或 `GET /`）是同一份数据的服务端渲染页：没有前端构建链，`curl` 或浏览器打开都能看。
+宿主读不到时应当显示「服务不可达 + 地址」，不要退化成空看板（空看板与「真的没数据」无法区分）。
 
 ---
 
@@ -211,6 +239,11 @@ def on_card_action(event):
 | 机器人不回话 | **两个长连接在抢事件**（硬规则 1）。检查是否 ws 与宿主同时开着 |
 | AI 加工全降级成原文标题 | `status --json` 看降级原因；常见是 completion 预算被 reasoning 吃光（调 `max_tokens`） |
 | `config_missing` 心跳 | 配置缺失（不是故障）：按 `error.hint` 补配置，重试无意义 |
+| 宿主 `curl 127.0.0.1:8787` 失败，但容器 healthy | 进程绑了**容器自己的回环** ⇒ Docker 转发够不着：`NEWSPIPE_BIND_HOST=0.0.0.0`（宿主侧仍只发布到 `127.0.0.1`） |
+| 容器里 AI 加工全降级 | 宿主回环在容器里不是 `127.0.0.1`：`NEWSPIPE_LOOPBACK_ALIAS=host.docker.internal`；`probe-model --json` 看 `base_url` 是否已改写 |
+| 容器里抓不到需要代理的源 | `NEWSPIPE_PROXY=http://host.docker.internal:7890` + `extra_hosts: host.docker.internal:host-gateway` |
+| 容器里凭据解析不到 | 挂宿主 `.env` + `config.yaml` 到 `/hermes`（`NEWSPIPE_HOST_HOME=/hermes`）；`doctor --json` 的 `creds.source` 会写成 `dotenv:/hermes/.env` |
+| 重启后管线不再跑 | 先确认哪个 runner 活着（容器 `docker compose ps` / launchd `launchctl list`）；launchd job 会静默消失，**别用 plist 是否存在当证据** |
 
 ---
 

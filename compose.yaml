@@ -1,0 +1,35 @@
+# newspipe 的容器化部署（与 launchd 二选一，**不能同时跑**：两个 runner 会各发一遍卡）。
+#
+#   docker compose up -d --build
+#   docker compose logs -f newspipe
+#   curl -s http://127.0.0.1:8787/view | head        # 只读视图契约
+#   浏览器打开 http://127.0.0.1:8787/                 # 同一份视图的服务端渲染页
+#
+# 三个必须在容器里显式给的东西（宿主上它们是默认值，容器里不是）：
+#   NEWSPIPE_PROXY          宿主回环 = 容器自己，Clash 要用 host.docker.internal
+#   NEWSPIPE_LOOPBACK_ALIAS 模型端点若写在 localhost（本机网关）也要同样改写
+#   NEWSPIPE_HOST_HOME      跟随宿主模型（models.yaml: default: host）需要 config.yaml + .env
+services:
+  newspipe:
+    build: .
+    image: newspipe:local
+    container_name: newspipe
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"          # 只发布到本机：卡片回调由宿主网关转发到 127.0.0.1
+    volumes:
+      # 配置与状态都在 Vault 里（sources.yaml / service.yaml / state/**）——挂载而不是拷进镜像
+      - ${NEWSPIPE_NEWS_DIR:-${HOME}/Knowledge/info/news}:/data/news
+      # 凭据与模型配置复用宿主：容器里没有钥匙串，只能走 dotenv（只读挂载，密钥不进镜像）
+      - ${HERMES_HOME:-${HOME}/.hermes}/config.yaml:/hermes/config.yaml:ro
+      - ${HERMES_HOME:-${HOME}/.hermes}/.env:/hermes/.env:ro
+    environment:
+      NEWSPIPE_NEWS_DIR: /data/news
+      NEWSPIPE_HOST_HOME: /hermes
+      # 容器里进程必须绑 0.0.0.0，否则 Docker 的端口转发够不着（宿主机侧仍只发布到 127.0.0.1）
+      NEWSPIPE_BIND_HOST: 0.0.0.0
+      NEWSPIPE_PROXY: http://host.docker.internal:7890
+      NEWSPIPE_LOOPBACK_ALIAS: host.docker.internal
+      TZ: Asia/Shanghai
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

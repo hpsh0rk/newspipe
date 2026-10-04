@@ -15,7 +15,7 @@ import os
 import re
 from pathlib import Path
 
-from newspipe.backends.model_ref import ModelRef
+from newspipe.backends.model_ref import ModelRef, rewrite_loopback
 from newspipe.errors import ConfigError
 
 _ENV_LINE = re.compile(r"^\s*([A-Za-z0-9_]+)\s*=\s*(.*)$")
@@ -82,5 +82,5 @@ class ExplicitModelResolver:
             raise ConfigError(f"provider={provider!r} 缺密钥：设置环境变量 "
                               f"{key_env or '<provider>.key_env'}")
 
-        return ModelRef(model=model, provider=provider, base_url=base_url.rstrip("/"),
+        return ModelRef(model=model, provider=provider, base_url=rewrite_loopback(base_url.rstrip("/")),
                         api_key=api_key, source=f"capability:{capability}")

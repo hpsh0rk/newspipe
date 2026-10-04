@@ -42,6 +42,9 @@ CONTRACT: list[dict[str, Any]] = [
     {"name": "status", "summary": "运行态一览（各源心跳、AI 用量与降级原因、事件积压）",
      "usage": "newspipe status [--json] [--days N]", "args": ["--days"], "writes": False,
      "examples": ["newspipe status --json"]},
+    {"name": "view", "summary": "只读视图契约（面板/门户的数据面；--html 出服务端渲染页）",
+     "usage": "newspipe view [--html] [--json]", "args": ["--html"], "writes": False,
+     "examples": ["newspipe view --json", "newspipe view --html"]},
     {"name": "list-sources", "summary": "信源四轴一览",
      "usage": "newspipe list-sources [--json]", "args": [], "writes": False,
      "examples": ["newspipe list-sources --json"]},
@@ -118,7 +121,7 @@ CONTRACT: list[dict[str, Any]] = [
      "examples": ["newspipe serve --once --dry"]},
 ]
 
-SUBCOMMANDS = ("api", "doctor", "status", "list-sources", "source", "hooks", "events", "queue",
+SUBCOMMANDS = ("api", "doctor", "status", "view", "list-sources", "source", "hooks", "events", "queue",
                "run", "serve", "migrate", "probe-channel", "probe-model", "card",
                "card-preview", "enrich-only")
 
@@ -341,6 +344,37 @@ def _sub_status(args: argparse.Namespace, news_dir: Path) -> result.Result:
         print(f"\n事件（近 {args.days} 天）：{stat['total']} 条"
               f"，未消费 {stat['unconsumed']}，待入库 {stat['queue']}")
     return result.ok("status", data, printed=not args.json)
+
+
+def _sub_view(args: argparse.Namespace, news_dir: Path) -> result.Result:
+    """只读视图契约：面板 / 门户 / Agent 的**同一份**数据面（`GET /view` 用同一个 builder）。
+
+    宿主不该解析 `state/**`（布局是本包私有的，改一次就会让宿主静默读空）。要展示就读这里。
+    """
+    from newspipe import view as view_mod
+
+    if getattr(args, "html", False) and args.json:
+        return result.fail("view", "E_USAGE", "--html 与 --json 不能同时用",
+                           hint="要机器读用 `newspipe view --json`；要页面用 `newspipe view --html`")
+    payload = view_mod.build(news_dir)
+    if getattr(args, "html", False):
+        print(view_mod.as_html(payload))
+        return result.ok("view", {"html": True}, printed=True)
+    if not args.json:
+        s = payload["summary"]
+        print(f"视图契约 v{payload['contract_version']} · 生成于 {payload['generated_at']}")
+        print(f"槽位 {' '.join(f'{k}:{v}' for k, v in payload['slots'].items())} · "
+              f"投递群 {payload['chat']} · 通道 {payload['service']['channel']} / "
+              f"入站 {payload['service']['inbound_mode']}")
+        print(f"今日批次 {s['batches']} · 条目 {s['items']} · 已标记 {s['marked']} · "
+              f"发卡 {s['cards_today']} · AI 调用 {payload['llm']['calls']}"
+              f"（降级 {payload['llm']['degraded']}）")
+        for row in payload["sources"]:
+            print(f"  {row['name']:<18} {row['status_label']:<12} {row['trigger']:<6} "
+                  f"{row['form']:<12} 去重 {row['pushed_total']:<5} 顺延 {row['pending_total']}")
+    return result.ok("view", payload, printed=True,
+                     next=["newspipe view --html > /tmp/newspipe.html",
+                           "newspipe status --json"])
 
 
 def _sub_doctor(args: argparse.Namespace, news_dir: Path) -> result.Result:
@@ -672,6 +706,9 @@ def _build_sub_parser() -> argparse.ArgumentParser:
     st = add("status")
     st.add_argument("--days", type=int, default=7, help="事件统计的天数窗口")
     add("list-sources")
+    vw = add("view")
+    vw.add_argument("--html", action="store_true",
+                    help="输出服务端渲染页（默认输出 JSON 契约）")
 
     src = add("source")
     src.add_argument("action", choices=["list", "show", "set", "enable", "disable", "remove"])
@@ -737,6 +774,7 @@ def _build_sub_parser() -> argparse.ArgumentParser:
 SUB_HANDLERS = {
     ("api", "describe"): _sub_api_describe,
     ("status", None): _sub_status,
+    ("view", None): _sub_view,
     ("doctor", None): _sub_doctor,
     ("list-sources", None): lambda args, news_dir: result.ok(
         "list-sources", {"sources": config.summarize(_load(news_dir)[0])}),

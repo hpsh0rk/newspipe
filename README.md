@@ -139,9 +139,35 @@ newspipe run --slot am                                # 真发一张卡
 # service.yaml：channel + inbound.mode + 调度时区
 newspipe serve --verbose            # 一个进程：调度线程 + 入站线程
 newspipe serve --once --dry         # 演练：跑一轮到期任务就退出
-
-./service/install.sh                # macOS launchd 常驻（生成 plist、装、启）
 ```
+
+两种常驻方式，**二选一，不能同时跑**（两个 runner 会各发一遍卡）：
+
+```bash
+# ① Docker（推荐；崩溃自拉起，且容器化会暴露打包/环境问题）
+docker compose up -d --build
+docker compose logs -f newspipe
+curl -s http://127.0.0.1:8787/view | head     # 只读视图契约
+
+# ② macOS launchd（备选）
+./service/install.sh
+```
+
+容器的三件必办事项在 `compose.yaml` 里都显式给了，原因见下：容器里没有 macOS 钥匙串（凭据
+挂宿主 `.env` 走 dotenv）、宿主的回环地址不是 `127.0.0.1`（模型端点与 Clash 都要改写）、
+进程必须绑 `0.0.0.0`（否则 Docker 的转发够不着容器自己的回环，宿主 `curl` 直接失败而容器内
+healthcheck 却是绿的）。
+
+### 只读视图：宿主要展示，就读这里
+
+```bash
+newspipe view --json     # 契约：每源心跳（原始状态+中文标签+语气+超期）、今日批次、去重台账、AI 用量
+newspipe view --html     # 同一份数据的服务端渲染页（无前端构建链）
+```
+
+`GET /view` 与 `GET /` 是同一个 builder 的 HTTP 出口（需 `service.yaml: view.enabled`），
+自带 `contract_version`。**宿主不要解析 `<news_dir>/state/**`**：那是本项目的私有布局，
+改一次布局就会让宿主静默读空（页面显示成「从未运行」，看着像没跑，其实是读错了地方）。
 
 ### 环境变量
 
@@ -154,6 +180,14 @@ newspipe serve --once --dry         # 演练：跑一轮到期任务就退出
 | `NEWSPIPE_HOST_HOME` | 宿主配置目录（只有用 `host` 后端/宿主凭据时才需要） |
 | `NEWSPIPE_FEISHU_*` | 凭据（也可用 dotenv 或系统钥匙串） |
 | `NEWSPIPE_SDK_LOG` | `info` / `debug`（调长连接用） |
+
+**部署事实类的覆盖**（默认值对宿主机成立，容器里必须显式给）：
+
+| 变量 | 作用 |
+|---|---|
+| `NEWSPIPE_PROXY` | 出网代理（默认 `127.0.0.1:7890`） |
+| `NEWSPIPE_LOOPBACK_ALIAS` | 把模型端点里的回环主机名换成部署别名（容器里 `host.docker.internal`） |
+| `NEWSPIPE_BIND_HOST` | 入站绑定地址（容器里必须 `0.0.0.0`，宿主侧仍只发布到回环） |
 
 **凭据永不写进配置或仓库**：解析顺序是 显式配置 → 进程环境 → dotenv → 系统钥匙串，
 所有探测命令只输出「有没有」，不输出值。

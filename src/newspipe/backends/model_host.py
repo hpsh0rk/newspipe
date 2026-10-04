@@ -18,7 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from newspipe import hostenv
-from newspipe.backends.model_ref import ModelRef
+from newspipe.backends.model_ref import ModelRef, rewrite_loopback
 from newspipe.errors import ConfigError
 
 _config_cache: dict[str, tuple[float, dict]] = {}
@@ -108,5 +108,5 @@ class HostModelResolver:
             raise ConfigError(f"模型 {model}（provider={provider}）缺密钥："
                               f"在宿主 .env（{hostenv.host_env_path()}）里设置 "
                               f"{key_env or '<provider>.key_env'}")
-        return ModelRef(model=model, provider=provider, base_url=base_url.rstrip("/"),
+        return ModelRef(model=model, provider=provider, base_url=rewrite_loopback(base_url.rstrip("/")),
                         api_key=api_key, source=source)

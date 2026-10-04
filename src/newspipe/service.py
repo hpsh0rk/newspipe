@@ -187,15 +187,22 @@ def make_logger(cfg: config.Config) -> Callable[[str], None]:
 
 def start_inbound_for(cfg: config.Config, *, news_dir: Path, hook_set: Any,
                       logger: Callable[[str], None]) -> inbound_mod.InboundHandle:
-    """按 `service.yaml: inbound.mode` 起入站。缺凭据/缺依赖都抛错（不静默降级）。"""
+    """按 `service.yaml: inbound.mode` 起入站。缺凭据/缺依赖都抛错（不静默降级）。
+
+    只读视图是**独立开关**（`view.enabled`）：`mode=none` 时也要能出视图，否则面板
+    在「不收回调」的部署里就瞎了。`mode=none` 不需要凭据，所以别在这里解析它。
+    """
     mode = cfg.service.inbound_mode
-    if mode == "none":
+    view = {"enabled": cfg.service.view_enabled, "path": cfg.service.view_path}
+    if mode == "none" and not view["enabled"]:
         return inbound_mod.InboundHandle(mode="none")
     from newspipe import credentials
 
-    creds = credentials.resolve_feishu(cfg.service.feishu, news_dir=news_dir)
+    creds = (credentials.resolve_feishu(cfg.service.feishu, news_dir=news_dir)
+             if mode != "none" else None)
     return inbound_mod.start_inbound(mode=mode, service_cfg=cfg.service.inbound, creds=creds,
-                                     news_dir=news_dir, hook_set=hook_set, logger=logger)
+                                     news_dir=news_dir, hook_set=hook_set, logger=logger,
+                                     view=view)
 
 
 def host_dotenv_path() -> Path:
@@ -328,6 +335,8 @@ def describe_service(cfg: config.Config, *, news_dir: Path | None = None) -> dic
         "channel": cfg.service.channel,
         "available_channels": backends.available_channels(),
         "inbound_mode": cfg.service.inbound_mode,
+        "view_enabled": cfg.service.view_enabled,
+        "view_path": cfg.service.view_path if cfg.service.view_enabled else None,
         "tick_seconds": cfg.service.tick_seconds,
         "slots": dict(cfg.slots),
         "last_runs": load_runs(news_dir),

@@ -170,8 +170,9 @@ def dispatch(event: dict[str, Any], *, news_dir: Path | None = None,
 
 
 # --------------------------------------------------------------------- HTTP
-def _make_handler(*, path: str, creds: credentials.FeishuCreds, news_dir: Path | None,
-                  hook_set: Any, logger: Callable[[str], None]) -> type:
+def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir: Path | None,
+                  hook_set: Any, logger: Callable[[str], None],
+                  accept_events: bool = True, view_path: str = "/view") -> type:
     class Handler(BaseHTTPRequestHandler):
         server_version = "newspipe"
 
@@ -183,16 +184,53 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds, news_dir: Path |
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_html(self, status: int, page: str) -> None:
+            body = page.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _view(self) -> dict[str, Any]:
+            """只读视图契约。这里**不**碰 state 布局——布局知识归 `view.build`。"""
+            from newspipe import view as view_mod
+
+            return view_mod.build(news_dir)
+
         def do_GET(self) -> None:                          # noqa: N802（stdlib 命名）
-            self._send(200, {"ok": True, "service": "newspipe", "inbound": "http"})
+            route = self.path.split("?")[0]
+            if route in ("/", view_path):
+                try:
+                    payload = self._view()
+                except Exception as exc:                   # 配置坏了要说清楚，别回空壳
+                    self._send(503, {"ok": False, "service": "newspipe", "view": route,
+                                     "error": {"code": "E_CONFIG", "message": f"{type(exc).__name__}: {exc}",
+                                               "hint": "检查 info/news/{sources,service}.yaml"}})
+                    return
+                if route == "/":
+                    from newspipe import view as view_mod
+
+                    self._send_html(200, view_mod.as_html(payload))
+                else:
+                    self._send(200, payload)
+                return
+            self._send(200, {"ok": True, "service": "newspipe", "inbound": "http",
+                             "view": view_path if view_path else None,
+                             "events": path if accept_events else None})
 
         def do_POST(self) -> None:                         # noqa: N802
+            if not accept_events:
+                self._send(404, {"error": "events disabled",
+                                 "hint": "inbound.mode 不是 http；卡片事件由持有长连接的一方转发"})
+                return
             if self.path.split("?")[0] != path:
                 self._send(404, {"error": "not found"})
                 return
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b""
-            if creds.encrypt_key:
+            if creds is not None and creds.encrypt_key:
                 ok = verify_signature(
                     timestamp=self.headers.get("X-Lark-Request-Timestamp") or "",
                     nonce=self.headers.get("X-Lark-Request-Nonce") or "",
@@ -205,6 +243,8 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds, news_dir: Path |
             try:
                 payload = json.loads(body.decode("utf-8")) if body else {}
                 if isinstance(payload, dict) and payload.get("encrypt"):
+                    if creds is None or not creds.encrypt_key:
+                        raise InboundError("收到加密事件体但没配 Encrypt Key")
                     payload = decrypt_payload(creds.encrypt_key, str(payload["encrypt"]))
             except (UnicodeDecodeError, json.JSONDecodeError, InboundError) as exc:
                 logger(f"入站：请求体无法解析（{type(exc).__name__}: {exc}）")
@@ -235,22 +275,33 @@ def http_bind(service_cfg: dict[str, Any]) -> tuple[str, int, str]:
 
     `port: 0` 是「让内核挑一个空闲端口」，**不能**被 `or` 吃掉（否则测试与多实例会撞在默认
     端口上）—— 所以这里显式区分「没配」与「配了 0」。
+
+    `NEWSPIPE_BIND_HOST` 是**部署事实**的逃生口：容器里必须绑 `0.0.0.0`，否则发布端口
+    够不着（Docker 的转发落到容器网卡上，而进程只听了容器自己的回环）。宿主机上绑
+    127.0.0.1 是对的，所以这个改写只由部署显式给，不改默认。
     """
     http_cfg = dict(service_cfg.get("http") or {})
-    host = str(http_cfg.get("host") or "127.0.0.1")
+    host = (os.environ.get("NEWSPIPE_BIND_HOST") or "").strip() \
+        or str(http_cfg.get("host") or "127.0.0.1")
     raw_port = http_cfg.get("port")
     port = DEFAULT_HTTP_PORT if raw_port is None else int(raw_port)
     path = str(http_cfg.get("path") or "/feishu/events")
     return host, port, path
 
 
-def start_http(*, service_cfg: dict[str, Any], creds: credentials.FeishuCreds,
+def start_http(*, service_cfg: dict[str, Any], creds: credentials.FeishuCreds | None,
                news_dir: Path | None = None, hook_set: Any = None,
-               logger: Callable[[str], None] = print) -> tuple[ThreadingHTTPServer, str]:
-    """起 HTTP 回调服务器（返回 server 与路径；调用方负责 serve_forever 线程）。"""
+               logger: Callable[[str], None] = print, accept_events: bool = True,
+               view_path: str = "/view") -> tuple[ThreadingHTTPServer, str]:
+    """起 HTTP 服务器（返回 server 与事件路径；调用方负责 serve_forever 线程）。
+
+    `accept_events=False` = 只读视图模式：同一台服务器只回答 `GET /` 与 `GET <view_path>`，
+    POST 一律 404。给 `inbound.mode != http` 的部署用（视图与入站解耦，但不另开端口）。
+    """
     host, port, path = http_bind(service_cfg)
     handler = _make_handler(path=path, creds=creds, news_dir=news_dir,
-                            hook_set=hook_set, logger=logger)
+                            hook_set=hook_set, logger=logger, accept_events=accept_events,
+                            view_path=view_path)
     server = ThreadingHTTPServer((host, port), handler)
     return server, path
 
@@ -356,6 +407,7 @@ class InboundHandle:
     server: Any = None
     client: Any = None
     path: str = ""
+    view_path: str = ""
     state: dict[str, Any] = field(default_factory=dict)
     error: str = ""
 
@@ -363,6 +415,8 @@ class InboundHandle:
         info: dict[str, Any] = {"mode": self.mode, "alive": bool(self.thread and self.thread.is_alive())}
         if self.path:
             info["path"] = self.path
+        if self.view_path:
+            info["view"] = self.view_path
         if self.state:
             info["counters"] = dict(self.state)
         if self.error:
@@ -385,23 +439,55 @@ class InboundHandle:
                 pass
 
 
-def start_inbound(*, mode: str, service_cfg: dict[str, Any], creds: credentials.FeishuCreds,
+def start_inbound(*, mode: str, service_cfg: dict[str, Any], creds: credentials.FeishuCreds | None,
                   news_dir: Path | None = None, hook_set: Any = None,
                   logger: Callable[[str], None] = print, sdk: _Sdk | None = None,
-                  client: Any | None = None) -> InboundHandle:
-    """按模式起入站（daemon 线程），返回句柄。`mode=none` 直接返回空句柄。"""
-    if mode == "none":
-        return InboundHandle(mode="none")
+                  client: Any | None = None, view: dict[str, Any] | None = None) -> InboundHandle:
+    """按模式起入站（daemon 线程），返回句柄。
+
+    只读视图（`GET /` 与 `GET <view.path>`）与事件入站**解耦**：`view.enabled` 打开时，
+    即使 `mode=none/ws` 也会起同一台只读服务器（`accept_events=False`，POST 404）。
+    视图起不来**不阻塞调度**（只读的附加面不该拖垮采集）——只记一条告警。
+    """
+    view_cfg = dict(view or {})
+    view_on = bool(view_cfg.get("enabled"))
+    view_path = str(view_cfg.get("path") or "/view")
     state: dict[str, Any] = {}
+
+    def _view_only() -> tuple[Any, threading.Thread, str]:
+        server, _ = start_http(service_cfg=service_cfg, creds=None, news_dir=news_dir,
+                               hook_set=hook_set, logger=logger, accept_events=False,
+                               view_path=view_path)
+        thread = threading.Thread(target=server.serve_forever, name="newspipe-view-http",
+                                  daemon=True)
+        thread.start()
+        return server, thread, view_path
+
+    if mode == "none":
+        if not view_on:
+            return InboundHandle(mode="none")
+        try:
+            server, thread, vpath = _view_only()
+        except OSError as exc:                              # 端口被占不该拖垮调度
+            logger(f"⚠️ 只读视图未启动（{type(exc).__name__}: {exc}）")
+            return InboundHandle(mode="none")
+        logger(f"只读视图：监听 {server.server_address[0]}:{server.server_address[1]}{vpath}")
+        return InboundHandle(mode="none", thread=thread, server=server, view_path=vpath, state=state)
+
     if mode == "http":
         server, path = start_http(service_cfg=service_cfg, creds=creds, news_dir=news_dir,
-                                  hook_set=hook_set, logger=logger)
+                                  hook_set=hook_set, logger=logger, accept_events=True,
+                                  view_path=view_path if view_on else "")
         thread = threading.Thread(target=server.serve_forever, name="newspipe-inbound-http",
                                   daemon=True)
         thread.start()
-        logger(f"入站 http：监听 {server.server_address[0]}:{server.server_address[1]}{path}")
-        return InboundHandle(mode="http", thread=thread, server=server, path=path, state=state)
+        logger(f"入站 http：监听 {server.server_address[0]}:{server.server_address[1]}{path}"
+               + (f"（只读视图 {view_path}）" if view_on else ""))
+        return InboundHandle(mode="http", thread=thread, server=server, path=path,
+                             view_path=view_path if view_on else "", state=state)
     if mode == "ws":
+        if creds is None:
+            raise InboundError("inbound.mode=ws 需要飞书应用凭据（app_id/app_secret）")
         holder: dict[str, Any] = {}
 
         def _run() -> None:
@@ -414,5 +500,15 @@ def start_inbound(*, mode: str, service_cfg: dict[str, Any], creds: credentials.
 
         thread = threading.Thread(target=_run, name="newspipe-inbound-ws", daemon=True)
         thread.start()
-        return InboundHandle(mode="ws", thread=thread, client=client, state=state)
+        handle = InboundHandle(mode="ws", thread=thread, client=client, state=state)
+        if view_on:
+            try:
+                server, _vt, vpath = _view_only()
+            except OSError as exc:
+                logger(f"⚠️ 只读视图未启动（{type(exc).__name__}: {exc}）")
+            else:
+                handle.server = server
+                handle.view_path = vpath
+                logger(f"只读视图：监听 {server.server_address[0]}:{server.server_address[1]}{vpath}")
+        return handle
     raise InboundError(f"未知的入站模式 {mode!r}（可选：ws / http / none）")

@@ -284,6 +284,9 @@ class ServiceCfg:
     inbound: dict[str, Any] = field(default_factory=dict)
     schedule: dict[str, Any] = field(default_factory=dict)
     log: dict[str, Any] = field(default_factory=dict)
+    #: 只读视图端点（`GET <view.path>` = JSON 契约，`GET /` = 服务端渲染页）。
+    #: **默认关**：不显式打开就不多开监听端口（与「不配即旧行为」的约定一致）。
+    view: dict[str, Any] = field(default_factory=dict)
 
     @property
     def inbound_mode(self) -> str:
@@ -295,6 +298,14 @@ class ServiceCfg:
 
     def http(self) -> dict[str, Any]:
         return dict(self.inbound.get("http") or {})
+
+    @property
+    def view_enabled(self) -> bool:
+        return bool(self.view.get("enabled"))
+
+    @property
+    def view_path(self) -> str:
+        return str(self.view.get("path") or "/view")
 
 
 def load_service(news_dir: Path) -> ServiceCfg:
@@ -324,11 +335,16 @@ def load_service(news_dir: Path) -> ServiceCfg:
     if tick < 30:
         raise ConfigError(f"{path}: schedule.tick_seconds={tick:g} 太小（下限 30）——"
                           "轮询频率由各源的 fetch.interval_min 控制，别靠缩短 tick 提速")
-    for name in ("feishu", "log"):
+    for name in ("feishu", "log", "view"):
         if raw.get(name) is not None and not isinstance(raw.get(name), dict):
             raise ConfigError(f"{path}: {name} 需要映射")
+    view_raw = raw.get("view") or {}
+    view = {"enabled": _bool(view_raw.get("enabled"), where=f"{path}: view.enabled"),
+            "path": str(view_raw.get("path") or "/view")}
+    if view["enabled"] and not str(view["path"]).startswith("/"):
+        raise ConfigError(f"{path}: view.path 必须以 / 开头（得到 {view['path']!r}）")
     return ServiceCfg(channel=channel, feishu=dict(raw.get("feishu") or {}), inbound=dict(inbound),
-                      schedule=dict(schedule), log=dict(raw.get("log") or {}))
+                      schedule=dict(schedule), log=dict(raw.get("log") or {}), view=view)
 
 
 @dataclass(frozen=True)

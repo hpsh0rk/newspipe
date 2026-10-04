@@ -318,7 +318,7 @@ def _process(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slot: str,
     # 语义 = "已投递"：只记真正上了卡的那些（batch["items"]），装不下顺延的不算已投递
     store.record_pushed(scfg.name, batch["items"], digest)
     run.queued = _queue(store, scfg.name, [*plan.overflow_items, *excess])
-    store.note_card(digest)
+    store.note_card(digest, at=now)
     run.status = "ok"
     _record_event(store, "delivered",
                   payload={"card": run.card, "card_id": batch.get("card_id"),
@@ -346,7 +346,10 @@ def _advance(store: state.Store, scfg: Any, mode: str, since: float | None,
 def run_slot(cfg: Any, store: state.Store, slot: str, *, dry: bool = False,
              only: str | None = None, now: datetime | None = None) -> list[SourceRun]:
     now = now or datetime.now()
-    digest = today()
+    # 批次日期必须来自**注入的时钟**：用 `today()`（墙钟）会让「回放/测试给了一个时刻」与
+    # 「批次落在哪一天」分叉——批次写到今天、调用方按注入日期去读，读到的永远是 None，
+    # 而心跳显示 ok。顺带把打扰预算的日期键也钉在同一个时钟上。
+    digest = now.strftime("%Y-%m-%d")
     out: list[SourceRun] = []
     for scfg in scheduler.slot_sources(cfg, slot):
         if only and scfg.name != only:
@@ -359,7 +362,7 @@ def run_slot(cfg: Any, store: state.Store, slot: str, *, dry: bool = False,
 def run_poll(cfg: Any, store: state.Store, *, dry: bool = False, only: str | None = None,
              force: bool = False, now: datetime | None = None) -> list[SourceRun]:
     now = now or datetime.now()
-    digest = today()
+    digest = now.strftime("%Y-%m-%d")                       # 同上：别一半墙钟一半注入时钟
     out: list[SourceRun] = []
     for decision in scheduler.poll_decisions(cfg, store, now, force=force, only=only):
         scfg = cfg.sources[decision.source]

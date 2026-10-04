@@ -1,0 +1,14 @@
+# 镜像里不需要的东西：虚拟环境、Git 历史、测试、缓存、本机配置
+.venv/
+.git/
+.gitignore
+tests/
+__pycache__/
+**/__pycache__/
+*.pyc
+docs/
+examples/
+service/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
