@@ -137,12 +137,13 @@ docker compose up -d --build        # ① 容器（restart: unless-stopped 兜�
 | 类别 | 命令 |
 |---|---|
 | 自检 | `doctor` / `status` / `probe-model` / `probe-channel` |
-| 信源 | `source list\|show\|set\|enable\|remove`（写操作支持 `--dry-run`） |
+| 信源 | `source list\|show\|set\|enable\|remove`（写操作支持 `--dry-run` / `--base-hash`） |
 | 卡片按钮 | `hooks list\|add\|remove` |
 | 事件 | `events list --unconsumed` / `events ack <id> --by <who>` / `events prune` |
 | 队列 | `queue list` / `queue ack <id>` |
 | 跑一轮 | `run --slot am` / `run --poll` / `run --source <id>` / `run --poll --dry` |
 | 服务 | `serve`（常驻：自带调度 + 入站） |
+| 配置 | `config describe`（字段/类型/枚举/默认值的**唯一事实来源**；页面表单由它生成） |
 | 展示 | `view [--html]`（只读视图契约 / 服务端渲染页） |
 
 **约定**：`set/remove/add/ack` 这类写操作都「先校验再落盘」，被拒绝时 `ok=false` 且退出码 `4`，
@@ -157,8 +158,40 @@ docker compose up -d --build        # ① 容器（restart: unless-stopped 兜�
 **不要**去读 `<news_dir>/state/**` —— 那是本项目的私有布局。宿主一旦解析它，改一次布局就会让
 宿主**静默读空**：页面显示成「从未运行」，看着像没跑，其实是读错了地方，全程不报错。要展示就读契约。
 
-`view --html`（或 `GET /`）是同一份数据的服务端渲染页：没有前端构建链，`curl` 或浏览器打开都能看。
+`GET /view` 是只读 JSON 契约；**页面**按职责分三个 Tab（同一个 builder、服务端路由、无前端构建、
+可深链）：
+
+| 路由 | Tab | 内容 | 写操作 |
+|---|---|---|---|
+| `GET /` | 驾驶舱 | KPI + 信源心跳 + 今日批次 | 无（只读） |
+| `GET /config` | 配置 | 信源增删改 + RSS 搜索订阅 | 有 |
+| `GET /ops` | 运维 | 跑一轮/启停/⭐入库/事件已消费/现在发队列 | 有 |
+
 宿主读不到时应当显示「服务不可达 + 地址」，不要退化成空看板（空看板与「真的没数据」无法区分）。
+
+### 2.2 页面写操作：三条铁律
+
+打开 `service.yaml: view.actions` 后，`/ops` 与 `/config` 上出现按钮与表单。
+
+**铁律一：写路径只有一条。** 页面表单 → `POST /api/actions/<动作>` → `src/newspipe/actions.py`
+（表单翻成 argv）→ CLI 的同一份 handler。校验、原子写、乐观并发、审计都在 CLI 里，页面只做翻译。
+**不要**在页面/宿主侧另写一份写逻辑 —— 两份写路径必然漂移。
+
+**铁律二：动作白名单在代码里**（`actions.py: ACTIONS`），不是配置。配置能改出来的写权限
+等于一个远程可改的写面。加动作必须改代码。
+
+**铁律三：三道门禁一个都不能少。** `view.actions` 开关（没开就**不渲染按钮**，也拒绝 POST）、
+同源（`Origin` 的 netloc 必须等于请求的 `Host`）、一次性令牌（进程启动生成、嵌进表单）。
+本地端口对浏览器是可达的：少了令牌，用户浏览器里**任何网页**都能 POST 过来触发发卡。
+
+配置页的字段**不是第二份 schema**：全部来自 `newspipe config describe --json`
+（`config.py: describe_schema()`），编辑表单的当前值来自 `config.source_values()`。
+加配置字段只改 `config.py` 一处。漏一个字段的后果不是报错，而是**编辑表单把那个字段按默认值
+静默写回去** —— 有测试钉住「schema 的每个 path 都能取到当前值」。
+
+保存 = 用 `source set` **整体替换**该源的配置块，块内注释会丢；CLI 的 warning 会显示在页面横幅上。
+表单默认 `--dry-run`，取消勾选才真写。RSS 目录只收录在**本机 RSSHub 上实测过**的条目
+（本地无 `/routes`，实测 404）—— 不做「全网 RSS 搜索」这种吹牛功能。
 
 ---
 
