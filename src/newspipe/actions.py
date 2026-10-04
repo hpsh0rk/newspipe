@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -112,10 +114,93 @@ def _argv_flush(form: dict[str, list[str]]) -> list[str]:
     return ["run", "--source", name]
 
 
+# --------------------------------------------------------- 配置页：表单 → 整段映射
+#: 表单字段前缀。页面上的输入名是 `f.<schema path>`（如 `f.fetch.trigger`），
+#: 这样加字段只改 `config.describe_schema()`，翻译层不用动。
+FORM_PREFIX = "f."
+
+
+def _coerce(field: dict[str, Any], raw: list[str]) -> Any:
+    """按 schema 的类型把表单值转成 YAML 值。类型表只有 `config.describe_schema()` 一份。"""
+    kind = str(field.get("type") or "str")
+    values = [v for v in raw if v is not None]
+    if kind == "bool":
+        # 复选框配一个隐藏的 0：没勾 ⇒ ["0"]，勾了 ⇒ ["0", "1"]
+        return any(str(v).strip().lower() in ("1", "true", "on", "yes") for v in values)
+    first = str(values[0]) if values else ""
+    if kind in ("list", "slots"):
+        if kind == "slots":
+            return [v for v in values if v.strip()]
+        return [part.strip() for part in re.split(r"[,\n、]", first) if part.strip()]
+    if kind == "int":
+        return int(first) if first.strip() else None
+    if kind == "float":
+        return float(first) if first.strip() else None
+    return first.strip()
+
+
+def build_source_body(form: dict[str, list[str]],
+                      schema: dict[str, Any] | None = None) -> dict[str, Any]:
+    """把配置页的表单拼成**整段映射**（`source set --from-json` 要的就是这个）。
+
+    为什么是整段而不是补丁：`source set` 是「新增或整体替换」。页面必须提交全部字段，
+    否则没提交的字段会退回默认值 —— 所以编辑表单预填当前值（`config.source_values`）。
+    """
+    from newspipe import config as config_mod
+
+    schema = schema or config_mod.describe_schema()
+    body: dict[str, Any] = {}
+    for field in schema.get("fields") or []:
+        path = str(field.get("path") or "")
+        raw = form.get(f"{FORM_PREFIX}{path}")
+        if raw is None:
+            continue
+        value = _coerce(field, raw)
+        if value is None:                      # 空数字 = 不写（让默认值生效），不静默变 0
+            continue
+        cursor = body
+        parts = path.split(".")
+        for part in parts[:-1]:
+            cursor = cursor.setdefault(part, {})
+        cursor[parts[-1]] = value
+    return body
+
+
+def _argv_source_save(form: dict[str, list[str]]) -> list[str]:
+    """新增 / 修改信源：表单 → 整段映射 JSON → `source set`。"""
+    name = _one(form, "name")
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{1,40}", name):
+        raise ActionInputError("信源名只能用字母、数字、下划线、短横，1–40 字符")
+    body = build_source_body(form)
+    if not body:
+        raise ActionInputError("表单是空的 —— 至少要提交 adapter 与 fetch.trigger")
+    argv = ["source", "set", name, "--from-json", json.dumps(body, ensure_ascii=False)]
+    if _flag(form, "dry"):
+        argv.append("--dry-run")
+    base = (form.get("base_hash") or [""])[0].strip()
+    if base:
+        argv += ["--base-hash", base]
+    return argv
+
+
+def _argv_source_remove(form: dict[str, list[str]]) -> list[str]:
+    """删除信源（危险动作：页面必须二次确认）。"""
+    name = _one(form, "name")
+    argv = ["source", "remove", name]
+    if _flag(form, "dry"):
+        argv.append("--dry-run")
+    base = (form.get("base_hash") or [""])[0].strip()
+    if base:
+        argv += ["--base-hash", base]
+    return argv
+
+
 ACTIONS: dict[str, Action] = {
     a.name: a for a in (
         Action("run", "跑一轮", _argv_run),
         Action("source-toggle", "启用 / 停用信源", _argv_source_toggle, danger=True),
+        Action("source-save", "保存信源（新增 / 修改）", _argv_source_save, danger=True),
+        Action("source-remove", "删除信源", _argv_source_remove, danger=True),
         Action("queue-ack", "确认入库（⭐）", _argv_queue_ack),
         Action("events-ack", "标记事件已消费", _argv_events_ack),
         Action("flush", "现在发掉顺延队列", _argv_flush, danger=True),

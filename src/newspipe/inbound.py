@@ -242,9 +242,65 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
 
             return view_mod.build(news_dir)
 
+        def _config_page(self, payload: dict[str, Any], act: dict[str, Any] | None,
+                         flash: dict[str, Any] | None, query: dict[str, list[str]]) -> str:
+            """配置页的输入装配：schema + 目录搜索 + URL 发现 + 预填 + 编辑预填。"""
+            from newspipe import config as config_mod
+            from newspipe import rss as rss_mod
+            from newspipe import view as view_mod
+
+            news = news_dir or config_mod.default_news_dir()
+            schema = config_mod.describe_schema(news)
+            page: dict[str, Any] = {"q": (query.get("q") or [""])[0],
+                                    "hash": str((act or {}).get("sources_hash") or "")}
+            if query.get("u"):
+                page["discover_url"] = (query.get("u") or [""])[0]
+                try:
+                    page["discover"] = rss_mod.discover(page["discover_url"])
+                except Exception as exc:                # noqa: BLE001 —— 失败要显示给人看
+                    page["discover_error"] = f"{type(exc).__name__}: {exc}"
+            prefill: dict[str, Any] = {}
+            hint = ""
+            if query.get("use"):
+                try:
+                    row: dict[str, Any] | None = rss_mod.CATALOG[int((query["use"] or ["0"])[0])]
+                except (ValueError, IndexError):
+                    row = None
+                if row:
+                    cand = rss_mod.as_candidate(row)
+                    prefill = {"adapter": "rsshub", "feeds": [cand["feed"]],
+                               "feed_label": cand["feed_label"], "fetch.trigger": "slot",
+                               "fetch.slots": ["am"]}
+                    hint = str(cand["name_hint"])
+            if query.get("feed"):
+                url = (query["feed"] or [""])[0]
+                prefill = {"adapter": "rsshub", "feeds": [url], "fetch.trigger": "slot",
+                           "fetch.slots": ["am"]}
+                hint = rss_mod._slug(urlparse(url).netloc or "feed")
+            if prefill:
+                page["prefill"] = prefill
+                page["prefill_name"] = hint
+            if query.get("edit"):
+                name = (query["edit"] or [""])[0]
+                try:
+                    cfg = config_mod.load(news)
+                    if name in cfg.sources:
+                        page["edit"] = name
+                        page["values"] = config_mod.source_values(cfg.sources[name])
+                    else:
+                        page["discover_error"] = f"没有信源 {name!r}"
+                except Exception as exc:                # noqa: BLE001
+                    page["discover_error"] = f"读配置失败：{exc}"
+            if not any(query.get(k) for k in ("q", "u", "use", "feed", "edit")):
+                page["catalog"] = rss_mod.search("")    # 空查询 = 目录浏览
+            elif page["q"]:
+                page["catalog"] = rss_mod.search(page["q"])
+            return view_mod.config_html(payload, schema=schema, actions=act, flash=flash, page=page)
+
         def do_GET(self) -> None:                          # noqa: N802（stdlib 命名）
             route = self.path.split("?")[0]
-            if route in ("/", view_path):
+            query = parse_qs(urlparse(self.path).query)
+            if route in ("/", "/ops", "/config", view_path):
                 try:
                     payload = self._view()
                 except Exception as exc:                   # 配置坏了要说清楚，别回空壳
@@ -252,25 +308,30 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                                      "error": {"code": "E_CONFIG", "message": f"{type(exc).__name__}: {exc}",
                                                "hint": "检查 info/news/{sources,service}.yaml"}})
                     return
-                if route == "/":
-                    from newspipe import view as view_mod
+                if route == view_path:
+                    self._send(200, payload)               # JSON 契约：形状与页面无关
+                    return
+                from newspipe import view as view_mod
 
-                    act, flash = None, None
-                    if token:
-                        from newspipe import config as config_mod
+                act, flash = None, None
+                if token:
+                    from newspipe import config as config_mod
 
-                        try:
-                            act = view_mod.action_snapshot(
-                                news_dir or config_mod.default_news_dir())
-                            act["token"] = token
-                        except Exception as exc:            # 动作面坏了不该连累只读页
-                            logger(f"写操作面构建失败（{type(exc).__name__}: {exc}）")
-                            act = None
-                        flash = view_mod.flash_decode(
-                            (parse_qs(urlparse(self.path).query).get("r") or [""])[0])
-                    self._send_html(200, view_mod.as_html(payload, actions=act, flash=flash))
+                    try:
+                        act = view_mod.action_snapshot(
+                            news_dir or config_mod.default_news_dir())
+                        act["token"] = token
+                    except Exception as exc:               # 动作面坏了不该连累只读页
+                        logger(f"写操作面构建失败（{type(exc).__name__}: {exc}）")
+                        act = None
+                    flash = view_mod.flash_decode((query.get("r") or [""])[0])
+                if route == "/ops":
+                    page = view_mod.ops_html(payload, actions=act, flash=flash)
+                elif route == "/config":
+                    page = self._config_page(payload, act, flash, query)
                 else:
-                    self._send(200, payload)
+                    page = view_mod.cockpit_html(payload, flash=flash)
+                self._send_html(200, page)
                 return
             self._send(200, {"ok": True, "service": "newspipe", "inbound": "http",
                              "view": view_path if view_path else None,

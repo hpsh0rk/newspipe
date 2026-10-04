@@ -213,11 +213,14 @@ class ActionGateTests(unittest.TestCase):
         code, body = self._post(base, "run", {"token": "wrong", "target": "poll"})
         self.assertEqual(code, 403)
         self.assertIn("E_TOKEN", body)
-        with urllib.request.urlopen(f"{base}/", timeout=5) as resp:
+        with urllib.request.urlopen(f"{base}/ops", timeout=5) as resp:
             page = resp.read().decode("utf-8")
         self.assertIn(TOKEN, page)                    # 令牌嵌进表单
         self.assertIn('action="/api/actions/run"', page)
         self.assertIn('name="dry" value="1" checked', page)   # 默认试运行
+        with urllib.request.urlopen(f"{base}/", timeout=5) as resp:
+            cockpit = resp.read().decode("utf-8")
+        self.assertNotIn("<form", cockpit)            # 驾驶舱不该有写操作
 
     def test_cross_origin_posts_are_refused(self) -> None:
         base = self._serve(view_actions=True)

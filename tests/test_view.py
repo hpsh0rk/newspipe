@@ -126,7 +126,10 @@ class ViewBuildTests(unittest.TestCase):
     def test_html_page_is_self_contained_and_escaped(self) -> None:
         self.store.heartbeat("aihot", status="error", note="<script>alert(1)</script>")
         page = view.as_html(view.build(self.news, now=NOW))
-        self.assertIn("newspipe · 资讯管线", page)
+        self.assertIn("newspipe · 驾驶舱", page)                 # 默认页 = 驾驶舱
+        self.assertIn('href="/config"', page)                     # 三个 Tab 都在
+        self.assertIn('href="/ops"', page)
+        self.assertNotIn("<form", page)                           # 驾驶舱是只读的
         self.assertNotIn("<script>alert(1)</script>", page)      # 转义过
         self.assertIn("&lt;script&gt;", page)
         self.assertNotIn("http://", page.replace("http://127.0.0.1", ""))  # 不发外部请求
@@ -183,9 +186,10 @@ class ViewHttpTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def _serve(self, *, accept_events: bool) -> tuple[object, threading.Thread, str]:
+    def _serve(self, *, accept_events: bool, view_actions: bool = False) -> tuple[object, threading.Thread, str]:
         server, path = inbound.start_http(service_cfg=self.service_cfg, creds=None,
-                                          news_dir=self.news, accept_events=accept_events)
+                                          news_dir=self.news, accept_events=accept_events,
+                                          view_actions=view_actions, action_token="TOK")
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(server.shutdown)
@@ -206,7 +210,25 @@ class ViewHttpTests(unittest.TestCase):
         with urllib.request.urlopen(f"{base}/", timeout=5) as resp:
             self.assertIn("text/html", resp.headers["Content-Type"])
             page = resp.read().decode("utf-8")
-        self.assertIn("资讯管线", page)
+        self.assertIn("驾驶舱", page)
+
+    def test_the_three_tabs_are_separate_routes(self) -> None:
+        """驾驶舱只读、运维有按钮、配置有表单 —— 三页不能退化成同一页。"""
+        _server, _thread, base = self._serve(accept_events=True, view_actions=True)
+        pages = {}
+        for route in ("/", "/ops", "/config"):
+            with urllib.request.urlopen(f"{base}{route}", timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+                pages[route] = resp.read().decode("utf-8")
+        self.assertNotIn("<form", pages["/"])                     # 驾驶舱只读
+        self.assertIn('action="/api/actions/run"', pages["/ops"])
+        self.assertIn("信源清单", pages["/config"])
+        self.assertIn("RSS 搜索", pages["/config"])
+        self.assertIn("本页只读", pages["/"])                       # 别撒谎说「写操作未开启」
+        self.assertNotIn("写操作未开启", pages["/"])
+        for route, page in pages.items():
+            for other in ("/", "/ops", "/config"):
+                self.assertIn(f'href="{other}"', page, f"{route} 缺少到 {other} 的 Tab")
 
     def test_view_only_server_refuses_events(self) -> None:
         _server, _thread, base = self._serve(accept_events=False)

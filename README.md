@@ -171,14 +171,44 @@ newspipe view --json     # 契约：每源心跳（原始状态+中文标签+语
 newspipe view --html     # 同一份数据的服务端渲染页（无前端构建链）
 ```
 
-`GET /view` 与 `GET /` 是同一个 builder 的 HTTP 出口（需 `service.yaml: view.enabled`），
+`GET /view` 是只读 JSON 契约；**页面**分三个 Tab（同一个 builder + 同一份数据，服务端路由，
+可深链、可加书签、无前端构建）：
+
+| 路由 | Tab | 内容 |
+|---|---|---|
+| `GET /` | 驾驶舱 | 全局总览：KPI、信源心跳表、今日批次。**只读**，一个表单都没有 |
+| `GET /config` | 配置 | 信源增删改（表单由引擎 schema 生成）+ RSS 搜索/订阅 |
+| `GET /ops` | 运维 | 管理动作：跑一轮、启停信源、⭐确认入库、事件已消费、现在发队列 |
+
+三个路由都需 `service.yaml: view.enabled`；写操作额外需 `view.actions`。
 自带 `contract_version`。**宿主不要解析 `<news_dir>/state/**`**：那是本项目的私有布局，
 改一次布局就会让宿主静默读空（页面显示成「从未运行」，看着像没跑，其实是读错了地方）。
 
+### 配置页：信源增删改 + RSS 搜索订阅
+
+**表单不是第二份 schema。** 字段、类型、枚举取值、默认值全部来自引擎的
+`newspipe config describe --json`（`config.py: describe_schema()`）；编辑表单的当前值来自
+`config.source_values()`。加一个配置字段只改 `config.py` 一处，页面自动跟上 ——
+有测试钉住「schema 的每个 path 都能取到当前值」，因为漏一个字段的后果不是报错，
+而是**编辑表单把那个字段按默认值写回去**（静默的数据损坏）。
+
+| 动作 | 落盘路径 |
+|---|---|
+| 新增/修改信源 | `newspipe source set <名> --from-json '<整段配置>'`（+ `--dry-run` / `--base-hash`） |
+| 删除信源 | `newspipe source remove <名>` |
+| 启用/停用 | `newspipe source enable\|disable <名>` |
+
+- 表单默认勾选**先演练**（`--dry-run`），落盘前先看 diff；取消勾选才是真写。
+- 保存 = **整体替换**该源的配置块，块内注释会丢 —— CLI 的 warning 会原样显示在页面横幅上。
+- RSS 搜索两条路：① **关键词搜目录**（`src/newspipe/rss.py` 里的 `CATALOG`，**只收录在本机
+  RSSHub 上实测过**的条目，带实测日期与状态码）；② **站点地址发现 feed**（抓页面里的
+  `<link rel=alternate>`，没有再探 `/feed`、`/atom.xml` 等常见路径）。
+  本地 RSSHub 没有 `/routes` 目录（实测 404），所以不做「全网 RSS 搜索」这种吹牛功能。
+- 搜到的候选点「用这个新建信源」→ 跳到配置页并**预填**成 `rsshub` 适配器 + 该地址。
+
 ### 页面写操作：仪表盘变控制台（`view.actions`）
 
-打开 `service.yaml: view.actions` 后，`GET /` 页面上会出现按钮（跑一轮、启用/停用信源、
-⭐ 确认入库、标记事件已消费、现在发顺延队列）。机制：
+打开 `service.yaml: view.actions` 后，`/ops` 与 `/config` 上会出现按钮与表单。机制：
 
 ```
 页面表单 → POST /api/actions/<动作> → src/newspipe/actions.py（表单 → argv）→ CLI 的同一份 handler
@@ -194,6 +224,7 @@ newspipe view --html     # 同一份数据的服务端渲染页（无前端构�
 - **结果就是 CLI 信封**：成功显示 `changed`/摘要，失败显示 `error.message` + `hint` +
   可直接复现的 CLI 命令。不是「操作成功」四个字。
 - 默认是**试运行**（`--dry` 复选框默认勾选）；真发卡要显式取消勾选。
+- **没开 `view.actions` 就不渲染按钮** —— 给一个按下去只会 403 的按钮是骗人。
 - 只读契约 `GET /view` 不含令牌，形状不变（只多一个 `sources_hash`，供页面做乐观并发）。
 
 ### 环境变量
@@ -253,7 +284,7 @@ newspipe queue list --json                                # 待入库（人确�
 ## 测试
 
 ```bash
-python -m unittest discover -s tests        # 282 个用例，无第三方测试框架依赖
+python -m unittest discover -s tests        # 307 个用例，无第三方测试框架依赖
 ```
 
 覆盖：四轴配置与校验、采集与去重、预算熔断与回执复用、卡片渲染与元素预算、

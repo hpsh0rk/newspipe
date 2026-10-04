@@ -34,6 +34,7 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote as urlquote
 
 from newspipe import config, edit, state
 
@@ -350,6 +351,22 @@ h3{font-size:13px;margin:14px 0 6px}
 details{margin:2px 0}
 summary{cursor:pointer;font-size:12px;opacity:.8}
 .note{font-size:12px;opacity:.7}
+nav.tabs{display:flex;gap:6px;margin:0 0 14px;border-bottom:1px solid rgba(128,128,128,.3);
+     padding-bottom:0}
+nav.tabs a.tab{padding:6px 14px;border:1px solid transparent;border-bottom:none;
+     border-radius:8px 8px 0 0;text-decoration:none;color:inherit;opacity:.7;font-size:14px}
+nav.tabs a.tab:hover{opacity:1;background:rgba(128,128,128,.08)}
+nav.tabs a.tab.on{opacity:1;border-color:rgba(128,128,128,.3);background:rgba(128,128,128,.10);
+     font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
+.card{border:1px solid rgba(128,128,128,.3);border-radius:8px;padding:10px 12px}
+.card h3{margin:0 0 8px}
+label.f{margin:2px 10px 2px 0;font-size:12px;display:inline-flex;align-items:center;gap:4px}
+label.f input[type=text],label.f select,label.f input[type=number]{min-width:88px}
+fieldset{border:1px solid rgba(128,128,128,.3);border-radius:8px;margin:0 0 12px;padding:8px 12px}
+legend{font-size:12px;opacity:.75;padding:0 6px}
+.cand{border:1px solid rgba(128,128,128,.3);border-radius:8px;padding:8px 10px;margin:6px 0}
+.cand code{word-break:break-all}
 """
 
 
@@ -405,8 +422,27 @@ def _link(title: str, url: str, *, limit: int = 110) -> str:
     return f'<a href="{html.escape(url)}" target="_blank" rel="noopener">{text}</a>'
 
 
+#: 三个 Tab：服务端路由（可深链、可加书签、无 JS）。`GET /view` 仍是同一进程里的 JSON 契约。
+TABS: tuple[tuple[str, str, str], ...] = (
+    ("cockpit", "驾驶舱", "/"),
+    ("config", "配置", "/config"),
+    ("ops", "运维", "/ops"),
+)
+
+
+def _nav(tab: str) -> str:
+    links = "".join(
+        f'<a class="tab{" on" if key == tab else ""}" href="{href}">{label}</a>'
+        for key, label, href in TABS)
+    return f'<nav class="tabs">{links}</nav>'
+
+
+def _tab_label(tab: str) -> str:
+    return next((label for key, label, _ in TABS if key == tab), tab)
+
+
 def as_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
-            flash: dict[str, Any] | None = None) -> str:
+            flash: dict[str, Any] | None = None, tab: str = "cockpit") -> str:
     """同一份视图的服务端渲染（`GET /`）：不引前端、不发任何外部请求。
 
     面板（宿主）走 JSON 契约；这一页是给「从服务门户点进来」的场景用的。
@@ -535,14 +571,20 @@ def as_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
 
     svc = view["service"]
     read_rate = "—" if s["read_rate"] is None else f"{round(s['read_rate'] * 100)}%"
-    write_note = ("写操作走 <code>POST /api/actions/*</code> → CLI 的同一份 handler；"
-                  "动作白名单在代码里，不是配置。" if on else
-                  "写操作未开启（<code>service.yaml: view.actions</code>）。")
+    if on:
+        write_note = ("写操作走 <code>POST /api/actions/*</code> → CLI 的同一份 handler；"
+                      "动作白名单在代码里，不是配置。")
+    elif tab == "cockpit":
+        # 别在只读页上撒谎说「写操作未开启」—— 开着，只是这页不做
+        write_note = "本页只读；增删改在「配置」页，管理动作在「运维」页。"
+    else:
+        write_note = "写操作未开启（<code>service.yaml: view.actions</code>）。"
     return f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>newspipe · 资讯管线</title><style>{_CSS}</style></head><body>
-<h1>newspipe · 资讯管线</h1>
+<title>newspipe · {_tab_label(tab)}</title><style>{_CSS}</style></head><body>
+{_nav(tab)}
+<h1>newspipe · {_tab_label(tab)}</h1>
 <p class="sub">生成于 <code>{html.escape(view['generated_at'])}</code> ·
 通道 {html.escape(svc['channel'])} · 入站 {html.escape(svc['inbound_mode'])} ·
 槽位 {html.escape(', '.join(f'{k}:{v}' for k, v in view['slots'].items()))} ·
@@ -569,5 +611,222 @@ def as_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
 {events_section}
 <footer>本页与 <code>GET {html.escape(str(svc['view_path']))}</code> 同源（只读视图契约 v{view['contract_version']}）。
 行为权威 = <code>sources.yaml</code>（改配置走 CLI 或 Git）。{write_note}</footer>
+</body></html>
+"""
+
+
+def cockpit_html(view: dict[str, Any], *, flash: dict[str, Any] | None = None) -> str:
+    """驾驶舱：全局总览，**只读**（没有 actions 就没有任何表单）。"""
+    return as_html(view, actions=None, flash=flash, tab="cockpit")
+
+
+def ops_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
+             flash: dict[str, Any] | None = None) -> str:
+    """运维：跑一轮 / 启停 / ⭐确认入库 / 事件消费 / 顺延队列。写操作都走 CLI 同一份 handler。"""
+    return as_html(view, actions=actions, flash=flash, tab="ops")
+
+
+# ---------------------------------------------------------------- 配置页（表单驱动）
+def _field_input(field: dict[str, Any], value: Any, *, prefix: str = "f.") -> str:
+    """按 schema 的一项渲染一个控件。**加字段不用改这里** —— 类型只有 6 种。"""
+    path = str(field.get("path") or "")
+    kind = str(field.get("type") or "str")
+    name = f"{prefix}{path}"
+    label = str(field.get("label") or path)
+    hint = str(field.get("help") or "")
+    title = f' title="{html.escape(hint)}"' if hint else ""
+    if kind == "bool":
+        checked = " checked" if value else ""
+        # 隐藏的 0：没勾也会提交，翻译层才能区分「关掉」与「没这个字段」
+        return (f'<label class="f"{title}><input type="hidden" name="{name}" value="0">'
+                f'<input type="checkbox" name="{name}" value="1"{checked}> {html.escape(label)}</label>')
+    if kind == "enum":
+        options = "".join(
+            f'<option value="{html.escape(str(c))}"{" selected" if str(c) == str(value) else ""}>'
+            f"{html.escape(str(c))}</option>" for c in (field.get("choices") or []))
+        return (f'<label class="f"{title}>{html.escape(label)} '
+                f'<select name="{name}">{options}</select></label>')
+    if kind == "slots":
+        boxes = "".join(
+            f'<label class="f"><input type="checkbox" name="{name}" value="{html.escape(str(c))}"'
+            f'{" checked" if c in (value or []) else ""}> {html.escape(str(c))}</label>'
+            for c in (field.get("choices") or []))
+        return f'<span class="f"{title}>{html.escape(label)} {boxes}</span>'
+    if kind == "list":
+        text = ", ".join(str(v) for v in (value or []))
+        return (f'<label class="f"{title}>{html.escape(label)} '
+                f'<input type="text" name="{name}" value="{html.escape(text)}" size="34" '
+                f'placeholder="逗号分隔"></label>')
+    itype = "number" if kind in ("int", "float") else "text"
+    step = ' step="any"' if kind == "float" else ""
+    shown = "" if value is None else str(value)
+    return (f'<label class="f"{title}>{html.escape(label)} '
+            f'<input type="{itype}"{step} name="{name}" value="{html.escape(shown)}" size="26"></label>')
+
+
+def _source_form(schema: dict[str, Any], *, name: str, values: dict[str, Any], token: str,
+                 base_hash: str, is_new: bool, submit: str) -> str:
+    """四轴分组表单。字段来自 schema，值来自 `config.source_values`（编辑）或默认值（新增）。"""
+    groups = []
+    for axis in schema.get("axes") or []:
+        fields = [f for f in schema.get("fields") or [] if f.get("axis") == axis.get("key")]
+        if not fields:
+            continue
+        basic = "".join(_field_input(f, values.get(f["path"], f.get("default")))
+                        for f in fields if not f.get("advanced"))
+        adv_fields = [f for f in fields if f.get("advanced")]
+        advanced = ""
+        if adv_fields:
+            inner = "".join(_field_input(f, values.get(f["path"], f.get("default")))
+                            for f in adv_fields)
+            advanced = (f'<details><summary>高级（{len(adv_fields)} 项）</summary>{inner}</details>')
+        groups.append(f'<fieldset><legend>{html.escape(str(axis.get("label")))} '
+                      f'<span class="hint">{html.escape(str(axis.get("hint")))}</span></legend>'
+                      f'{basic}{advanced}</fieldset>')
+    if is_new:
+        head = ('<p><label class="f">信源名（英文/数字/下划线） '
+                f'<input type="text" name="name" value="{html.escape(name)}" size="20"></label></p>')
+    else:
+        head = (f'<p>信源名 <code>{html.escape(name)}</code>'
+                f'<input type="hidden" name="name" value="{html.escape(name)}"></p>')
+    return (f'<form method="post" action="/api/actions/source-save">'
+            f'<input type="hidden" name="token" value="{html.escape(token)}">'
+            f'<input type="hidden" name="base_hash" value="{html.escape(base_hash)}">'
+            f"{head}{''.join(groups)}"
+            '<p><label class="f"><input type="checkbox" name="dry" value="1" checked>'
+            " 先演练（--dry-run，不落盘）</label>"
+            f'<button class="btn danger" type="submit">{html.escape(submit)}</button>'
+            '<span class="hint">取消勾选「先演练」才是真写盘。'
+            "保存 = 整体替换该源的配置块（块内注释会丢，CLI 会提示）</span></p></form>")
+
+
+def config_html(view: dict[str, Any], *, schema: dict[str, Any], actions: dict[str, Any] | None = None,
+                flash: dict[str, Any] | None = None, page: dict[str, Any] | None = None) -> str:
+    """配置页：信源增删改 + 四轴策略表单 + RSS 搜索/订阅。
+
+    表单字段由 `config.describe_schema()` 生成 —— 这是「表单不是第二份 schema」的落点。
+    所有写操作仍然只经 `source set|remove|enable|disable`（CLI 的校验与原子写）。
+    """
+    pg = page or {}
+    act = actions or {}
+    token = str(act.get("token") or "")
+    on = bool(token)
+    src_hash = str(act.get("sources_hash") or pg.get("hash") or "")
+    svc = view["service"]
+    rows = []
+    for src in view["sources"]:
+        if on:
+            toggle = _form("source-toggle", token,
+                           {"name": src["name"], "state": "disable" if src["enabled"] else "enable",
+                            "base_hash": src_hash}, "停用" if src["enabled"] else "启用")
+            edit = f'<a class="btn" href="/config?edit={html.escape(str(src["name"]))}">编辑</a>'
+            remove = _form("source-remove", token, {"name": src["name"], "base_hash": src_hash},
+                           "删除", danger=True)
+            cell = f"<td>{edit} {toggle} {remove}</td>"
+        else:
+            # 没开写操作就**不渲染按钮** —— 给一个按下去只会 403 的按钮是骗人
+            cell = '<td class="hint">写操作未开启</td>'
+        rows.append(
+            "<tr>"
+            f'<td><code>{html.escape(str(src["name"]))}</code></td>'
+            f'<td>{html.escape(str(src["adapter"]))}</td>'
+            f'<td>{html.escape(str(src["trigger"]))}{"/" + ",".join(src["slots"]) if src["slots"] else ""}</td>'
+            f'<td>{html.escape(str(src["form"]))}/{html.escape(str(src["summary_mode"]))}</td>'
+            f'<td>{"✅" if src["enabled"] else "⛔"}</td>'
+            f"{cell}"
+            "</tr>")
+    source_table = (
+        "<h2>信源清单 <span class=\"hint\">改配置走 CLI：这里是表单，落盘仍是 `source set`</span></h2>"
+        "<table><thead><tr><th>源</th><th>适配器</th><th>节奏</th><th>形态/加工</th><th>启用</th>"
+        "<th>操作</th></tr></thead><tbody>"
+        + ("".join(rows) or '<tr><td colspan="6" class="empty">还没有信源</td></tr>')
+        + "</tbody></table>")
+
+    edit_section = ""
+    edit_name = str(pg.get("edit") or "")
+    if on and edit_name and pg.get("values") is not None:
+        edit_section = (f'<h2>编辑 <code>{html.escape(edit_name)}</code></h2>'
+                        + _source_form(schema, name=edit_name, values=pg["values"], token=token,
+                                       base_hash=src_hash, is_new=False, submit="保存这个信源"))
+    if on:
+        new_section = ('<h2 id="new">新增信源</h2>'
+                       + _source_form(schema, name=str(pg.get("prefill_name") or ""),
+                                      values=pg.get("prefill") or {}, token=token,
+                                      base_hash=src_hash, is_new=True, submit="新建信源"))
+    else:
+        # 没开写操作就不渲染表单：按下去只会 403 的按钮是骗人
+        new_section = ('<h2 id="new">新增信源</h2><p class="empty">写操作未开启'
+                       '（<code>service.yaml: view.actions</code>）—— 表单不渲染。</p>')
+
+    # ---- RSS 搜索
+    q = str(pg.get("q") or "")
+    hits = pg.get("catalog") or []
+    cand_rows = []
+    for i, row in enumerate(hits):
+        feed = str(row.get("feed") or "")
+        cand_rows.append(
+            '<div class="cand">'
+            f'<b>{html.escape(str(row.get("name") or ""))}</b> '
+            f'<span class="hint">{" · ".join(row.get("tags") or [])}'
+            f'{" · 实测 " + str(row["verified"]) if row.get("verified") else ""}</span><br>'
+            f'<code>{html.escape(feed)}</code>'
+            + (f'<div class="note">{html.escape(str(row.get("note")))}</div>' if row.get("note") else "")
+            + f'<div><a class="btn" href="/config?use={i}#new">用这个新建信源</a></div></div>')
+    discover = pg.get("discover")
+    found_rows = []
+    if discover:
+        for i, cand in enumerate(discover.get("candidates") or []):
+            found_rows.append(
+                '<div class="cand">'
+                f'<code>{html.escape(str(cand.get("url") or ""))}</code>'
+                f'<div class="note">{html.escape(str(cand.get("how") or ""))}'
+                f'{" · " + html.escape(str(cand["title"])) if cand.get("title") else ""}</div>'
+                f'<div><a class="btn" href="/config?feed={urlquote(str(cand.get("url") or ""))}#new">'
+                "用这个新建信源</a></div></div>")
+    rss_section = (
+        '<h2 id="rss">RSS 搜索 / 订阅</h2>'
+        '<form method="get" action="/config" class="toolbar">'
+        f'<label class="f">关键词 <input type="text" name="q" value="{html.escape(q)}" size="24" '
+        'placeholder="如 AI、羊毛、少数派"></label>'
+        '<button class="btn primary" type="submit">搜目录</button>'
+        '<span class="hint">目录里的条目都是在本机 RSSHub 上实测可用的</span></form>'
+        + ("".join(cand_rows) or ('<p class="empty">目录里没有匹配的条目</p>' if q else ""))
+        + '<form method="get" action="/config" class="toolbar">'
+        f'<label class="f">站点地址 <input type="text" name="u" size="30" '
+        f'value="{html.escape(str(pg.get("discover_url") or ""))}" '
+        'placeholder="如 sspai.com"></label>'
+        '<button class="btn primary" type="submit">发现 feed</button>'
+        '<span class="hint">抓页面里的 &lt;link rel=alternate&gt;，没有再探 /feed 等常见路径</span></form>'
+        + (f'<div class="banner err">{html.escape(str(pg.get("discover_error")))}</div>'
+           if pg.get("discover_error") else "")
+        + (f'<div class="note">{html.escape(str(discover.get("note") or ""))}</div>' if discover else "")
+        + ("".join(found_rows) or ('<p class="empty">没发现 feed</p>'
+                                   if discover else "")))
+
+    body = (f'<p class="sub">配置权威 = <code>sources.yaml</code> · 当前哈希 '
+            f'<code>{html.escape(src_hash[:12])}</code> · 写操作走 CLI 的同一份 handler'
+            f'{"（<b>写操作未开启</b>：service.yaml: view.actions）" if not on else ""}</p>'
+            + _banner(flash) + edit_section + source_table + rss_section + new_section)
+    return _page(tab="config", sub_meta=view, svc=svc, body=body,
+                 footer_extra="本页的表单由 <code>newspipe config describe --json</code> 生成"
+                              "（字段的唯一事实来源），落盘一律经 CLI。")
+
+
+def _page(*, tab: str, sub_meta: dict[str, Any], svc: dict[str, Any], body: str,
+          footer_extra: str = "") -> str:
+    """三页共用的外壳：导航 + 标题 + 元信息行 + 正文 + 页脚。"""
+    return f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>newspipe · {_tab_label(tab)}</title><style>{_CSS}</style></head><body>
+{_nav(tab)}
+<h1>newspipe · {_tab_label(tab)}</h1>
+<p class="sub">生成于 <code>{html.escape(str(sub_meta.get('generated_at')))}</code> ·
+通道 {html.escape(str(svc.get('channel')))} · 入站 {html.escape(str(svc.get('inbound_mode')))} ·
+槽位 {html.escape(', '.join(f'{k}:{v}' for k, v in (sub_meta.get('slots') or {}).items()))} ·
+投递群 <code>{html.escape(str(sub_meta.get('chat')))}</code></p>
+{body}
+<footer>只读契约 <code>GET /view</code> v{sub_meta.get('contract_version')}（宿主/面板的数据面）。
+{footer_extra}</footer>
 </body></html>
 """

@@ -314,6 +314,142 @@ class ServiceCfg:
         return bool(self.view.get("enabled")) and bool(self.view.get("actions"))
 
 
+# ------------------------------------------------------ 自描述：页面/Agent 的表单 schema
+def adapter_names() -> list[str]:
+    """适配器名 = `adapters/` 下的模块名。加一个文件就多一个可选值，不需要维护第二份清单。"""
+    folder = Path(__file__).with_name("adapters")
+    return sorted(p.stem for p in folder.glob("*.py")
+                  if p.stem != "__init__" and not p.stem.startswith("_"))
+
+
+def describe_schema(news_dir: Path | None = None) -> dict[str, Any]:
+    """配置的**自描述字段表** —— 页面表单与 Agent 改配置的唯一事实来源。
+
+    为什么必须有它：把 `sources.yaml` 的字段手抄进前端 = 第二份 schema，加一个字段就漂移
+    （页面悄悄丢字段，或把新字段按旧默认值写回去）。这里由本模块自己吐字段表，
+    加字段只改上面的 dataclass，表单自动跟上。
+
+    `path` 是**在 `sources.yaml` 里的 YAML 路径**（注意 `deliver.budget.*` 是嵌套的），
+    因为表单最终要拼出能直接交给 `source set --from-json` 的整段映射。
+    """
+    slots: list[str] = []
+    if news_dir is not None:
+        try:
+            slots = sorted(load(news_dir).slots)
+        except ConfigError:
+            slots = []
+    axes = [
+        {"key": "identity", "label": "身份与通道", "hint": "这个源是谁、用什么抓、怎么接进管线"},
+        {"key": "fetch", "label": "① 何时拉", "hint": "slot=定时攒批 · poll=分钟级轮询 · manual=只手动跑"},
+        {"key": "filter", "label": "② 留什么", "hint": "关键词闸 + 条数上下限 + 排序"},
+        {"key": "enrich", "label": "③ 加工什么", "hint": "summary=off 时整条链路零模型调用"},
+        {"key": "deliver", "label": "④ 怎么发", "hint": "卡片形态 / 优先级 / 静默时段 / 打扰预算"},
+        {"key": "card", "label": "卡片外观", "hint": "标题与分组"},
+    ]
+    f: list[dict[str, Any]] = [
+        # ---- 身份与通道
+        {"path": "adapter", "axis": "identity", "label": "适配器", "type": "enum",
+         "choices": adapter_names(), "default": "rsshub",
+         "help": "决定怎么抓：aihot/hn/reddit 是专用源；rsshub 走任意 RSS 地址或 RSSHub 路由"},
+        {"path": "enabled", "axis": "identity", "label": "启用", "type": "bool", "default": True,
+         "help": "关掉后调度会跳过它（等价于页面上的「停用」）"},
+        {"path": "tier", "axis": "identity", "label": "层级", "type": "enum",
+         "choices": list(TIERS), "default": "T2"},
+        {"path": "first_party", "axis": "identity", "label": "第一方源", "type": "bool",
+         "default": False, "help": "本人/自建源，影响优先级判定"},
+        {"path": "feeds", "axis": "identity", "label": "订阅地址（feeds）", "type": "list",
+         "default": [], "help": "rsshub 适配器必填：RSS 地址，或 RSSHub 路由（/twitter/user/xxx）"},
+        {"path": "feed_label", "axis": "identity", "label": "来源标签", "type": "str", "default": "",
+         "help": "卡片上显示的来源名"},
+        {"path": "http2", "axis": "identity", "label": "强制 HTTP/2", "type": "bool", "default": False,
+         "advanced": True, "help": "CF Bot Management 对 HTTP/1.1 指纹一律 403 时才需要"},
+        # ---- ① 何时拉
+        {"path": "fetch.trigger", "axis": "fetch", "label": "触发方式", "type": "enum",
+         "choices": list(TRIGGERS), "default": "slot"},
+        {"path": "fetch.slots", "axis": "fetch", "label": "槽位", "type": "slots",
+         "choices": slots, "default": [], "help": "trigger=slot 必填；取值来自 sources.yaml 顶层的 slots"},
+        {"path": "fetch.interval_min", "axis": "fetch", "label": "轮询间隔（分钟）", "type": "float",
+         "default": 0.0, "help": "trigger=poll 用：两次真抓取之间的最小间隔"},
+        # ---- ② 留什么
+        {"path": "filter.include_keywords", "axis": "filter", "label": "包含关键词", "type": "list",
+         "default": [], "help": "命中任一即保留；留空 = 不过滤"},
+        {"path": "filter.exclude_keywords", "axis": "filter", "label": "排除关键词", "type": "list",
+         "default": []},
+        {"path": "filter.min_items", "axis": "filter", "label": "最少条数", "type": "int", "default": 1,
+         "help": "不够就攒批（不发卡）"},
+        {"path": "filter.max_items", "axis": "filter", "label": "最多条数", "type": "int",
+         "default": CARD_MAX_ITEMS, "help": f"上限 {CARD_MAX_ITEMS}：飞书卡片 200 元素约束"},
+        {"path": "filter.rank", "axis": "filter", "label": "排序", "type": "enum",
+         "choices": list(RANKS), "default": "none"},
+        # ---- ③ 加工什么
+        {"path": "enrich.summary", "axis": "enrich", "label": "摘要模式", "type": "enum",
+         "choices": list(SUMMARY_MODES), "default": "off",
+         "help": "off=不调模型 · title=只写中文标题 · post=标题+摘要 · article=抓正文后再写"},
+        {"path": "enrich.fetch_body", "axis": "enrich", "label": "抓正文", "type": "bool", "default": False},
+        {"path": "enrich.translate_body", "axis": "enrich", "label": "翻译正文", "type": "bool",
+         "default": False, "advanced": True, "help": "需要 summary 不为 off"},
+        {"path": "enrich.max_body_chars", "axis": "enrich", "label": "正文截断字数", "type": "int",
+         "default": 6000, "advanced": True},
+        # ---- ④ 怎么发
+        {"path": "deliver.form", "axis": "deliver", "label": "卡片形态", "type": "enum",
+         "choices": list(FORMS), "default": "card",
+         "help": "card=一批一张 · append_card=当日追加进同一张实时卡 · state_only=只落 state 不发卡"},
+        {"path": "deliver.priority", "axis": "deliver", "label": "优先级", "type": "enum",
+         "choices": list(PRIORITIES), "default": "normal",
+         "help": "high 越过静默窗口与最小间隔"},
+        {"path": "deliver.quiet_hours", "axis": "deliver", "label": "静默时段", "type": "str",
+         "default": "", "help": "HH:MM-HH:MM，如 23:30-07:30；留空 = 不静默"},
+        {"path": "deliver.budget.max_cards_per_day", "axis": "deliver", "label": "每日卡片上限",
+         "type": "int", "default": 12, "advanced": True},
+        {"path": "deliver.budget.min_gap_min", "axis": "deliver", "label": "最小间隔（分钟）",
+         "type": "float", "default": 0.0, "advanced": True},
+        # ---- 卡片外观
+        {"path": "card.title", "axis": "card", "label": "卡片标题", "type": "str", "default": ""},
+        {"path": "card.group_by", "axis": "card", "label": "分组字段", "type": "str", "default": "",
+         "advanced": True, "help": "如 category；留空 = 不分组"},
+    ]
+    return {"contract_version": 1, "axes": axes, "fields": f, "adapters": adapter_names(),
+            "slots": slots,
+            "globals": {"note": "chat 与 slots 是全局设置，不是某个源的字段；CLI 目前没有写这条路径",
+                        "editable": False}}
+
+
+def source_values(cfg: SourceConfig) -> dict[str, Any]:
+    """把一个已解析的信源摊成 `{schema path: 当前值}` —— 页面编辑表单的预填数据。
+
+    与 `describe_schema()` 的 `path` **一一对应**，有测试钉住这件事。少一个字段的后果不是
+    报错，而是编辑表单把那个字段按默认值写回去 —— 静默的数据损坏（比如把 `feeds` 清空）。
+    """
+    return {
+        "adapter": cfg.adapter,
+        "enabled": cfg.enabled,
+        "tier": cfg.tier,
+        "first_party": cfg.first_party,
+        "feeds": list(cfg.extra.get("feeds") or []),
+        "feed_label": str(cfg.extra.get("feed_label") or ""),
+        "http2": bool(cfg.extra.get("http2")),
+        "fetch.trigger": cfg.fetch.trigger,
+        "fetch.slots": list(cfg.fetch.slots),
+        "fetch.interval_min": cfg.fetch.interval_min,
+        "filter.include_keywords": list(cfg.filter.include_keywords),
+        "filter.exclude_keywords": list(cfg.filter.exclude_keywords),
+        "filter.min_items": cfg.filter.min_items,
+        "filter.max_items": cfg.filter.max_items,
+        "filter.rank": cfg.filter.rank,
+        "enrich.summary": cfg.enrich.summary,
+        "enrich.fetch_body": cfg.enrich.fetch_body,
+        "enrich.translate_body": cfg.enrich.translate_body,
+        "enrich.max_body_chars": cfg.enrich.max_body_chars,
+        "deliver.form": cfg.deliver.form,
+        "deliver.priority": cfg.deliver.priority,
+        "deliver.quiet_hours": cfg.deliver.quiet_hours,
+        "deliver.budget.max_cards_per_day": cfg.deliver.max_cards_per_day,
+        "deliver.budget.min_gap_min": cfg.deliver.min_gap_min,
+        "card.title": str(cfg.card.get("title") or ""),
+        "card.group_by": str(cfg.card.get("group_by") or ""),
+    }
+
+
 def load_service(news_dir: Path) -> ServiceCfg:
     """读 `service.yaml`（可选）。任何非法枚举都抛 ConfigError，不静默取默认。"""
     path = Path(news_dir) / "service.yaml"

@@ -36,6 +36,9 @@ CONTRACT: list[dict[str, Any]] = [
     {"name": "api describe", "summary": "输出本契约（命令、参数、退出码、示例）",
      "usage": "newspipe api describe --json", "args": [], "writes": False,
      "examples": ["newspipe api describe --json"]},
+    {"name": "config describe", "summary": "配置字段表（页面表单与 Agent 改配置的唯一事实来源）",
+     "usage": "newspipe config describe --json", "args": [], "writes": False,
+     "examples": ["newspipe config describe --json"]},
     {"name": "doctor", "summary": "自检：配置能否加载、hooks 是否可用、凭据、元素预算、事件积压",
      "usage": "newspipe doctor [--json]", "args": [], "writes": False,
      "examples": ["newspipe doctor --json"]},
@@ -121,7 +124,7 @@ CONTRACT: list[dict[str, Any]] = [
      "examples": ["newspipe serve --once --dry"]},
 ]
 
-SUBCOMMANDS = ("api", "doctor", "status", "view", "list-sources", "source", "hooks", "events", "queue",
+SUBCOMMANDS = ("api", "config", "doctor", "status", "view", "list-sources", "source", "hooks", "events", "queue",
                "run", "serve", "migrate", "probe-channel", "probe-model", "card",
                "card-preview", "enrich-only")
 
@@ -331,6 +334,11 @@ def cmd_probe_channel(cfg: config.Config, *, chat: str, json_out: bool) -> int:
 
 
 # ------------------------------------------------------- 子命令（结果信封）
+def _sub_config_describe(args: argparse.Namespace, news_dir: Path) -> result.Result:
+    """配置字段表：页面表单与 Agent 改配置的**唯一事实来源**（加字段只改 `config.py`）。"""
+    return result.ok("config describe", config.describe_schema(news_dir))
+
+
 def _sub_status(args: argparse.Namespace, news_dir: Path) -> result.Result:
     cfg, store = _load(news_dir)
     rows, usage, svc = _status_rows(store, cfg)
@@ -702,6 +710,9 @@ def _build_sub_parser() -> argparse.ArgumentParser:
     api = add("api")
     api.add_argument("action", choices=["describe"])
 
+    cfgp = add("config")
+    cfgp.add_argument("action", choices=["describe"])
+
     add("doctor")
     st = add("status")
     st.add_argument("--days", type=int, default=7, help="事件统计的天数窗口")
@@ -773,6 +784,7 @@ def _build_sub_parser() -> argparse.ArgumentParser:
 
 SUB_HANDLERS = {
     ("api", "describe"): _sub_api_describe,
+    ("config", "describe"): _sub_config_describe,
     ("status", None): _sub_status,
     ("view", None): _sub_view,
     ("doctor", None): _sub_doctor,
