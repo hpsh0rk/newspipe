@@ -129,28 +129,36 @@ def emit(result: Result, *, json_out: bool, out: TextIO | None = None) -> int:
     return result.exit_code
 
 
-def guard(command: str, fn: Callable[[], Result], *, json_out: bool,
-          out: TextIO | None = None) -> int:
-    """把命令体包起来：任何未捕获异常都变成 `E_INTERNAL` 结果，而不是堆栈。
+def to_result(command: str, fn: Callable[[], Result]) -> Result:
+    """把命令体包成 `Result`：任何未捕获异常都变成 `E_*` 结果，而不是堆栈。
 
-    没有它，agent 拿到的是「退出码 1 + 一段 traceback」——无法分类、无法决策。
+    `guard()` 是它的「打印 + 返回退出码」外壳。**进程内调用者**（Web 写操作、宿主面板）
+    直接用它拿对象 —— 它们要的是同一个信封，不是 stdout 文本。异常映射只有这一份，
+    两边不会漂移。
     """
     try:
-        result = fn()
+        return fn()
     except KeyboardInterrupt:
         raise
     except Exception as exc:                      # noqa: BLE001 —— 这里就是要兜住一切
         from newspipe.errors import ConfigError, DeliveryError, NewsError
 
         if isinstance(exc, ConfigError):
-            result = fail(command, "E_CONFIG", str(exc),
-                          hint="检查配置目录下的 YAML；`newspipe doctor --json` 会列出问题")
-        elif isinstance(exc, DeliveryError):
-            result = fail(command, "E_DELIVERY", str(exc),
-                          hint="`newspipe status --json` 看通道与最近一轮；凭据问题用 --probe-channel")
-        elif isinstance(exc, NewsError):
-            result = fail(command, "E_RUNTIME", str(exc))
-        else:
-            result = fail(command, "E_INTERNAL", f"{type(exc).__name__}: {exc}",
-                          hint="这是未预期的错误，请连同 command 一起报给维护者")
-    return emit(result, json_out=json_out, out=out)
+            return fail(command, "E_CONFIG", str(exc),
+                        hint="检查配置目录下的 YAML；`newspipe doctor --json` 会列出问题")
+        if isinstance(exc, DeliveryError):
+            return fail(command, "E_DELIVERY", str(exc),
+                        hint="`newspipe status --json` 看通道与最近一轮；凭据问题用 --probe-channel")
+        if isinstance(exc, NewsError):
+            return fail(command, "E_RUNTIME", str(exc))
+        return fail(command, "E_INTERNAL", f"{type(exc).__name__}: {exc}",
+                    hint="这是未预期的错误，请连同 command 一起报给维护者")
+
+
+def guard(command: str, fn: Callable[[], Result], *, json_out: bool,
+          out: TextIO | None = None) -> int:
+    """把命令体包起来：任何未捕获异常都变成 `E_INTERNAL` 结果，而不是堆栈。
+
+    没有它，agent 拿到的是「退出码 1 + 一段 traceback」——无法分类、无法决策。
+    """
+    return emit(to_result(command, fn), json_out=json_out, out=out)

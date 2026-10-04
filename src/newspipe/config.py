@@ -286,6 +286,7 @@ class ServiceCfg:
     log: dict[str, Any] = field(default_factory=dict)
     #: 只读视图端点（`GET <view.path>` = JSON 契约，`GET /` = 服务端渲染页）。
     #: **默认关**：不显式打开就不多开监听端口（与「不配即旧行为」的约定一致）。
+    #: `view.actions` 再叠一层开关：只有它打开，页面才暴露写操作（`POST /api/actions/*`）。
     view: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -306,6 +307,11 @@ class ServiceCfg:
     @property
     def view_path(self) -> str:
         return str(self.view.get("path") or "/view")
+
+    @property
+    def view_actions(self) -> bool:
+        """页面是否暴露写操作。**需要 `view.enabled` 同时为真**（没有页面就没有按钮）。"""
+        return bool(self.view.get("enabled")) and bool(self.view.get("actions"))
 
 
 def load_service(news_dir: Path) -> ServiceCfg:
@@ -340,7 +346,8 @@ def load_service(news_dir: Path) -> ServiceCfg:
             raise ConfigError(f"{path}: {name} 需要映射")
     view_raw = raw.get("view") or {}
     view = {"enabled": _bool(view_raw.get("enabled"), where=f"{path}: view.enabled"),
-            "path": str(view_raw.get("path") or "/view")}
+            "path": str(view_raw.get("path") or "/view"),
+            "actions": _bool(view_raw.get("actions"), where=f"{path}: view.actions")}
     if view["enabled"] and not str(view["path"]).startswith("/"):
         raise ConfigError(f"{path}: view.path 必须以 / 开头（得到 {view['path']!r}）")
     return ServiceCfg(channel=channel, feishu=dict(raw.get("feishu") or {}), inbound=dict(inbound),

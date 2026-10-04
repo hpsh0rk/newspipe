@@ -193,7 +193,8 @@ def start_inbound_for(cfg: config.Config, *, news_dir: Path, hook_set: Any,
     在「不收回调」的部署里就瞎了。`mode=none` 不需要凭据，所以别在这里解析它。
     """
     mode = cfg.service.inbound_mode
-    view = {"enabled": cfg.service.view_enabled, "path": cfg.service.view_path}
+    view = {"enabled": cfg.service.view_enabled, "path": cfg.service.view_path,
+            "actions": cfg.service.view_actions}
     if mode == "none" and not view["enabled"]:
         return inbound_mod.InboundHandle(mode="none")
     from newspipe import credentials

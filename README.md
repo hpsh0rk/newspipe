@@ -175,6 +175,27 @@ newspipe view --html     # 同一份数据的服务端渲染页（无前端构�
 自带 `contract_version`。**宿主不要解析 `<news_dir>/state/**`**：那是本项目的私有布局，
 改一次布局就会让宿主静默读空（页面显示成「从未运行」，看着像没跑，其实是读错了地方）。
 
+### 页面写操作：仪表盘变控制台（`view.actions`）
+
+打开 `service.yaml: view.actions` 后，`GET /` 页面上会出现按钮（跑一轮、启用/停用信源、
+⭐ 确认入库、标记事件已消费、现在发顺延队列）。机制：
+
+```
+页面表单 → POST /api/actions/<动作> → src/newspipe/actions.py（表单 → argv）→ CLI 的同一份 handler
+```
+
+- **不重写写逻辑**：校验、原子写、乐观并发（`--base-hash`）、审计都在 CLI 里，页面只做翻译。
+  两份写路径必然漂移。
+- **动作白名单在代码里**（`actions.py: ACTIONS`），不是配置 —— 配置能改出来的写权限
+  等于一个远程可改的写面。加动作要改代码。
+- **三道门禁**：`view.actions` 开关、同源（`Origin` 必须等于请求的 `Host`）、一次性令牌
+  （进程启动时生成，嵌进表单）。本地端口对浏览器是可达的 —— 少了令牌，你浏览器里
+  **任何网页**都能 POST 过来触发发卡。
+- **结果就是 CLI 信封**：成功显示 `changed`/摘要，失败显示 `error.message` + `hint` +
+  可直接复现的 CLI 命令。不是「操作成功」四个字。
+- 默认是**试运行**（`--dry` 复选框默认勾选）；真发卡要显式取消勾选。
+- 只读契约 `GET /view` 不含令牌，形状不变（只多一个 `sources_hash`，供页面做乐观并发）。
+
 ### 环境变量
 
 | 变量 | 作用 |
@@ -232,7 +253,7 @@ newspipe queue list --json                                # 待入库（人确�
 ## 测试
 
 ```bash
-python -m unittest discover -s tests        # 241 个用例，无第三方测试框架依赖
+python -m unittest discover -s tests        # 282 个用例，无第三方测试框架依赖
 ```
 
 覆盖：四轴配置与校验、采集与去重、预算熔断与回执复用、卡片渲染与元素预算、

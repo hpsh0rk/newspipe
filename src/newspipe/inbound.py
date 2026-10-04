@@ -22,11 +22,13 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
 import threading
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import parse_qs, urlparse
 
 from newspipe import credentials, hooks as hooks_mod, interaction
 from newspipe.errors import InboundError
@@ -170,9 +172,50 @@ def dispatch(event: dict[str, Any], *, news_dir: Path | None = None,
 
 
 # --------------------------------------------------------------------- HTTP
+def _same_origin(origin: str, host: str) -> bool:
+    """同源校验：`Origin` 的 netloc 必须等于请求的 `Host`。
+
+    比对 `Host` 而不是写死 `127.0.0.1` —— 门户 embed 时页面是从主机名（tailnet / LAN）
+    打开的，写死回环会把正常的手机访问挡掉。跨站页面的 `Origin` 不可能等于我们的 `Host`。
+    """
+    try:
+        return bool(host) and urlparse(origin).netloc.lower() == host.lower()
+    except ValueError:
+        return False
+
+
+def _flash_of(envelope: dict[str, Any]) -> dict[str, Any]:
+    """从 CLI 信封里挑出横幅要显示的东西（**必须短**：它要编码进 URL）。"""
+    action = envelope.get("action") or {}
+    err = envelope.get("error") or {}
+    raw = envelope.get("data")
+    data: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    ok = bool(envelope.get("ok"))
+    summary = ""
+    if ok:
+        bits = [f"{k}: {data[k]}" for k in ("summary", "message", "changed", "note")
+                if data.get(k)]
+        summary = " · ".join(bits) or "完成"
+    return {
+        "ok": ok,
+        "label": str(action.get("label") or envelope.get("command") or "操作"),
+        "summary": str(summary)[:400],
+        "message": str(err.get("message") or "")[:400],
+        "hint": str(err.get("hint") or "")[:300],
+        "detail": json.dumps(data, ensure_ascii=False)[:600] if data else "",
+        "cli": str(action.get("cli") or ""),
+    }
+
+
 def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir: Path | None,
                   hook_set: Any, logger: Callable[[str], None],
-                  accept_events: bool = True, view_path: str = "/view") -> type:
+                  accept_events: bool = True, view_path: str = "/view",
+                  view_actions: bool = False, action_token: str = "") -> type:
+    #: 写操作令牌：进程启动时生成一次，页面渲染时嵌进表单。
+    #: 没有它，浏览器里**任何一个网页**都能 POST 到这个本地端口（CSRF）—— 本地端口对
+    #: 浏览器是可达的，这不是理论风险。
+    token = (action_token or secrets.token_urlsafe(24)) if view_actions else ""
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "newspipe"
 
@@ -212,7 +255,20 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                 if route == "/":
                     from newspipe import view as view_mod
 
-                    self._send_html(200, view_mod.as_html(payload))
+                    act, flash = None, None
+                    if token:
+                        from newspipe import config as config_mod
+
+                        try:
+                            act = view_mod.action_snapshot(
+                                news_dir or config_mod.default_news_dir())
+                            act["token"] = token
+                        except Exception as exc:            # 动作面坏了不该连累只读页
+                            logger(f"写操作面构建失败（{type(exc).__name__}: {exc}）")
+                            act = None
+                        flash = view_mod.flash_decode(
+                            (parse_qs(urlparse(self.path).query).get("r") or [""])[0])
+                    self._send_html(200, view_mod.as_html(payload, actions=act, flash=flash))
                 else:
                     self._send(200, payload)
                 return
@@ -220,7 +276,61 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                              "view": view_path if view_path else None,
                              "events": path if accept_events else None})
 
+        def _do_action(self, name: str) -> None:
+            """页面写操作：表单 → CLI（**同一份 handler**）。
+
+            三道门禁，缺一不可：
+            1. `view.actions` 开关（没开就 404，页面里连表单都不会渲染）；
+            2. 同源（`Origin` 有且不等于本请求 `Host` ⇒ 403）—— 浏览器里任何网页都能
+               POST 到本地端口，跨站请求必须挡在这里；
+            3. 一次性令牌（`secrets.compare_digest`）—— 真正的守门人，令牌只有渲染页面
+               的那一次 GET 才拿得到，跨站页面读不到。
+            """
+            from newspipe import actions as actions_mod
+            from newspipe import config as config_mod
+            from newspipe import view as view_mod
+
+            if not token:
+                self._send(404, {"ok": False, "error": {
+                    "code": "E_DISABLED",
+                    "message": "写操作未开启（service.yaml: view.actions）"}})
+                return
+            origin = self.headers.get("Origin")
+            if origin and not _same_origin(origin, self.headers.get("Host") or ""):
+                logger(f"写操作：拒绝跨站来源 {origin}")
+                self._send(403, {"ok": False, "error": {
+                    "code": "E_ORIGIN", "message": f"跨站请求已拒绝（Origin: {origin}）"}})
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b""
+            form = parse_qs(body.decode("utf-8", "replace"))
+            given = (form.get("token") or [""])[0]
+            if not secrets.compare_digest(given, token):
+                logger("写操作：令牌不匹配，已拒绝")
+                self._send(403, {"ok": False, "error": {
+                    "code": "E_TOKEN", "message": "令牌不匹配（页面可能过期，刷新重试）",
+                    "hint": "令牌在服务重启后更换；刷新页面即可"}})
+                return
+            try:
+                envelope = actions_mod.dispatch(
+                    name, form, news_dir or config_mod.default_news_dir())
+            except Exception as exc:                       # 写操作绝不能让进程崩
+                logger(f"写操作 {name} 崩了（{type(exc).__name__}: {exc}）")
+                self._send(500, {"ok": False, "error": {
+                    "code": "E_INTERNAL", "message": f"{type(exc).__name__}: {exc}"}})
+                return
+            logger(f"写操作 {name} → {envelope.get('command')} ok={envelope.get('ok')}")
+            # PRG（Post/Redirect/Get）：结果编码进 URL，刷新页面不会重放写操作
+            self.send_response(303)
+            self.send_header("Location", f"/?r={view_mod.flash_encode(_flash_of(envelope))}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
         def do_POST(self) -> None:                         # noqa: N802
+            route = self.path.split("?")[0]
+            if route.startswith("/api/actions/"):
+                self._do_action(route.rsplit("/", 1)[-1])
+                return
             if not accept_events:
                 self._send(404, {"error": "events disabled",
                                  "hint": "inbound.mode 不是 http；卡片事件由持有长连接的一方转发"})
@@ -292,16 +402,20 @@ def http_bind(service_cfg: dict[str, Any]) -> tuple[str, int, str]:
 def start_http(*, service_cfg: dict[str, Any], creds: credentials.FeishuCreds | None,
                news_dir: Path | None = None, hook_set: Any = None,
                logger: Callable[[str], None] = print, accept_events: bool = True,
-               view_path: str = "/view") -> tuple[ThreadingHTTPServer, str]:
+               view_path: str = "/view", view_actions: bool = False,
+               action_token: str = "") -> tuple[ThreadingHTTPServer, str]:
     """起 HTTP 服务器（返回 server 与事件路径；调用方负责 serve_forever 线程）。
 
     `accept_events=False` = 只读视图模式：同一台服务器只回答 `GET /` 与 `GET <view_path>`，
     POST 一律 404。给 `inbound.mode != http` 的部署用（视图与入站解耦，但不另开端口）。
+
+    `view_actions=True` 才开写操作（`POST /api/actions/*`）；`action_token` 不给就自动生成。
     """
     host, port, path = http_bind(service_cfg)
     handler = _make_handler(path=path, creds=creds, news_dir=news_dir,
                             hook_set=hook_set, logger=logger, accept_events=accept_events,
-                            view_path=view_path)
+                            view_path=view_path, view_actions=view_actions,
+                            action_token=action_token)
     server = ThreadingHTTPServer((host, port), handler)
     return server, path
 
@@ -452,12 +566,14 @@ def start_inbound(*, mode: str, service_cfg: dict[str, Any], creds: credentials.
     view_cfg = dict(view or {})
     view_on = bool(view_cfg.get("enabled"))
     view_path = str(view_cfg.get("path") or "/view")
+    #: 写操作是**只读视图之上的第二层开关**：没有页面就没有按钮。
+    view_actions = view_on and bool(view_cfg.get("actions"))
     state: dict[str, Any] = {}
 
     def _view_only() -> tuple[Any, threading.Thread, str]:
         server, _ = start_http(service_cfg=service_cfg, creds=None, news_dir=news_dir,
                                hook_set=hook_set, logger=logger, accept_events=False,
-                               view_path=view_path)
+                               view_path=view_path, view_actions=view_actions)
         thread = threading.Thread(target=server.serve_forever, name="newspipe-view-http",
                                   daemon=True)
         thread.start()
@@ -477,7 +593,8 @@ def start_inbound(*, mode: str, service_cfg: dict[str, Any], creds: credentials.
     if mode == "http":
         server, path = start_http(service_cfg=service_cfg, creds=creds, news_dir=news_dir,
                                   hook_set=hook_set, logger=logger, accept_events=True,
-                                  view_path=view_path if view_on else "")
+                                  view_path=view_path if view_on else "",
+                                  view_actions=view_actions)
         thread = threading.Thread(target=server.serve_forever, name="newspipe-inbound-http",
                                   daemon=True)
         thread.start()

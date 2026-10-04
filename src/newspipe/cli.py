@@ -949,6 +949,33 @@ def _subcommand_of(argv: list[str]) -> str | None:
     return None
 
 
+def run_subcommand(argv: list[str], news_dir: Path | None = None) -> result.Result:
+    """进程内调用一个子命令，**返回结果对象而不打印**。
+
+    给 Web 写操作 / 宿主面板用：它们要的是同一个信封（校验、错误码、`next` 建议），
+    而不是 stdout 文本。与 `_main_sub` 共用同一份解析器与 handler 表 —— 第二份分发
+    逻辑迟早会与 CLI 漂移，而 CLI 是写操作的唯一权威。
+    """
+    argv = list(argv)
+    ap = _build_sub_parser()
+    try:
+        args = ap.parse_args(argv)
+    except SystemExit as exc:                      # argparse 的参数错
+        name = _subcommand_of(argv) or (argv[0] if argv else "unknown")
+        return result.fail(name, "E_USAGE",
+                           f"参数不合法（退出码 {exc.code}）",
+                           hint="`newspipe api describe --json` 列出每个命令的参数")
+    explicit = getattr(args, "news_dir", None)
+    where = Path(news_dir).expanduser() if news_dir else (
+        Path(explicit).expanduser() if explicit else config.default_news_dir())
+    handler = SUB_HANDLERS.get((args.cmd, getattr(args, "action", None))) or SUB_HANDLERS.get(
+        (args.cmd, None))
+    if handler is None:
+        return result.fail(args.cmd, "E_USAGE", f"未知命令 {args.cmd!r}")
+    command = args.cmd if not hasattr(args, "action") else f"{args.cmd}.{args.action}"
+    return result.to_result(command, lambda: handler(args, where))
+
+
 def main(argv: list[str] | None = None) -> int:
     """子命令风格优先；否则走旧 flag 路径（4 个 cron wrapper 与插件靠它）。"""
     argv = list(sys.argv[1:] if argv is None else argv)
