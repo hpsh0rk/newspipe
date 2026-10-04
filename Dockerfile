@@ -19,11 +19,12 @@ ENV NEWSPIPE_NEWS_DIR=/data/news \
 USER newspipe
 EXPOSE 8787
 
-# 健康检查打只读视图：它同时证明「配置能加载」与「state 可读」，
+# 健康检查打 `/`：它证明「HTTP 线程活着」「配置能加载」「视图能渲染」——
 # 比 ping 一个端口有意义得多（端口通但配置坏了 = 面板全红却查不出原因）。
+# （不证明 state 可写：单个源没跑过是正常状态，缺文件不该判不健康。）
+# 打 `/` 而不是 `/view`：`/view` 的路径来自 `service.yaml: view.path`，写死在这里会随配置漂移；
+# `/` 是不可配的根路径（同一份 builder 渲染），配置坏时返回 503 → urlopen 抛错 → 退出码非 0。
 HEALTHCHECK --interval=60s --timeout=10s --start-period=20s --retries=3 \
-    CMD python -c "import urllib.request,os,sys; \
-u='http://127.0.0.1:8787'+os.environ.get('NEWSPIPE_VIEW_PATH','/view'); \
-sys.exit(0 if urllib.request.urlopen(u, timeout=8).status==200 else 1)"
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8787/', timeout=8).status == 200 else 1)"
 
 CMD ["python", "-m", "newspipe.cli", "serve"]

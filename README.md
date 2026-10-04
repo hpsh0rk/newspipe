@@ -151,7 +151,13 @@ curl -s http://127.0.0.1:8787/view | head     # 只读视图契约
 
 # ② macOS launchd（备选）
 ./service/install.sh
+./service/uninstall.sh                        # 切回容器前先跑这个
 ```
+
+**切换时最容易漏的一步**：plist 带 `RunAtLoad` + `KeepAlive`，只要它还躺在
+`~/Library/LaunchAgents/`，**下次登录就会自己起来**，于是容器和 launchd 双跑、每张卡发两遍 ——
+而故障要等到下次登录才出现，极难归因。所以 `install.sh` 在容器运行时直接拒绝安装
+（`NEWSPIPE_ALLOW_DOUBLE_RUNNER=1` 可强制），`uninstall.sh` 负责 bootout + 把 plist 移出加载路径。
 
 容器的三件必办事项在 `compose.yaml` 里都显式给了，原因见下：容器里没有 macOS 钥匙串（凭据
 挂宿主 `.env` 走 dotenv）、宿主的回环地址不是 `127.0.0.1`（模型端点与 Clash 都要改写）、

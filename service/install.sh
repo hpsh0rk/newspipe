@@ -23,6 +23,17 @@ LOG_DIR="${NEWSPIPE_LOG_DIR:-$HOME/Library/Logs}"
                       exit 2; }
 [ -f "$TEMPLATE" ] || { echo "缺模板：$TEMPLATE" >&2; exit 2; }
 
+# 护栏：容器在跑时不许再装 launchd —— 两个 runner 会各发一遍卡（重复投递），
+# 而 plist 的 RunAtLoad+KeepAlive 会让这件事在**下次登录**才发生，非常难归因。
+# 放在写任何文件之前：被拒时不该留下半装的 plist。
+if command -v docker >/dev/null 2>&1 \
+   && [ -n "$(docker ps --filter name=newspipe --filter status=running -q 2>/dev/null)" ]; then
+  echo "拒绝安装：容器 newspipe 正在运行，它是当前的 runner。" >&2
+  echo "  先停掉容器再装：docker compose down   （或保持容器，删掉这个 plist）" >&2
+  echo "  确实要双跑（例如只在调试时）就设 NEWSPIPE_ALLOW_DOUBLE_RUNNER=1。" >&2
+  [ "${NEWSPIPE_ALLOW_DOUBLE_RUNNER:-}" = "1" ] || exit 2
+fi
+
 mkdir -p "$NEWS_DIR" "$LOG_DIR" "$HOME/Library/LaunchAgents"
 
 # 占位符替换：用 | 作分隔符，避免路径里的 / 干扰
