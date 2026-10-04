@@ -170,6 +170,58 @@ def _today_batches(store: state.Store, digest: str) -> list[dict[str, Any]]:
     return rows
 
 
+#: 趋势看多少天。**14 天**：够看出「最近是不是变差了」，又不至于把页面拉成一张长表。
+HISTORY_DAYS = 14
+
+
+def history(store: state.Store, *, days: int = HISTORY_DAYS,
+            now: datetime | None = None) -> list[dict[str, Any]]:
+    """近 N 天的**每日汇总**（趋势）。
+
+    **只算落盘过的东西**：`state/batches/<date>/`（条目与已标记）、`state/budget/<date>.json`
+    （发卡）、`llm/usage/<date>.json`（AI 调用与降级）、`state/pushed/<源>.jsonl`（推送台账）。
+
+    台账那一路不能省：**有些源不写批次文件**（poll + `append_card` 直接追加进当日实时卡），
+    只看批次会把它们的产出算成「没有」—— 实测 `linuxdo_deals` 台账 13 条、批次文件 0 个。
+    没落盘的一律不给：「各源历史成功率」根本没落盘（`state/status/` 只留最后一次心跳），
+    所以这里只给「当天有没有产出」，绝不拿当前状态去反推历史。
+    """
+    moment = now or datetime.now()
+    pushed_by_day = store.pushed_by_day()
+    out: list[dict[str, Any]] = []
+    for back in range(days - 1, -1, -1):
+        day = (moment - timedelta(days=back)).strftime("%Y-%m-%d")
+        batch_dir = store.root / "batches" / day
+        produced: list[str] = []
+        items = marked = 0
+        if batch_dir.is_dir():
+            for path in sorted(batch_dir.glob("*.json")):
+                batch = _read_json(path)
+                raw = batch.get("items") or []
+                rows = raw if isinstance(raw, list) else []
+                items += len(rows)
+                marked += sum(1 for i in rows if isinstance(i, dict)
+                              and i.get("status") not in (None, "unread"))
+                if batch.get("source"):
+                    produced.append(str(batch["source"]))
+        day_pushed = pushed_by_day.get(day) or {}
+        budget = store.budget_state(day)
+        usage = store.usage(day)
+        out.append({
+            "date": day,
+            "items": items,
+            "marked": marked,
+            "read_rate": round(marked / items, 2) if items else None,
+            "cards": int(budget.get("cards") or 0),
+            "pushed": sum(day_pushed.values()),
+            "calls": int(usage.get("calls") or 0),
+            "degraded": int(usage.get("degraded") or 0),
+            # 产出 = 批次落盘 ∪ 推送台账。两个都算，缺一个就会漏源。
+            "sources": sorted(set(produced) | set(day_pushed)),
+        })
+    return out
+
+
 def pending_items(store: state.Store, source: str, *, limit: int = 12) -> list[dict[str, Any]]:
     """顺延队列里到底有哪些条目（页面展开用；`pending_total` 只是个数字）。
 
@@ -299,6 +351,7 @@ def build(news_dir: Path | None = None, *, now: datetime | None = None) -> dict[
             "chars": int(usage.get("chars") or 0),
             "reasons": usage.get("reasons") or {},
         },
+        "history": history(store, days=HISTORY_DAYS, now=moment),
         "preferences_preview": (preferences.read_text(encoding="utf-8")[-600:]
                                 if preferences.is_file() else ""),
     }
@@ -367,6 +420,11 @@ fieldset{border:1px solid rgba(128,128,128,.3);border-radius:8px;margin:0 0 12px
 legend{font-size:12px;opacity:.75;padding:0 6px}
 .cand{border:1px solid rgba(128,128,128,.3);border-radius:8px;padding:8px 10px;margin:6px 0}
 .cand code{word-break:break-all}
+.barcell{white-space:nowrap}
+.bar{display:inline-block;height:9px;background:currentColor;opacity:.4;border-radius:2px;
+     vertical-align:middle;min-width:1px}
+.bar-n{font-size:11px;opacity:.7;margin-left:5px}
+.trend .zero{opacity:.35}
 """
 
 
@@ -439,6 +497,113 @@ def _nav(tab: str) -> str:
 
 def _tab_label(tab: str) -> str:
     return next((label for key, label, _ in TABS if key == tab), tab)
+
+
+def _bar(value: int, peak: int) -> str:
+    """纯 CSS 条形：不引图表库、不发外部请求（页面有一条「不许出现 http://」的测试）。"""
+    pct = 0 if not peak else max(2, round(value / peak * 100))
+    cls = "bar zero" if not value else "bar"
+    return f'<span class="{cls}" style="width:{pct}%"></span><span class="bar-n">{value}</span>'
+
+
+def _history_html(view: dict[str, Any]) -> str:
+    """近 N 天趋势表。**页面不发明数据**：列头就是落盘的东西。"""
+    days = view.get("history") or []
+    if not days:
+        return ""
+    peak_items = max((int(d.get("items") or 0) for d in days), default=0)
+    peak_cards = max((int(d.get("cards") or 0) for d in days), default=0)
+    peak_pushed = max((int(d.get("pushed") or 0) for d in days), default=0)
+    body = []
+    for d in days:
+        rate = "—" if d.get("read_rate") is None else f"{round(d['read_rate'] * 100)}%"
+        calls, degraded = int(d.get("calls") or 0), int(d.get("degraded") or 0)
+        ai = "—" if not calls else (f"{degraded} / {calls}" if degraded else f"0 / {calls}")
+        srcs = d.get("sources") or []
+        body.append(
+            "<tr>"
+            f'<td><code>{html.escape(str(d.get("date"))[5:])}</code></td>'
+            f'<td class="barcell">{_bar(int(d.get("items") or 0), peak_items)}</td>'
+            f"<td>{rate}</td>"
+            f'<td class="barcell">{_bar(int(d.get("cards") or 0), peak_cards)}</td>'
+            f'<td class="barcell">{_bar(int(d.get("pushed") or 0), peak_pushed)}</td>'
+            f"<td>{ai}</td>"
+            f'<td class="hint">{html.escape("、".join(str(s) for s in srcs)) or "—"}</td>'
+            "</tr>")
+    total_items = sum(int(d.get("items") or 0) for d in days)
+    total_cards = sum(int(d.get("cards") or 0) for d in days)
+    total_pushed = sum(int(d.get("pushed") or 0) for d in days)
+    return (
+        f'<h2>近 {len(days)} 天 <span class="hint">合计 {total_items} 条 / {total_cards} 张卡 / '
+        f"{total_pushed} 条入库；只算落盘过的（批次 / 预算 / 用量 / 推送台账）—— "
+        "各源历史成功率没落盘，所以不给</span></h2>"
+        '<table class="trend"><thead><tr><th>日期</th><th>条目</th><th>已标记率</th><th>发卡</th>'
+        "<th>入库</th><th>AI 降级/调用</th><th>有产出的源</th></tr></thead>"
+        f'<tbody>{"".join(body)}</tbody></table>')
+
+
+def _drawer_html(view: dict[str, Any]) -> str:
+    """诊断抽屉：点开源看「最近一次为什么这样」+「可能拦下它的闸」。
+
+    诚实边界：**历史拦截原因没有落盘**（`state/status/<源>.json` 只留最后一次心跳），
+    所以抽屉给的是「最近一次计数」+「生效中的闸」，不是「历史上被哪道闸拦了几次」。
+    """
+    hist = view.get("history") or []
+    blocks = []
+    for src in view.get("sources") or []:
+        name = str(src.get("name"))
+        produced = [str(d.get("date"))[5:] for d in hist if name in (d.get("sources") or [])]
+        detail = src.get("status_detail") or {}
+        detail_txt = " · ".join(f"{k}={v}" for k, v in detail.items()) or "（没有计数）"
+        quiet = f"静默时段 <code>{html.escape(str(src.get('quiet_hours') or '无'))}</code>"
+        if src.get("priority") == "high":
+            quiet += "（<code>high</code> 优先级可越过）"
+        gates = [
+            f"卡片形态 <code>{html.escape(str(src.get('form')))}</code>"
+            + ("" if src.get("sends_card") else " —— <b>不发卡</b>，只落 state"),
+            quiet,
+            f"每日上限 <code>{src.get('max_cards_per_day')}</code> 张 · 最小间隔 "
+            f"<code>{src.get('min_gap_min')}</code> 分钟",
+            f"条数上限 <code>{src.get('max_items')}</code> · 最少 <code>{src.get('min_items')}</code>"
+            f"（不够就攒批）· 触发 <code>{html.escape(str(src.get('trigger')))}</code>"
+            + (f"（间隔 {src.get('interval_min')} 分钟）" if src.get("trigger") == "poll" else ""),
+        ]
+        queue_note = (f'顺延队列 <b>{src.get("pending_total")}</b> 条 —— 明细与「现在发」在 '
+                      f'<a href="/ops">运维页</a>' if src.get("pending_total")
+                      else "顺延队列 0 条")
+        note = html.escape(str(src.get("status_note") or ""))
+        # 没有历史就**不提产出** —— 「近 0 天产出 0 天」会被读成「源一直没拉到东西」，
+        # 而无历史只是「还没有历史」。
+        if hist:
+            summary_tail = f" · 近 {len(hist)} 天产出 {len(produced)} 天"
+            produced_line = (
+                f'<p class="note">近 {len(hist)} 天有产出：'
+                + (f'{len(produced)} 天（{html.escape("、".join(produced))}）' if produced
+                   else "<b>一天都没有</b> —— 源可能一直没拉到东西")
+                + "</p>")
+        else:
+            summary_tail = ""
+            produced_line = '<p class="note">还没有历史（没有批次落盘），所以不给产出统计。</p>'
+        blocks.append(
+            '<details class="drawer">'
+            f'<summary><code>{html.escape(name)}</code> · '
+            f'{html.escape(str(src.get("status_label")))}'
+            f'{"（超期）" if src.get("stale") else ""}{summary_tail}</summary>'
+            f'<p class="note">最近心跳 <code>{html.escape(str(src.get("status_ts") or "从未"))}</code>'
+            + (f' · {note}' if note else "") + "</p>"
+            f'<p class="note">最近一次计数：<code>{html.escape(detail_txt)}</code></p>'
+            + produced_line
+            + '<p class="note">生效中的闸（可能拦下它的）：<br>' + "<br>".join(gates) + "</p>"
+            f'<p class="note">{queue_note} · 去重台账 {src.get("pushed_total")} 条</p>'
+            '<p class="note">⚠️ 历史拦截原因<b>没有落盘</b>（只留最后一次心跳）—— 要精确归因看 '
+            "<code>actions.log</code> 或 <code>state/status/</code>。</p>"
+            "</details>")
+    tail = (f"可能拦下它的闸 / 近 {len(hist)} 天有没有产出" if hist
+            else "可能拦下它的闸")
+    return (
+        f'<h2>诊断抽屉 <span class="hint">{len(blocks)} 个源，点开看最近一次为什么这样 / '
+        + tail + "</span></h2>"
+        + ("".join(blocks) or '<p class="empty">注册表里还没有信源</p>'))
 
 
 def as_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
@@ -570,6 +735,8 @@ def as_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
             + "</tbody></table>")
 
     svc = view["service"]
+    history_section = _history_html(view)
+    drawer_section = _drawer_html(view)
     read_rate = "—" if s["read_rate"] is None else f"{round(s['read_rate'] * 100)}%"
     if on:
         write_note = ("写操作走 <code>POST /api/actions/*</code> → CLI 的同一份 handler；"
@@ -599,11 +766,13 @@ def as_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
   <div class="stat"><b>{view['llm']['calls']}</b><span>AI 调用</span></div>
   <div class="stat"><b>{view['llm']['degraded']}</b><span>AI 降级</span></div>
 </div>
+{history_section}
 {queue_section}
 <h2>信源</h2>
 <table><thead><tr><th>源</th><th>卡片标题</th><th>节奏</th><th>形态/加工</th><th>心跳</th>
 <th>最近</th><th>去重/顺延</th><th>明细</th>{op_th}</tr></thead>
 <tbody>{''.join(rows) or f'<tr><td colspan="{colspan}" class="empty">注册表里还没有信源</td></tr>'}</tbody></table>
+{drawer_section}
 {pending_section}
 <h2>今日批次</h2>
 <table><thead><tr><th>文件</th><th>标题</th><th>槽位</th><th>已标记</th><th>卡片</th><th>顺延</th></tr></thead>

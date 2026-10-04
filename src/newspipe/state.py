@@ -95,6 +95,33 @@ class Store:
                                "title": str(it.get("title", ""))[:60]}, ensure_ascii=False)
             atomic_append_line(p, line)
 
+    def pushed_by_day(self) -> dict[str, dict[str, int]]:
+        """`state/pushed/<源>.jsonl` 按日期分桶：`{date: {source: n}}`。
+
+        **为什么必须有这个。** 有些源根本不写批次文件（poll + `append_card` 直接把条目追加进
+        当日实时卡），只看 `state/batches/` 会把它们的产出全算成「没有」—— 实测
+        `linuxdo_deals` 去重台账 13 条（09-28/29、10-02），却一个批次文件都没有。
+        台账每行带 `date`，是比批次文件更可靠的「产出」信号。
+        """
+        out: dict[str, dict[str, int]] = {}
+        for path in sorted((self.root / "pushed").glob("*.jsonl")):
+            source = path.stem
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                try:
+                    rec = json.loads(line)
+                except Exception:                      # noqa: BLE001 —— 坏行不该毁掉整条趋势
+                    continue
+                day = rec.get("date") if isinstance(rec, dict) else None
+                if not day:
+                    continue
+                bucket = out.setdefault(str(day), {})
+                bucket[source] = bucket.get(source, 0) + 1
+        return out
+
     # ── 时间闸 ──────────────────────────────────────────────────────────────
     def cursor(self, source: str) -> float | None:
         data = read_json(self.root / "cursors" / f"{source}.json")
