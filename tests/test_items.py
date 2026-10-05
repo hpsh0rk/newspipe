@@ -216,6 +216,22 @@ class RenderTests(ItemsFixture):
         self.assertIn("顺延", page)
         self.assertIn("state/batches/2026-10-04/aihot-am.json", page)
 
+    def test_an_http_original_url_is_a_link_not_a_resource_load(self) -> None:
+        """真实数据里完全可能出现 `http://` 原文；那是 `href`，不产生请求。
+
+        页面自己的红线是「不加载外部资源」—— 把两者混成一个字符串检查会在这种数据上误报
+        （旧的 `assertNotIn("http://")` 就是这样，条目链接一进驾驶舱就会踩）。
+        """
+        self._write("2026-10-04", "aihot-pm", [
+            {"ext_id": "x", "title": "明文站点", "original_url": "http://example.com/a",
+             "status": "unread"}])
+        snap = view.items_snapshot(self.news, now=NOW)
+        page = view.cockpit_html(self.view, page={"recent": snap["items"][:8],
+                                                  "recent_total": snap["total"]})
+        self.assertIn('href="http://example.com/a"', page)      # 数据照原样出现
+        for tag in ('src="http', "<link", "url("):              # 但页面自己不拉外部资源
+            self.assertNotIn(tag, page)
+
     def test_batch_detail_missing_batch_says_so(self) -> None:
         page = view.batch_html(self.view, page={"date": "2026-01-01", "stem": "nosuch-am"})
         self.assertIn("没有这个批次", page)

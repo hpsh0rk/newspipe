@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
 import unittest
@@ -132,7 +133,54 @@ class ViewBuildTests(unittest.TestCase):
         self.assertNotIn("<form", page)                           # 驾驶舱是只读的
         self.assertNotIn("<script>alert(1)</script>", page)      # 转义过
         self.assertIn("&lt;script&gt;", page)
-        self.assertNotIn("http://", page.replace("http://127.0.0.1", ""))  # 不发外部请求
+        # 红线是「不加载外部**资源**」（脚本/样式/图片/字体），不是「页面上不能出现 http://」
+        # —— 条目标题本来就链到原文，`href` 不产生请求。混成一个字符串检查会在真实数据上误报。
+        for tag in ('src="http', "<link", "url("):
+            self.assertNotIn(tag, page)
+
+    def test_page_loads_nothing_external(self) -> None:
+        """自包含：整页只有内联样式，没有任何会发起请求的标签。"""
+        page = view.as_html(view.build(self.news, now=NOW))
+        for tag in ("<link", "<img", "<iframe", "<script", "<video", "<audio", "url("):
+            self.assertNotIn(tag, page)
+
+    def test_sticky_header_offset_is_tied_to_the_nav_height(self) -> None:
+        """吸顶表头要贴在导航下沿：两边必须走**同一个变量**。
+
+        写死像素会错位 —— 实测导航真实高度 49.7px，而 `top:44px` 让表头被导航盖住 5.7px。
+        """
+        css = view._CSS
+        self.assertIn("--nav-h:", css)                     # 单一事实来源
+        self.assertIn("height:var(--nav-h)", css)          # 导航用它定高（不再靠字体度量）
+        self.assertIn("top:var(--nav-h)", css)             # 表头用它定位
+        self.assertNotRegex(css, r"thead th\{[^}]*top:\d+px")
+
+    def test_table_is_not_an_overflow_container(self) -> None:
+        """`overflow:hidden` 会让 table 变成滚动容器，`position:sticky` 的表头**彻底失效**。
+
+        实测：表头跟着页面滚出屏幕（`thead_top: -920`）。要圆角就交给首末单元格去裁。
+
+        同理 **table 上不能有 transform/translate**：祖先的位移会把吸顶表头一起推走
+        （实测 `@starting-style` 残留的 `translate:0 8px` 让吸顶偏移从 50px 变成 58px）。
+        """
+        rule = view._CSS.split("table{", 1)[1].split("}", 1)[0]
+        for prop in ("overflow", "translate", "transform"):
+            self.assertNotIn(prop, rule)
+
+    def test_nothing_can_leave_content_invisible(self) -> None:
+        """**任何**「从 opacity:0 开始」的入场都不许有 —— 两种主流写法实测都会翻车。
+
+        ① `transition` + `@starting-style`：真实浏览器里过渡没跑起来，`.stat` 停在
+           `opacity:0; translate:0 8px`，统计卡片整块看不见（视觉核对抓到的）；
+        ② `animation` + `fill:both`：动画时钟不推进时停在 `from` 帧，同样是 `opacity:0`
+           （本机无头浏览器 4 个动画全是 `playState:running, currentTime:0`）。
+        截图、打印、无渲染环境都会命中 ②。数据面板里「内容看不见」比「没有动效」糟得多。
+        """
+        css = re.sub(r"/\*.*?\*/", "", view._CSS, flags=re.S)  # 先剥注释：注释里可以自由解释这个坑
+        self.assertNotIn("@starting-style", css)               # 这个坑别再回来
+        self.assertNotRegex(css, r"animation\s*:\s*enter")     # 没有入场动画
+        for body in re.findall(r"@keyframes[^{]*\{.*?\n\}", css, flags=re.S):
+            self.assertNotIn("opacity:0", body)                # 关键帧也不许从不可见开始
 
 
 class ServiceViewConfigTests(unittest.TestCase):

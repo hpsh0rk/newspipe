@@ -38,6 +38,7 @@ from typing import Any
 from urllib.parse import quote as urlquote
 
 from newspipe import config, edit, state
+from newspipe.style import CSS
 
 CONTRACT_VERSION = 1
 
@@ -451,74 +452,8 @@ def build(news_dir: Path | None = None, *, now: datetime | None = None) -> dict[
 
 
 # ------------------------------------------------------------------ 服务端渲染页
-_CSS = """
-:root{color-scheme:light dark}
-body{font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC",sans-serif;
-     margin:0;padding:24px;max-width:1100px}
-h1{font-size:20px;margin:0 0 4px}
-h2{font-size:15px;margin:22px 0 10px}
-.sub{opacity:.7;margin:0 0 16px}
-.stats{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:8px}
-.stat{border:1px solid rgba(128,128,128,.35);border-radius:8px;padding:8px 12px;min-width:92px}
-.stat b{display:block;font-size:18px}
-.stat span{font-size:12px;opacity:.7}
-table{border-collapse:collapse;width:100%}
-th,td{text-align:left;padding:6px 8px;border-bottom:1px solid rgba(128,128,128,.25);vertical-align:top}
-th{font-size:12px;opacity:.7;font-weight:600}
-code{font-size:12px;opacity:.85}
-.pill{display:inline-block;border-radius:999px;padding:1px 8px;font-size:12px;
-      border:1px solid rgba(128,128,128,.45)}
-.pill.ok{border-color:#2f9e44;color:#2f9e44}
-.pill.warn{border-color:#e8a33d;color:#e8a33d}
-.pill.danger{border-color:#e03131;color:#e03131}
-.pill.muted{opacity:.6}
-.empty{opacity:.6}
-footer{margin-top:26px;font-size:12px;opacity:.6}
-form.inline{display:inline;margin:0 4px 0 0}
-.btn{font:inherit;font-size:12px;padding:3px 10px;border-radius:6px;cursor:pointer;
-     border:1px solid rgba(128,128,128,.5);background:transparent;color:inherit}
-.btn:hover{border-color:#2f9e44}
-.btn.danger{border-color:#e03131;color:#e03131}
-.btn.danger:hover{background:rgba(224,49,49,.12)}
-.btn.primary{border-color:#2f9e44;color:#2f9e44}
-select,input[type=text]{font:inherit;font-size:12px;padding:3px 6px;border-radius:6px;
-     border:1px solid rgba(128,128,128,.5);background:transparent;color:inherit}
-.banner{border:1px solid;border-radius:8px;padding:10px 12px;margin:14px 0;font-size:13px}
-.banner.ok{border-color:#2f9e44}
-.banner.err{border-color:#e03131}
-.banner pre{white-space:pre-wrap;word-break:break-all;margin:6px 0 0;font-size:12px;opacity:.85}
-.actions{white-space:nowrap}
-.toolbar{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:14px 0;
-     border:1px solid rgba(128,128,128,.3);border-radius:8px;padding:10px 12px}
-.toolbar label{font-size:12px;display:flex;gap:6px;align-items:center}
-.hint{font-size:12px;opacity:.65;font-weight:400}
-h2 .hint{margin-left:6px}
-h3{font-size:13px;margin:14px 0 6px}
-details{margin:2px 0}
-summary{cursor:pointer;font-size:12px;opacity:.8}
-.note{font-size:12px;opacity:.7}
-nav.tabs{display:flex;gap:6px;margin:0 0 14px;border-bottom:1px solid rgba(128,128,128,.3);
-     padding-bottom:0}
-nav.tabs a.tab{padding:6px 14px;border:1px solid transparent;border-bottom:none;
-     border-radius:8px 8px 0 0;text-decoration:none;color:inherit;opacity:.7;font-size:14px}
-nav.tabs a.tab:hover{opacity:1;background:rgba(128,128,128,.08)}
-nav.tabs a.tab.on{opacity:1;border-color:rgba(128,128,128,.3);background:rgba(128,128,128,.10);
-     font-weight:600}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
-.card{border:1px solid rgba(128,128,128,.3);border-radius:8px;padding:10px 12px}
-.card h3{margin:0 0 8px}
-label.f{margin:2px 10px 2px 0;font-size:12px;display:inline-flex;align-items:center;gap:4px}
-label.f input[type=text],label.f select,label.f input[type=number]{min-width:88px}
-fieldset{border:1px solid rgba(128,128,128,.3);border-radius:8px;margin:0 0 12px;padding:8px 12px}
-legend{font-size:12px;opacity:.75;padding:0 6px}
-.cand{border:1px solid rgba(128,128,128,.3);border-radius:8px;padding:8px 10px;margin:6px 0}
-.cand code{word-break:break-all}
-.barcell{white-space:nowrap}
-.bar{display:inline-block;height:9px;background:currentColor;opacity:.4;border-radius:2px;
-     vertical-align:middle;min-width:1px}
-.bar-n{font-size:11px;opacity:.7;margin-left:5px}
-.trend .zero{opacity:.35}
-"""
+#: 页面样式在 `style.py`（纯 CSS、零 JS、零外部请求；动效全走平台原生能力）。
+_CSS = CSS
 
 
 def _pill(tone: str, label: str) -> str:
@@ -843,16 +778,7 @@ def as_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
         write_note = "本页只读；增删改在「配置」页，管理动作在「运维」页。"
     else:
         write_note = "写操作未开启（<code>service.yaml: view.actions</code>）。"
-    return f"""<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>newspipe · {_tab_label(tab)}</title><style>{_CSS}</style></head><body>
-{_nav(tab)}
-<h1>newspipe · {_tab_label(tab)}</h1>
-<p class="sub">生成于 <code>{html.escape(view['generated_at'])}</code> ·
-通道 {html.escape(svc['channel'])} · 入站 {html.escape(svc['inbound_mode'])} ·
-槽位 {html.escape(', '.join(f'{k}:{v}' for k, v in view['slots'].items()))} ·
-投递群 <code>{html.escape(str(view['chat']))}</code></p>
+    body = f"""
 {_banner(flash)}{toolbar}
 <div class="stats">
   <div class="stat"><b>{s['batches']}</b><span>今日批次</span></div>
@@ -875,11 +801,10 @@ def as_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
 <h2>今日批次</h2>
 <table><thead><tr><th>文件</th><th>标题</th><th>槽位</th><th>已标记</th><th>卡片</th><th>顺延</th></tr></thead>
 <tbody>{''.join(batches) or '<tr><td colspan="6" class="empty">今天还没有批次</td></tr>'}</tbody></table>
-{events_section}
-<footer>本页与 <code>GET {html.escape(str(svc['view_path']))}</code> 同源（只读视图契约 v{view['contract_version']}）。
-行为权威 = <code>sources.yaml</code>（改配置走 CLI 或 Git）。{write_note}</footer>
-</body></html>
-"""
+{events_section}"""
+    footer = (f"本页与 <code>GET {html.escape(str(svc['view_path']))}</code> 同源。"
+              f"行为权威 = <code>sources.yaml</code>（改配置走 CLI 或 Git）。{write_note}")
+    return _page(tab=tab, sub_meta=view, svc=svc, body=body, footer_extra=footer)
 
 
 def cockpit_html(view: dict[str, Any], *, flash: dict[str, Any] | None = None,
@@ -1218,10 +1143,15 @@ def batch_html(view: dict[str, Any], *, page: dict[str, Any] | None = None,
 
 def _page(*, tab: str, sub_meta: dict[str, Any], svc: dict[str, Any], body: str,
           footer_extra: str = "") -> str:
-    """三页共用的外壳：导航 + 标题 + 元信息行 + 正文 + 页脚。"""
+    """**所有页面共用的唯一外壳**：导航 + 标题 + 元信息行 + 正文 + 页脚。
+
+    以前 `as_html()` 自己又写了一份 `<head>`/`<h1>`/`<footer>`，两份拷贝会漂移
+    （加一个 `<meta>` 就得记得改两处）。现在只有这一份。
+    """
     return f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>newspipe · {_tab_label(tab)}</title><style>{_CSS}</style></head><body>
 {_nav(tab)}
 <h1>newspipe · {_tab_label(tab)}</h1>
