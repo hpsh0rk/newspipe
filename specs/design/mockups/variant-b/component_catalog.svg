@@ -1,0 +1,262 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1060" width="100%" height="100%">
+  <defs>
+    <style>
+      .txt { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+      .bold { font-weight: 700; }
+      .semibold { font-weight: 600; }
+      .regular { font-weight: 400; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="1060" fill="#0B0F19"/>
+
+  <!-- 标题与设计方案标注 -->
+  <text x="48" y="48" class="txt bold" font-size="22" fill="#F9FAFB">🧩 公共组件全状态视觉规范与颜色字典</text>
+  <text x="48" y="76" class="txt regular" font-size="14" fill="#9CA3AF">
+    选定方案: <tspan class="semibold" fill="#4D9EF7">方案 B: 科技深色高信息密度 (Cyber Slate Dark)</tspan> | 主题: dark | WCAG 对比度得分: 94/100
+  </text>
+  <line x1="48" y1="96" x2="1152" y2="96" stroke="#1F2937" stroke-width="1"/>
+
+  <!-- ================= SECTION 1: 按钮组件 (Button States) ================= -->
+  <text x="48" y="132" class="txt bold" font-size="16" fill="#F9FAFB">1. 按钮组件 (Button States)</text>
+  <text x="48" y="152" class="txt regular" font-size="12" fill="#9CA3AF">必须明确 Default, Hover, Active, Focus, Disabled 五态颜色与交互投影</text>
+
+  <!-- Button: Default -->
+  <g transform="translate(48, 170)">
+    <rect width="130" height="40" rx="6" fill="#4D9EF7" stroke="transparent"/>
+    <text x="65" y="25" class="txt semibold" font-size="13" fill="#0B0F19" text-anchor="middle">Default</text>
+    <text x="65" y="56" class="txt regular" font-size="11" fill="#9CA3AF" text-anchor="middle">默认态 (#4D9EF7)</text>
+  </g>
+
+  <!-- Button: Hover -->
+  <g transform="translate(200, 170)">
+    <rect width="130" height="40" rx="6" fill="#3B82F6" stroke="transparent"/>
+    <text x="65" y="25" class="txt semibold" font-size="13" fill="#0B0F19" text-anchor="middle">Hover</text>
+    <text x="65" y="56" class="txt regular" font-size="11" fill="#9CA3AF" text-anchor="middle">悬停态 (#3B82F6)</text>
+  </g>
+
+  <!-- Button: Active -->
+  <g transform="translate(352, 170)">
+    <rect width="130" height="40" rx="6" fill="#2563EB" stroke="transparent"/>
+    <text x="65" y="25" class="txt semibold" font-size="13" fill="#0B0F19" text-anchor="middle">Active</text>
+    <text x="65" y="56" class="txt regular" font-size="11" fill="#9CA3AF" text-anchor="middle">按压激活态</text>
+  </g>
+
+  <!-- Button: Focus -->
+  <g transform="translate(504, 170)">
+    <rect width="130" height="40" rx="6" fill="#4D9EF7" stroke="#7FB8FA" stroke-width="2"/>
+    <text x="65" y="25" class="txt semibold" font-size="13" fill="#0B0F19" text-anchor="middle">Focus Ring</text>
+    <text x="65" y="56" class="txt regular" font-size="11" fill="#9CA3AF" text-anchor="middle">键盘聚焦外环</text>
+  </g>
+
+  <!-- Button: Disabled -->
+  <g transform="translate(656, 170)">
+    <rect width="130" height="40" rx="6" fill="#1F2937" stroke="transparent"/>
+    <text x="65" y="25" class="txt semibold" font-size="13" fill="#4B5563" text-anchor="middle">Disabled</text>
+    <text x="65" y="56" class="txt regular" font-size="11" fill="#9CA3AF" text-anchor="middle">禁用置灰态</text>
+  </g>
+
+  <!-- 次级按钮 (Secondary Button) -->
+  <g transform="translate(808, 170)">
+    <rect width="140" height="40" rx="6" fill="#8B5CF6" stroke="transparent"/>
+    <text x="70" y="25" class="txt semibold" font-size="13" fill="#FFFFFF" text-anchor="middle">Secondary Btn</text>
+    <text x="70" y="56" class="txt regular" font-size="11" fill="#9CA3AF" text-anchor="middle">次级操作按钮</text>
+  </g>
+
+  <g transform="translate(968, 170)">
+    <rect width="140" height="40" rx="6" fill="#111827" stroke="#1F2937" stroke-width="1"/>
+    <text x="70" y="25" class="txt semibold" font-size="13" fill="#F9FAFB" text-anchor="middle">Outline Btn</text>
+    <text x="70" y="56" class="txt regular" font-size="11" fill="#9CA3AF" text-anchor="middle">幽灵边框按钮</text>
+  </g>
+
+  <!-- ================= SECTION 2: 输入框组件 (Input States) ================= -->
+  <line x1="48" y1="250" x2="1152" y2="250" stroke="#1F2937" stroke-width="1"/>
+  <text x="48" y="286" class="txt bold" font-size="16" fill="#F9FAFB">2. 输入框组件 (Input States)</text>
+
+  <!-- Input: Default -->
+  <g transform="translate(48, 306)">
+    <rect width="200" height="42" rx="6" fill="#030712" stroke="#374151" stroke-width="1"/>
+    <text x="16" y="26" class="txt regular" font-size="13" fill="#6B7280">请输入内容...</text>
+    <text x="100" y="60" class="txt regular" font-size="11" fill="#9CA3AF" text-anchor="middle">Default (默认态)</text>
+  </g>
+
+  <!-- Input: Hover -->
+  <g transform="translate(268, 306)">
+    <rect width="200" height="42" rx="6" fill="#030712" stroke="#4B5563" stroke-width="1"/>
+    <text x="16" y="26" class="txt regular" font-size="13" fill="#F9FAFB">用户正在输入</text>
+    <text x="100" y="60" class="txt regular" font-size="11" fill="#9CA3AF" text-anchor="middle">Hover (悬停态)</text>
+  </g>
+
+  <!-- Input: Focus -->
+  <g transform="translate(488, 306)">
+    <rect width="200" height="42" rx="6" fill="#030712" stroke="#4D9EF7" stroke-width="2"/>
+    <text x="16" y="26" class="txt regular" font-size="13" fill="#F9FAFB">聚焦激活态|</text>
+    <text x="100" y="60" class="txt regular" font-size="11" fill="#9CA3AF" text-anchor="middle">Focus (高亮外框)</text>
+  </g>
+
+  <!-- Input: Error -->
+  <g transform="translate(708, 306)">
+    <rect width="200" height="42" rx="6" fill="#450A0A" stroke="#EF4444" stroke-width="1.5"/>
+    <text x="16" y="26" class="txt regular" font-size="13" fill="#FCA5A5">时长不能少于15分钟</text>
+    <text x="100" y="60" class="txt regular" font-size="11" fill="#FCA5A5" text-anchor="middle">Error (非法校验报错)</text>
+  </g>
+
+  <!-- Input: Disabled -->
+  <g transform="translate(928, 306)">
+    <rect width="200" height="42" rx="6" fill="#111827" stroke="#1F2937" stroke-width="1"/>
+    <text x="16" y="26" class="txt regular" font-size="13" fill="#4B5563">只读不可修改</text>
+    <text x="100" y="60" class="txt regular" font-size="11" fill="#9CA3AF" text-anchor="middle">Disabled (禁用态)</text>
+  </g>
+
+  <!-- ================= SECTION 3: 标签与徽章 (Badges & Status Tags) ================= -->
+  <line x1="48" y1="390" x2="1152" y2="390" stroke="#1F2937" stroke-width="1"/>
+  <text x="48" y="426" class="txt bold" font-size="16" fill="#F9FAFB">3. 状态徽章 (Status Badges)</text>
+
+  <!-- Success Badge -->
+  <g transform="translate(48, 446)">
+    <rect width="110" height="28" rx="14" fill="#064E3B" stroke="#059669"/>
+    <text x="55" y="19" class="txt bold" font-size="12" fill="#6EE7B7" text-anchor="middle">● 校验通过</text>
+  </g>
+
+  <!-- Warning Badge -->
+  <g transform="translate(178, 446)">
+    <rect width="110" height="28" rx="14" fill="#78350F" stroke="#D97706"/>
+    <text x="55" y="19" class="txt bold" font-size="12" fill="#FDE68A" text-anchor="middle">▲ 临近考期</text>
+  </g>
+
+  <!-- Error Badge -->
+  <g transform="translate(308, 446)">
+    <rect width="110" height="28" rx="14" fill="#7F1D1D" stroke="#DC2626"/>
+    <text x="55" y="19" class="txt bold" font-size="12" fill="#FCA5A5" text-anchor="middle">✕ 门禁拦截</text>
+  </g>
+
+  <!-- Info Badge -->
+  <g transform="translate(438, 446)">
+    <rect width="110" height="28" rx="14" fill="#1E3A8A" stroke="#2563EB"/>
+    <text x="55" y="19" class="txt bold" font-size="12" fill="#93C5FD" text-anchor="middle">ℹ 进行中</text>
+  </g>
+
+  <!-- ================= SECTION 4: 基础色彩值色板 (Color Palette Swatches) ================= -->
+  <line x1="48" y1="500" x2="1152" y2="500" stroke="#1F2937" stroke-width="1"/>
+  <text x="48" y="536" class="txt bold" font-size="16" fill="#F9FAFB">4. 调色盘与色阶基线 (Color Palette)</text>
+
+  <!-- Color 1: Primary -->
+  <g transform="translate(48, 556)">
+    <rect width="90" height="50" rx="8" fill="#4D9EF7"/>
+    <text x="45" y="72" class="txt semibold" font-size="12" fill="#F9FAFB" text-anchor="middle">Primary</text>
+    <text x="45" y="88" class="txt regular" font-size="11" fill="#9CA3AF" text-anchor="middle">#4D9EF7</text>
+  </g>
+
+  <!-- Color 2: Secondary -->
+  <g transform="translate(158, 556)">
+    <rect width="90" height="50" rx="8" fill="#8B5CF6"/>
+    <text x="45" y="72" class="txt semibold" font-size="12" fill="#F9FAFB" text-anchor="middle">Secondary</text>
+    <text x="45" y="88" class="txt regular" font-size="11" fill="#9CA3AF" text-anchor="middle">#8B5CF6</text>
+  </g>
+
+  <!-- Color 3: Accent -->
+  <g transform="translate(268, 556)">
+    <rect width="90" height="50" rx="8" fill="#10B981"/>
+    <text x="45" y="72" class="txt semibold" font-size="12" fill="#F9FAFB" text-anchor="middle">Accent</text>
+    <text x="45" y="88" class="txt regular" font-size="11" fill="#9CA3AF" text-anchor="middle">#10B981</text>
+  </g>
+
+  <!-- Color 4: Background -->
+  <g transform="translate(378, 556)">
+    <rect width="90" height="50" rx="8" fill="#0B0F19" stroke="#1F2937" stroke-width="1"/>
+    <text x="45" y="72" class="txt semibold" font-size="12" fill="#F9FAFB" text-anchor="middle">Background</text>
+    <text x="45" y="88" class="txt regular" font-size="11" fill="#9CA3AF" text-anchor="middle">#0B0F19</text>
+  </g>
+
+  <!-- Color 5: Surface -->
+  <g transform="translate(488, 556)">
+    <rect width="90" height="50" rx="8" fill="#111827" stroke="#1F2937" stroke-width="1"/>
+    <text x="45" y="72" class="txt semibold" font-size="12" fill="#F9FAFB" text-anchor="middle">Surface</text>
+    <text x="45" y="88" class="txt regular" font-size="11" fill="#9CA3AF" text-anchor="middle">#111827</text>
+  </g>
+
+  <!-- Color 6: TextPrimary -->
+  <g transform="translate(598, 556)">
+    <rect width="90" height="50" rx="8" fill="#F9FAFB"/>
+    <text x="45" y="72" class="txt semibold" font-size="12" fill="#F9FAFB" text-anchor="middle">Text Primary</text>
+    <text x="45" y="88" class="txt regular" font-size="11" fill="#9CA3AF" text-anchor="middle">#F9FAFB</text>
+  </g>
+
+  <!-- Color 7: Border -->
+  <g transform="translate(708, 556)">
+    <rect width="90" height="50" rx="8" fill="#1F2937"/>
+    <text x="45" y="72" class="txt semibold" font-size="12" fill="#F9FAFB" text-anchor="middle">Border</text>
+    <text x="45" y="88" class="txt regular" font-size="11" fill="#9CA3AF" text-anchor="middle">#1F2937</text>
+  </g>
+
+  <!-- ================= SECTION 5: 字体层级与图标标准 (Typography & Icons) ================= -->
+  <line x1="48" y1="670" x2="1152" y2="670" stroke="#1F2937" stroke-width="1"/>
+  <text x="48" y="706" class="txt bold" font-size="16" fill="#F9FAFB">5. 字体排版标尺与图标规格 (Typography &amp; Icons)</text>
+
+  <g transform="translate(48, 730)">
+    <text x="0" y="24" class="txt bold" font-size="24" fill="#F9FAFB">Display 24px - 模块主标题</text>
+    <text x="0" y="56" class="txt semibold" font-size="18" fill="#F9FAFB">Heading 18px - 卡片与区块分组标题</text>
+    <text x="0" y="84" class="txt regular" font-size="14" fill="#F9FAFB">Body 14px - 界面正文、表格内容与默认控件文字</text>
+    <text x="0" y="108" class="txt regular" font-size="12" fill="#9CA3AF">Caption 12px - 辅助提示、标签、微小元数据</text>
+  </g>
+
+  <g transform="translate(700, 730)">
+    <text x="0" y="20" class="txt bold" font-size="14" fill="#F9FAFB">图标系统标准 (Icon System):</text>
+    <text x="0" y="44" class="txt regular" font-size="13" fill="#9CA3AF">• 图标库: Lucide Icons</text>
+    <text x="0" y="68" class="txt regular" font-size="13" fill="#9CA3AF">• 描边粗细: 1.5px</text>
+    <text x="0" y="92" class="txt regular" font-size="13" fill="#9CA3AF">• 标准规格阶梯: 16px (sm) / 20px (md) / 24px (lg) / 32px (xl)</text>
+  </g>
+
+  <!-- ================= SECTION 6: 补全状态 (Loading / Checkbox / Link / Numeric) ================= -->
+  <line x1="48" y1="866" x2="1152" y2="866" stroke="#1F2937" stroke-width="1"/>
+  <text x="48" y="902" class="txt bold" font-size="16" fill="#F9FAFB">6. 补全状态 (Loading / Checkbox / Link / Numeric)</text>
+  <text x="48" y="922" class="txt regular" font-size="12" fill="#9CA3AF">提交态与选择态缺失时开发者会在业务里现编; 数字不等宽则数值列随位数跳动</text>
+
+  <!-- Button: Loading -->
+  <g transform="translate(48, 940)">
+    <rect width="150" height="40" rx="8" fill="#4D9EF7"/>
+    <circle cx="22" cy="20" r="7" fill="none" stroke="#0B0F19" stroke-width="2.5" stroke-dasharray="22 12"/>
+    <text x="42" y="25" class="txt semibold" font-size="13" fill="#0B0F19">提交中…</text>
+    <text x="0" y="58" class="txt regular" font-size="11" fill="#9CA3AF">Button Loading (progress)</text>
+  </g>
+
+  <!-- Checkbox: 四态 -->
+  <g transform="translate(240, 940)">
+    <rect width="20" height="20" rx="4" fill="#111827" stroke="#374151" stroke-width="1.5"/>
+    <text x="28" y="16" class="txt regular" font-size="12" fill="#F9FAFB">未选</text>
+    <text x="0" y="58" class="txt regular" font-size="11" fill="#9CA3AF">Checkbox Default</text>
+  </g>
+  <g transform="translate(370, 940)">
+    <rect width="20" height="20" rx="4" fill="#4D9EF7" stroke="#4D9EF7" stroke-width="1.5"/>
+    <text x="5" y="16" class="txt bold" font-size="13" fill="#0B0F19">✓</text>
+    <text x="28" y="16" class="txt regular" font-size="12" fill="#F9FAFB">已选</text>
+    <text x="0" y="58" class="txt regular" font-size="11" fill="#9CA3AF">Checkbox Checked</text>
+  </g>
+  <g transform="translate(500, 940)">
+    <rect width="20" height="20" rx="4" fill="#4D9EF7" stroke="#4D9EF7" stroke-width="1.5"/>
+    <rect x="5" y="9" width="10" height="3" rx="1.5" fill="#0B0F19"/>
+    <text x="28" y="16" class="txt regular" font-size="12" fill="#F9FAFB">半选</text>
+    <text x="0" y="58" class="txt regular" font-size="11" fill="#9CA3AF">Checkbox Indeterminate</text>
+  </g>
+  <g transform="translate(640, 940)">
+    <rect width="20" height="20" rx="4" fill="#1F2937" stroke="#1F2937" stroke-width="1.5"/>
+    <text x="28" y="16" class="txt regular" font-size="12" fill="#9CA3AF">禁用</text>
+    <text x="0" y="58" class="txt regular" font-size="11" fill="#9CA3AF">Checkbox Disabled</text>
+  </g>
+
+  <!-- Text Link: 三态 -->
+  <g transform="translate(800, 940)">
+    <text x="0" y="16" class="txt regular" font-size="13" fill="#4D9EF7">默认链接</text>
+    <text x="0" y="38" class="txt regular" font-size="13" fill="#3B82F6" text-decoration="underline">悬停链接</text>
+    <text x="0" y="60" class="txt regular" font-size="13" fill="#2563EB" text-decoration="underline">按压链接</text>
+    <text x="0" y="86" class="txt regular" font-size="11" fill="#9CA3AF">Text Link (Default/Hover/Active)</text>
+  </g>
+
+  <!-- Numeric: 等宽数字纵向对齐 -->
+  <g transform="translate(980, 940)">
+    <text x="0" y="16" class="txt bold" font-size="20" fill="#F9FAFB" text-anchor="end" style="font-variant-numeric: tnum 1, lnum 1;">1,284,930</text>
+    <text x="0" y="42" class="txt bold" font-size="20" fill="#F9FAFB" text-anchor="end" style="font-variant-numeric: tnum 1, lnum 1;">88,204</text>
+    <text x="0" y="68" class="txt bold" font-size="20" fill="#F9FAFB" text-anchor="end" style="font-variant-numeric: tnum 1, lnum 1;">7,915</text>
+    <text x="0" y="92" class="txt regular" font-size="11" fill="#9CA3AF">等宽数字 tabular-nums</text>
+  </g>
+</svg>

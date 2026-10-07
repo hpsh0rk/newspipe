@@ -272,7 +272,8 @@ class ViewHttpTests(unittest.TestCase):
         self.assertIn('action="/api/actions/run"', pages["/ops"])
         self.assertIn("信源清单", pages["/config"])
         self.assertIn("RSS 搜索", pages["/config"])
-        self.assertIn("本页只读", pages["/"])                       # 别撒谎说「写操作未开启」
+        # 只读页不再自我说明（「本页只读」的架构注释已删），更不许撒谎说「写操作未开启」
+        self.assertNotIn("本页只读", pages["/"])
         self.assertNotIn("写操作未开启", pages["/"])
         for route, page in pages.items():
             for other in ("/", "/ops", "/config"):

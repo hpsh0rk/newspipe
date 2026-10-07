@@ -563,125 +563,16 @@ def _history_html(view: dict[str, Any]) -> str:
     total_cards = sum(int(d.get("cards") or 0) for d in days)
     total_pushed = sum(int(d.get("pushed") or 0) for d in days)
     return (
-        f'<h2>近 {len(days)} 天 <span class="hint">合计 {total_items} 条 / {total_cards} 张卡 / '
+        f'<h3>近 {len(days)} 天 <span class="hint">合计 {total_items} 条 / {total_cards} 张卡 / '
         f"{total_pushed} 条入库；只算落盘过的（批次 / 预算 / 用量 / 推送台账）—— "
-        "各源历史成功率没落盘，所以不给</span></h2>"
+        "各源历史成功率没落盘，所以不给</span></h3>"
         '<table class="trend"><thead><tr><th>日期</th><th>条目</th><th>已标记率</th><th>发卡</th>'
         "<th>入库</th><th>AI 降级/调用</th><th>有产出的源</th></tr></thead>"
         f'<tbody>{"".join(body)}</tbody></table>')
 
 
-def _drawer_html(view: dict[str, Any]) -> str:
-    """诊断抽屉：点开源看「最近一次为什么这样」+「可能拦下它的闸」。
-
-    诚实边界：**历史拦截原因没有落盘**（`state/status/<源>.json` 只留最后一次心跳），
-    所以抽屉给的是「最近一次计数」+「生效中的闸」，不是「历史上被哪道闸拦了几次」。
-    """
-    hist = view.get("history") or []
-    blocks = []
-    for src in view.get("sources") or []:
-        name = str(src.get("name"))
-        produced = [str(d.get("date"))[5:] for d in hist if name in (d.get("sources") or [])]
-        detail = src.get("status_detail") or {}
-        detail_txt = " · ".join(f"{k}={v}" for k, v in detail.items()) or "（没有计数）"
-        quiet = f"静默时段 <code>{html.escape(str(src.get('quiet_hours') or '无'))}</code>"
-        if src.get("priority") == "high":
-            quiet += "（<code>high</code> 优先级可越过）"
-        gates = [
-            f"卡片形态 <code>{html.escape(str(src.get('form')))}</code>"
-            + ("" if src.get("sends_card") else " —— <b>不发卡</b>，只落 state"),
-            quiet,
-            f"每日上限 <code>{src.get('max_cards_per_day')}</code> 张 · 最小间隔 "
-            f"<code>{src.get('min_gap_min')}</code> 分钟",
-            f"条数上限 <code>{src.get('max_items')}</code> · 最少 <code>{src.get('min_items')}</code>"
-            f"（不够就攒批）· 触发 <code>{html.escape(str(src.get('trigger')))}</code>"
-            + (f"（间隔 {src.get('interval_min')} 分钟）" if src.get("trigger") == "poll" else ""),
-        ]
-        queue_note = (f'顺延队列 <b>{src.get("pending_total")}</b> 条 —— 明细与「现在发」在 '
-                      f'<a href="/ops">运维页</a>' if src.get("pending_total")
-                      else "顺延队列 0 条")
-        note = html.escape(str(src.get("status_note") or ""))
-        # 没有历史就**不提产出** —— 「近 0 天产出 0 天」会被读成「源一直没拉到东西」，
-        # 而无历史只是「还没有历史」。
-        if hist:
-            summary_tail = f" · 近 {len(hist)} 天产出 {len(produced)} 天"
-            produced_line = (
-                f'<p class="note">近 {len(hist)} 天有产出：'
-                + (f'{len(produced)} 天（{html.escape("、".join(produced))}）' if produced
-                   else "<b>一天都没有</b> —— 源可能一直没拉到东西")
-                + "</p>")
-        else:
-            summary_tail = ""
-            produced_line = '<p class="note">还没有历史（没有批次落盘），所以不给产出统计。</p>'
-        blocks.append(
-            '<details class="drawer">'
-            f'<summary><code>{html.escape(name)}</code> · '
-            f'{html.escape(str(src.get("status_label")))}'
-            f'{"（超期）" if src.get("stale") else ""}{summary_tail}</summary>'
-            f'<p class="note">最近心跳 <code>{html.escape(str(src.get("status_ts") or "从未"))}</code>'
-            + (f' · {note}' if note else "") + "</p>"
-            f'<p class="note">最近一次计数：<code>{html.escape(detail_txt)}</code></p>'
-            + produced_line
-            + '<p class="note">生效中的闸（可能拦下它的）：<br>' + "<br>".join(gates) + "</p>"
-            f'<p class="note">{queue_note} · 去重台账 {src.get("pushed_total")} 条</p>'
-            '<p class="note">⚠️ 历史拦截原因<b>没有落盘</b>（只留最后一次心跳）—— 要精确归因看 '
-            "<code>actions.log</code> 或 <code>state/status/</code>。</p>"
-            "</details>")
-    tail = (f"可能拦下它的闸 / 近 {len(hist)} 天有没有产出" if hist
-            else "可能拦下它的闸")
-    return (
-        f'<h2>诊断抽屉 <span class="hint">{len(blocks)} 个源，点开看最近一次为什么这样 / '
-        + tail + "</span></h2>"
-        + ("".join(blocks) or '<p class="empty">注册表里还没有信源</p>'))
-
-
-def as_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
-            flash: dict[str, Any] | None = None, tab: str = "cockpit",
-            page: dict[str, Any] | None = None) -> str:
-    """同一份视图的服务端渲染（`GET /`）：不引前端、不发任何外部请求。
-
-    面板（宿主）走 JSON 契约；这一页是给「从服务门户点进来」的场景用的。
-
-    `actions` 非空时这一页从「仪表盘」变成「控制台」：每个动作都是一个 POST 表单，
-    由 `/api/actions/<name>` 翻译成 CLI 命令，用**同一份 handler** 执行。传 `token` 才
-    渲染按钮（服务端没开写操作时，页面里连表单都不该出现）。
-    """
-    act = actions or {}
-    token = str(act.get("token") or "")
-    on = bool(token)
-    src_hash = str(act.get("sources_hash") or "")
-    s = view["summary"]
-    rows = []
-    for src in view["sources"]:
-        detail = " ".join(f"{k}:{v}" for k, v in (src.get("status_detail") or {}).items()
-                          if k not in ("enrich", "note", "card"))
-        if src.get("status_note"):
-            detail = f"{detail} {src['status_note']}".strip()
-        trigger = (f"轮询 {src['interval_min']:g}min" if src["trigger"] == "poll"
-                   else "定时 " + "/".join(src["slots"]) or "手动")
-        cell = ""
-        if on:
-            bits = [_form("source-toggle", token,
-                          {"name": src["name"], "state": "disable" if src["enabled"] else "enable",
-                           "base_hash": src_hash},
-                          "停用" if src["enabled"] else "启用")]
-            bits.append(_form("run", token, {"target": f"source:{src['name']}", "dry": "1"}, "试跑"))
-            if src["pending_total"]:
-                bits.append(_form("flush", token, {"name": src["name"]},
-                                  f"现在发 {src['pending_total']}", danger=True))
-            cell = f'<td class="actions">{"".join(bits)}</td>'
-        rows.append(
-            "<tr>"
-            f"<td><code>{html.escape(src['name'])}</code></td>"
-            f"<td>{html.escape(str(src['card_title']))}</td>"
-            f"<td>{html.escape(trigger)}</td>"
-            f"<td>{html.escape(src['form'])}/{html.escape(src['summary_mode'])}</td>"
-            f"<td>{_pill(str(src['status_tone']), str(src['status_label']))}</td>"
-            f"<td><code>{html.escape(str(src['status_ts'] or '从未'))}</code></td>"
-            f"<td>{src['pushed_total']}{' / 顺延 ' + str(src['pending_total']) if src['pending_total'] else ''}</td>"
-            f"<td><code>{html.escape(detail)}</code></td>"
-            f"{cell}"
-            "</tr>")
+def _today_batches_html(view: dict[str, Any]) -> str:
+    """今日批次表（驾驶舱「深入诊断」折叠区用；运维页不再重复渲染）。"""
     batches = []
     for b in view["today"]:
         batches.append(
@@ -693,130 +584,235 @@ def as_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
             f"<td>{'已发卡' if b['has_card'] else '仅原料'}</td>"
             f"<td>{b['overflow'] or ''}</td>"
             "</tr>")
-    # ---- 写操作面：只有服务端开了 `view.actions` 才会传 token 进来
-    toolbar = queue_section = pending_section = events_section = ""
-    op_th = ""
-    colspan = 8
-    if on:
-        colspan = 9
-        op_th = "<th>操作</th>"
-        targets = act.get("run_targets") or ["am", "noon", "pm", "poll"]
-        opts = "".join(f'<option value="{html.escape(str(t))}">{html.escape(str(t))}</option>'
-                       for t in targets)
-        toolbar = (
-            '<form method="post" action="/api/actions/run" class="toolbar">'
-            f'<input type="hidden" name="token" value="{html.escape(token)}">'
-            f'<label>目标 <select name="target">{opts}</select></label>'
-            '<label><input type="checkbox" name="dry" value="1" checked> 试运行（不发卡）</label>'
-            '<button class="btn primary" type="submit">跑一轮</button>'
-            '<span class="hint">按钮 → CLI（同一份 handler；校验 / 原子写 / 审计都在 CLI）</span>'
-            "</form>")
-
-        note_input = '<input type="text" name="note" placeholder="备注" size="10">'
-        qrows = []
-        for e in act.get("queue") or []:
-            p = e.get("payload") or {}
-            title = str(p.get("title") or p.get("item_id") or "（无标题）")
-            qrows.append(
-                "<tr>"
-                f'<td><code>{html.escape(str(e.get("ts") or ""))}</code></td>'
-                f'<td>{html.escape(str(e.get("source") or ""))}</td>'
-                f'<td>{_link(title, str(p.get("url") or ""))}</td>'
-                f'<td class="actions">{_form("queue-ack", token, {"event_id": str(e.get("id") or "")}, "确认入库", cls="primary", extra=note_input)}</td>'
-                "</tr>")
-        queue_section = (
-            f'<h2>待入库队列 ⭐ <span class="hint">{len(qrows)} 条待你确认</span></h2>'
-            "<table><thead><tr><th>时间</th><th>来源</th><th>标题</th><th>操作</th></tr></thead>"
-            "<tbody>" + ("".join(qrows) or '<tr><td colspan="4" class="empty">没有待确认的收藏</td></tr>')
+    return ('<h3>今日批次</h3><table><thead><tr><th>文件</th><th>标题</th><th>槽位</th>'
+            "<th>已标记</th><th>卡片</th><th>顺延</th></tr></thead>"
+            '<tbody>' + ("".join(batches) or '<tr><td colspan="6" class="empty">今天还没有批次</td></tr>')
             + "</tbody></table>")
 
-        pend_blocks = []
-        for name, items in (act.get("pending") or {}).items():
-            prows = "".join(
-                "<tr>"
-                f"<td>{_link(str(it.get('title') or it.get('ext_id') or ''), str(it.get('url') or ''), limit=120)}</td>"
-                f'<td class="note">{html.escape(str(it.get("source") or ""))}</td>'
-                f'<td>{html.escape(str(it.get("score") or ""))}</td>'
-                "</tr>" for it in items)
-            pend_blocks.append(
-                f'<h3><code>{html.escape(str(name))}</code> · 显示 {len(items)} 条 '
-                + _form("flush", token, {"name": str(name)}, "现在发", danger=True)
-                + "</h3><table><thead><tr><th>标题</th><th>来源</th><th>分</th></tr></thead>"
-                + f"<tbody>{prows}</tbody></table>")
-        if pend_blocks:
-            pending_section = ('<h2>顺延队列明细 <span class="hint">点「现在发」= 立刻跑这个源，'
-                               '把队列里的条目真发出去</span></h2>' + "".join(pend_blocks))
 
-        erows = []
-        for e in act.get("events") or []:
-            p = e.get("payload") or {}
-            erows.append(
-                "<tr>"
-                f'<td><code>{html.escape(str(e.get("ts") or ""))}</code></td>'
-                f'<td>{html.escape(str(e.get("type") or ""))}</td>'
-                f'<td>{html.escape(str(e.get("source") or ""))}</td>'
-                f"<td>{_link(str(p.get('title') or ''), str(p.get('url') or ''))}</td>"
-                f'<td class="actions">{_form("events-ack", token, {"ids": str(e.get("id") or "")}, "已消费")}</td>'
-                "</tr>")
-        events_section = (
-            f'<h2>未消费事件 <span class="hint">{len(erows)} 条（近 7 天）</span></h2>'
-            "<table><thead><tr><th>时间</th><th>类型</th><th>来源</th><th>标题</th><th>操作</th></tr></thead>"
-            "<tbody>" + ("".join(erows) or '<tr><td colspan="5" class="empty">没有未消费事件</td></tr>')
-            + "</tbody></table>")
+def _drawer_body(src: dict[str, Any], hist: list[dict[str, Any]]) -> str:
+    """单源诊断抽屉的正文：点开信源行看到的「最近一次为什么这样 / 可能拦下它的闸」。
 
-    svc = view["service"]
-    history_section = _history_html(view)
-    drawer_section = _drawer_html(view)
-    # 「最近入库」只放驾驶舱：运维页要的是动作，不是内容浏览。
-    recent_section = _recent_html(page) if tab == "cockpit" else ""
-    read_rate = "—" if s["read_rate"] is None else f"{round(s['read_rate'] * 100)}%"
-    if on:
-        write_note = ("写操作走 <code>POST /api/actions/*</code> → CLI 的同一份 handler；"
-                      "动作白名单在代码里，不是配置。")
-    elif tab == "cockpit":
-        # 别在只读页上撒谎说「写操作未开启」—— 开着，只是这页不做
-        write_note = "本页只读；增删改在「配置」页，管理动作在「运维」页。"
+    诚实边界：**历史拦截原因没有落盘**（`state/status/<源>.json` 只留最后一次心跳），
+    所以抽屉给的是「最近一次计数」+「生效中的闸」，不是「历史上被哪道闸拦了几次」。
+    """
+    name = str(src.get("name"))
+    produced = [str(d.get("date"))[5:] for d in hist if name in (d.get("sources") or [])]
+    detail = src.get("status_detail") or {}
+    detail_txt = " · ".join(f"{k}={v}" for k, v in detail.items()) or "（没有计数）"
+    quiet = f"静默时段 <code>{html.escape(str(src.get('quiet_hours') or '无'))}</code>"
+    if src.get("priority") == "high":
+        quiet += "（<code>high</code> 优先级可越过）"
+    gates = [
+        f"卡片形态 <code>{html.escape(str(src.get('form')))}</code>"
+        + ("" if src.get("sends_card") else " —— <b>不发卡</b>，只落 state"),
+        quiet,
+        f"每日上限 <code>{src.get('max_cards_per_day')}</code> 张 · 最小间隔 "
+        f"<code>{src.get('min_gap_min')}</code> 分钟",
+        f"条数上限 <code>{src.get('max_items')}</code> · 最少 <code>{src.get('min_items')}</code>"
+        f"（不够就攒批）· 触发 <code>{html.escape(str(src.get('trigger')))}</code>"
+        + (f"（间隔 {src.get('interval_min')} 分钟）" if src.get("trigger") == "poll" else ""),
+    ]
+    queue_note = (f'顺延队列 <b>{src.get("pending_total")}</b> 条 —— 明细与「现在发」在 '
+                  f'<a href="/ops">运维页</a>' if src.get("pending_total")
+                  else "顺延队列 0 条")
+    note = html.escape(str(src.get("status_note") or ""))
+    # 没有历史就**不提产出** —— 「近 0 天产出 0 天」会被读成「源一直没拉到东西」，
+    # 而无历史只是「还没有历史」。
+    if hist:
+        produced_line = (
+            f'<p class="note">近 {len(hist)} 天有产出：'
+            + (f'{len(produced)} 天（{html.escape("、".join(produced))}）' if produced
+               else "<b>一天都没有</b> —— 源可能一直没拉到东西")
+            + "</p>")
     else:
-        write_note = "写操作未开启（<code>service.yaml: view.actions</code>）。"
-    body = f"""
-{_banner(flash)}{toolbar}
-<div class="stats">
-  <div class="stat"><b>{s['batches']}</b><span>今日批次</span></div>
-  <div class="stat"><b>{s['items']}</b><span>今日条目</span></div>
-  <div class="stat"><b>{read_rate}</b><span>已标记率</span></div>
-  <div class="stat"><b>{s['actions_today'] or 0}</b><span>今日点击</span></div>
-  <div class="stat"><b>{s['cards_today'] or 0}</b><span>今日发卡</span></div>
-  <div class="stat"><b>{view['llm']['calls']}</b><span>AI 调用</span></div>
-  <div class="stat"><b>{view['llm']['degraded']}</b><span>AI 降级</span></div>
-</div>
-{history_section}
-{recent_section}
-{queue_section}
-<h2>信源</h2>
-<table><thead><tr><th>源</th><th>卡片标题</th><th>节奏</th><th>形态/加工</th><th>心跳</th>
-<th>最近</th><th>去重/顺延</th><th>明细</th>{op_th}</tr></thead>
-<tbody>{''.join(rows) or f'<tr><td colspan="{colspan}" class="empty">注册表里还没有信源</td></tr>'}</tbody></table>
-{drawer_section}
-{pending_section}
-<h2>今日批次</h2>
-<table><thead><tr><th>文件</th><th>标题</th><th>槽位</th><th>已标记</th><th>卡片</th><th>顺延</th></tr></thead>
-<tbody>{''.join(batches) or '<tr><td colspan="6" class="empty">今天还没有批次</td></tr>'}</tbody></table>
-{events_section}"""
-    footer = (f"本页与 <code>GET {html.escape(str(svc['view_path']))}</code> 同源。"
-              f"行为权威 = <code>sources.yaml</code>（改配置走 CLI 或 Git）。{write_note}")
-    return _page(tab=tab, sub_meta=view, svc=svc, body=body, footer_extra=footer)
+        produced_line = '<p class="note">还没有历史（没有批次落盘），所以不给产出统计。</p>'
+    return (
+        f'<p class="note">最近心跳 <code>{html.escape(str(src.get("status_ts") or "从未"))}</code>'
+        + (f' · {note}' if note else "") + "</p>"
+        f'<p class="note">最近一次计数：<code>{html.escape(detail_txt)}</code></p>'
+        + produced_line
+        + '<p class="note">生效中的闸（可能拦下它的）：<br>' + "<br>".join(gates) + "</p>"
+        f'<p class="note">{queue_note} · 去重台账 {src.get("pushed_total")} 条</p>'
+        '<p class="note">⚠️ 历史拦截原因<b>没有落盘</b>（只留最后一次心跳）—— 要精确归因看 '
+        "<code>actions.log</code> 或 <code>state/status/</code>。")
+
+
+def _health_sort_key(src: dict[str, Any]) -> tuple[int, str]:
+    """异常源置顶（danger/warn），健康的跟后，停用的垫底 —— 首屏先看到需要处理的。"""
+    tone = str(src.get("status_tone") or "")
+    rank = {"danger": 0, "warn": 1}.get(tone, 2 if src.get("enabled") else 3)
+    return (rank, str(src.get("name")))
+
+
+def _health_rows(view: dict[str, Any]) -> str:
+    """驾驶舱的信源区：**一行一源**（异常置顶），行内 `<details>` 展开诊断抽屉。
+
+    单行只回答「好不好、为什么」；完整运行态表在运维页，不在这里重复。
+    """
+    hist = view.get("history") or []
+    sources = sorted(view.get("sources") or [], key=_health_sort_key)
+    if not sources:
+        return ('<h2>信源心跳 <span class="hint">异常的排前面 · 点开任何一行是诊断抽屉</span></h2>'
+                '<p class="empty">注册表里还没有信源</p>')
+    rows = []
+    for src in sources:
+        label = "超期未运行" if src.get("stale") else str(src.get("status_label") or "未知")
+        pill = _pill(str(src.get("status_tone") or ""), label)
+        trigger = (f"轮询 {src['interval_min']:g}min" if src["trigger"] == "poll"
+                   else ("定时 " + "/".join(src["slots"]) if src["slots"] else "手动"))
+        note = str(src.get("status_note") or "")
+        if not note:
+            detail = {k: v for k, v in (src.get("status_detail") or {}).items()
+                      if k not in ("enrich", "note", "card")}
+            note = " · ".join(f"{k}={v}" for k, v in detail.items()) if detail else "—"
+        rows.append(
+            '<details class="srcrow">'
+            f"<summary><code>{html.escape(str(src.get('name')))}</code>{pill}"
+            f'<span class="hint">{html.escape(trigger)} · {html.escape(note[:80])}</span></summary>'
+            f"{_drawer_body(src, hist)}"
+            "</details>")
+    return ('<h2>信源心跳 <span class="hint">异常的排前面 · 点开任何一行是诊断抽屉：'
+            "最近一次为什么这样 / 生效中的闸</span></h2>" + "".join(rows))
+
+
+def _cockpit_stats(view: dict[str, Any], page: dict[str, Any] | None) -> str:
+    """KPI 收敛到 4 个：今日条目 / 今日发卡 / ⭐待确认 / AI 降级（仅异常时出现）。
+
+    ⭐ 待确认是唯一带入口的 KPI —— 它指向运维页的人环动作（「做」的部分去运维页）。
+    """
+    s = view["summary"]
+    pending = page.get("queue_pending") if isinstance(page, dict) else 0
+    pending = pending if isinstance(pending, int) else 0
+    cells = [
+        f'<div class="stat"><b>{s["items"]}</b><span>今日条目</span></div>',
+        f'<div class="stat"><b>{s["cards_today"] or 0}</b><span>今日发卡</span></div>',
+        (f'<a class="statlink" href="/ops#queue"><div class="stat attn"><b>{pending}</b>'
+         "<span>待确认 ⭐</span></div></a>" if pending
+         else f'<div class="stat"><b>{pending}</b><span>待确认 ⭐</span></div>'),
+    ]
+    degraded = int(view["llm"]["degraded"] or 0)
+    if degraded:
+        cells.append(f'<div class="stat danger"><b>{degraded}</b><span>AI 降级</span></div>')
+    return f'<div class="stats">{"".join(cells)}</div>'
+
+
+def as_html(view: dict[str, Any], *, flash: dict[str, Any] | None = None,
+            page: dict[str, Any] | None = None) -> str:
+    """驾驶舱（`GET /`）：只回答「今天发了什么、是否正常」——只读，一个表单都没有。
+
+    深入材料（14 天趋势 / 今日批次）折叠进「深入诊断」；信源完整运行态表在运维页；
+    单源诊断抽屉并进信源行的展开区。首屏只留「看」的东西（审计 §4）。
+    """
+    svc = view["service"]
+    diag = _history_html(view) + _today_batches_html(view)
+    body = (
+        _banner(flash)
+        + _cockpit_stats(view, page)
+        + _recent_html(page)
+        + _health_rows(view)
+        + f'<details class="drawer deep"><summary>深入诊断 · 趋势 / 今日批次</summary>{diag}</details>')
+    return _page(tab="cockpit", sub_meta=view, svc=svc, body=body)
 
 
 def cockpit_html(view: dict[str, Any], *, flash: dict[str, Any] | None = None,
                  page: dict[str, Any] | None = None) -> str:
-    """驾驶舱：全局总览，**只读**（没有 actions 就没有任何表单）。"""
-    return as_html(view, actions=None, flash=flash, tab="cockpit", page=page)
+    """驾驶舱：全局总览，**只读**（没有任何表单）。"""
+    return as_html(view, flash=flash, page=page)
 
 
 def ops_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
              flash: dict[str, Any] | None = None) -> str:
-    """运维：跑一轮 / 启停 / ⭐确认入库 / 事件消费 / 顺延队列。写操作都走 CLI 同一份 handler。"""
-    return as_html(view, actions=actions, flash=flash, tab="ops")
+    """运维：**动作面** —— 跑一轮 / 启停 / ⭐确认入库 / 顺延队列。
+
+    与驾驶舱拆开（审计 §4）：这里不再重复渲染趋势 / 今日批次 / 诊断抽屉；
+    未消费事件不再给人点 —— `events-ack` 动作保留在白名单里，消费归宿主/CLI。
+    """
+    act = actions or {}
+    token = str(act.get("token") or "")
+    on = bool(token)
+    svc = view["service"]
+    if not on:
+        # 动作页没开动作就直说 —— 别渲染一堆按不动的按钮，也别装作这页有内容
+        body = (_banner(flash) + '<h2>运维</h2><p class="empty">写操作未开启'
+                "（<code>service.yaml: view.actions</code>）—— 跑一轮 / 启停 / ⭐确认入库 / "
+                "现在发顺延，都在开启后出现在本页。</p>")
+        return _page(tab="ops", sub_meta=view, svc=svc, body=body)
+
+    src_hash = str(act.get("sources_hash") or "")
+    targets = act.get("run_targets") or ["am", "noon", "pm", "poll"]
+    opts = "".join(f'<option value="{html.escape(str(t))}">{html.escape(str(t))}</option>'
+                   for t in targets)
+    toolbar = (
+        '<form method="post" action="/api/actions/run" class="toolbar">'
+        f'<input type="hidden" name="token" value="{html.escape(token)}">'
+        f'<label>目标 <select name="target">{opts}</select></label>'
+        '<label><input type="checkbox" name="dry" value="1" checked> 试运行（不发卡）</label>'
+        '<button class="btn primary" type="submit">跑一轮</button>'
+        "</form>")
+
+    note_input = '<input type="text" name="note" placeholder="备注" size="10">'
+    qrows = []
+    for e in act.get("queue") or []:
+        p = e.get("payload") or {}
+        title = str(p.get("title") or p.get("item_id") or "（无标题）")
+        qrows.append(
+            "<tr>"
+            f'<td><code>{html.escape(str(e.get("ts") or ""))}</code></td>'
+            f'<td>{html.escape(str(e.get("source") or ""))}</td>'
+            f'<td>{_link(title, str(p.get("url") or ""))}</td>'
+            f'<td class="actions">{_form("queue-ack", token, {"event_id": str(e.get("id") or "")}, "确认入库", cls="primary", extra=note_input)}</td>'
+            "</tr>")
+    queue_section = (
+        '<h2 id="queue">待入库队列 ⭐ <span class="hint">确认 = 人环放行，真的写进知识库</span></h2>'
+        "<table><thead><tr><th>时间</th><th>来源</th><th>标题</th><th>操作</th></tr></thead>"
+        "<tbody>" + ("".join(qrows) or '<tr><td colspan="4" class="empty">没有待确认的收藏</td></tr>')
+        + "</tbody></table>")
+
+    rows = []
+    for src in sorted(view["sources"], key=_health_sort_key):
+        label = "超期未运行" if src.get("stale") else str(src.get("status_label") or "未知")
+        bits = [_form("source-toggle", token,
+                      {"name": src["name"], "state": "disable" if src["enabled"] else "enable",
+                       "base_hash": src_hash},
+                      "停用" if src["enabled"] else "启用")]
+        bits.append(_form("run", token, {"target": f"source:{src['name']}", "dry": "1"}, "试跑"))
+        if src["pending_total"]:
+            bits.append(_form("flush", token, {"name": src["name"]},
+                              f"现在发 {src['pending_total']}", danger=True))
+        rows.append(
+            "<tr>"
+            f"<td><code>{html.escape(src['name'])}</code></td>"
+            f"<td>{_pill(str(src['status_tone']), label)}</td>"
+            f'<td class="actions">{"".join(bits)}</td>'
+            "</tr>")
+    sources_section = (
+        '<h2>信源 <span class="hint">启停与手动补跑；「为什么是这样」回驾驶舱点开信源行</span></h2>'
+        '<table><thead><tr><th>源</th><th>心跳</th><th>操作</th></tr></thead><tbody>'
+        + ("".join(rows) or '<tr><td colspan="3" class="empty">注册表里还没有信源</td></tr>')
+        + "</tbody></table>")
+
+    pend_blocks = []
+    for name, items in (act.get("pending") or {}).items():
+        prows = "".join(
+            "<tr>"
+            f"<td>{_link(str(it.get('title') or it.get('ext_id') or ''), str(it.get('url') or ''), limit=120)}</td>"
+            f'<td class="note">{html.escape(str(it.get("source") or ""))}</td>'
+            f'<td>{html.escape(str(it.get("score") or ""))}</td>'
+            "</tr>" for it in items)
+        pend_blocks.append(
+            f'<h3><code>{html.escape(str(name))}</code> · 显示 {len(items)} 条 '
+            + _form("flush", token, {"name": str(name)}, "现在发", danger=True)
+            + "</h3><table><thead><tr><th>标题</th><th>来源</th><th>分</th></tr></thead>"
+            + f"<tbody>{prows}</tbody></table>")
+    pending_section = ""
+    if pend_blocks:
+        pending_section = (
+            '<details class="drawer deep"><summary>顺延队列明细 · 点「现在发」立刻补跑</summary>'
+            + "".join(pend_blocks) + "</details>")
+
+    body = _banner(flash) + toolbar + queue_section + sources_section + pending_section
+    return _page(tab="ops", sub_meta=view, svc=svc, body=body)
 
 
 # ---------------------------------------------------------------- 配置页（表单驱动）
@@ -1143,11 +1139,15 @@ def batch_html(view: dict[str, Any], *, page: dict[str, Any] | None = None,
 
 def _page(*, tab: str, sub_meta: dict[str, Any], svc: dict[str, Any], body: str,
           footer_extra: str = "") -> str:
-    """**所有页面共用的唯一外壳**：导航 + 标题 + 元信息行 + 正文 + 页脚。
+    """**所有页面共用的唯一外壳**：导航 + 标题 + 正文 + 页脚。
 
-    以前 `as_html()` 自己又写了一份 `<head>`/`<h1>`/`<footer>`，两份拷贝会漂移
-    （加一个 `<meta>` 就得记得改两处）。现在只有这一份。
+    部署元信息（生成时间 / 通道 / 入站 / 投递群）是排障用的，压进页脚小字 ——
+    它不该占每页正文的第一行（审计 §4「折叠」）。
     """
+    meta = (f"生成于 <code>{html.escape(str(sub_meta.get('generated_at')))}</code>"
+            f" · 通道 {html.escape(str(svc.get('channel')))}"
+            f" · 入站 {html.escape(str(svc.get('inbound_mode')))}"
+            f" · 投递群 <code>{html.escape(str(sub_meta.get('chat')))}</code>")
     return f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1155,12 +1155,8 @@ def _page(*, tab: str, sub_meta: dict[str, Any], svc: dict[str, Any], body: str,
 <title>newspipe · {_tab_label(tab)}</title><style>{_CSS}</style></head><body>
 {_nav(tab)}
 <h1>newspipe · {_tab_label(tab)}</h1>
-<p class="sub">生成于 <code>{html.escape(str(sub_meta.get('generated_at')))}</code> ·
-通道 {html.escape(str(svc.get('channel')))} · 入站 {html.escape(str(svc.get('inbound_mode')))} ·
-槽位 {html.escape(', '.join(f'{k}:{v}' for k, v in (sub_meta.get('slots') or {}).items()))} ·
-投递群 <code>{html.escape(str(sub_meta.get('chat')))}</code></p>
 {body}
-<footer>只读契约 <code>GET /view</code> v{sub_meta.get('contract_version')}（宿主/面板的数据面）。
+<footer>只读契约 <code>GET /view</code> v{sub_meta.get('contract_version')}（宿主/面板的数据面）· {meta}。
 {footer_extra}</footer>
 </body></html>
 """

@@ -1,5 +1,4 @@
 # Spec: 修复 model_host 注入回归 + 测试去环境依赖
-> 状态: Done (gate)
 
 > created: 2026-10-07
 > status: implemented
@@ -30,15 +29,15 @@
 
 ## Acceptance Criteria 验收标准
 
-1. [x] 干净 shell（unset `NEWSPIPE_HOST_HOME`/`HERMES_HOME`/飞书相关变量）下
+1. 干净 shell（unset `NEWSPIPE_HOST_HOME`/`HERMES_HOME`/飞书相关变量）下
    `python -m unittest discover -s tests` 全绿（≥356 例）。
-2. [x] 以下 6 例全部转绿：
+2. 以下 6 例全部转绿：
    `LlmTests.test_host_follows_current_model_and_prefers_env_key`、
    `LlmTests.test_describe_never_leaks_key`、
    `LlmTests.test_persistent_empty_content_records_reason_code`、
    `LlmTests.test_reasoning_model_empty_content_retries_with_bigger_budget`、
    `ChannelWiringTests.test_direct_channel_installed_when_configured`、
    `BatchRouteTests.test_items_route_filters_from_the_query_string`。
-3. [x] 把系统日期语义考虑在内：fixture 批次日 = `today()`，窗口过滤断言不再随日历翻车。
-4. [x] `python3 scripts/scan_secrets.py` 保持 0 输出；本次改动不含任何真实凭据/个人路径。
-5. [x] 生产行为不变：未注入路径时，缺宿主目录仍报 `ConfigError`（文案不变）。
+3. 把系统日期语义考虑在内：fixture 批次日 = `today()`，窗口过滤断言不再随日历翻车。
+4. `python3 scripts/scan_secrets.py` 保持 0 输出；本次改动不含任何真实凭据/个人路径。
+5. 生产行为不变：未注入路径时，缺宿主目录仍报 `ConfigError`（文案不变）。

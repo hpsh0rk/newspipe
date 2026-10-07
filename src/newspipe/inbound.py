@@ -245,10 +245,15 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
         def _recent_page(self) -> dict[str, Any]:
             """驾驶舱「最近入库」：只取最新几条 —— 总览页不该背几百条条目。"""
             from newspipe import config as config_mod
+            from newspipe import events as events_mod
             from newspipe import view as view_mod
 
-            snap = view_mod.items_snapshot(news_dir or config_mod.default_news_dir())
-            return {"recent": snap["items"][:8], "recent_total": snap["total"]}
+            where = news_dir or config_mod.default_news_dir()
+            snap = view_mod.items_snapshot(where)
+            # ⭐ KPI 的只读计数：有未确认收藏时，驾驶舱第一屏就该给入口（审计 §3）
+            queue_pending = len(events_mod.queue(where, days=30))
+            return {"recent": snap["items"][:8], "recent_total": snap["total"],
+                    "queue_pending": queue_pending}
 
         def _items_page(self, payload: dict[str, Any],
                         query: dict[str, list[str]]) -> str:
