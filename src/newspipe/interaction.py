@@ -10,13 +10,14 @@ payload 转到这里（独立部署时由 `inbound.py` 直接调）。**本模�
 |---|---|---|
 | `open_detail` | `view={"item": id}`，未读则标记已阅 | actions.log + `clicked` 事件 |
 | `back_to_list` | `view="list"` | actions.log + `clicked` 事件 |
-| `wiki`（⭐ 收藏） | 状态 → wiki | actions.log + **`favorite` 事件（待入库队列）** |
+| `wiki`（⭐ 收藏） | 状态 → wiki | actions.log + **`favorite` 事件（入库台账）** |
 | `dismiss`（🚫） | 状态 → dismissed | actions.log + `preferences.md` + `clicked` 事件 |
 | `<hook action>` | 由第三方 handler 决定 | `clicked` 事件（带 hook id 与 handler 结果） |
 
 **边界（防腐层）**：本模块只写**项目自己的**数据（`<news_dir>/` 下的 state/actions.log/
-preferences.md）。它**不再往宿主写文件**——收藏不再直接写宿主的待办队列，而是记一条
-`favorite` 事件，由宿主用 `newspipe queue list --json` 读、人确认后再入库。
+preferences.md）。它**不再往宿主写文件**——收藏只是记一条 `favorite` 事件（入库台账），
+入库由**宿主侧**执行（消费方自选自动化或人审；本项目默认部署 = Hermes 定时任务走
+wiki-C-compile 自动编译入库，成功后 `queue ack --note <入库路径>` 出队）。
 
 成功返回空字符串（静默，不在聊天里插消息）；失败/需要人知道时返回一行可读文本
 （`inbound` 会把它变成卡片 toast）。
@@ -144,7 +145,7 @@ def handle(payload: dict, *, news_dir: Path | None = None,
                 if action == "dismiss":
                     _append_preference(batch, item, news_dir)
                 elif action == "wiki":
-                    # ⭐ 收藏 → 待入库队列（事件流）；宿主读 queue list 后由人确认再入库
+                    # ⭐ 收藏 → 入库台账（事件流）；宿主自动化读 queue list 后编译入库
                     _record(news_dir, "favorite", batch=batch, item=item, action=action)
                 else:
                     _record(news_dir, "clicked", batch=batch, item=item, action=action)
@@ -171,7 +172,7 @@ def handle(payload: dict, *, news_dir: Path | None = None,
     batch["seq"] = seq
     store.save_batch_at(path, batch)
     if action == "wiki":
-        return "⭐ 已加入待入库队列（确认后进 Wiki）"
+        return "⭐ 已提交入库（稍后自动编译进 Wiki）"
     return ""
 
 

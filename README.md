@@ -41,13 +41,16 @@ newspipe 想解决的是**中间那一层**：把「采集 → 判断 → 加工
 | **四轴正交过滤** | `fetch` 何时拉 / `filter` 留什么（关键词闸、条数上下限、排序）/ `enrich` 加工什么 / `deliver` 怎么发。改配置即改行为，不用重启 |
 | **AI 加工** | 中文标题 + 摘要 + 正文翻译；支持「跟随宿主已有模型配置」或「自带 provider」。有**回执缓存**（同一输入不重复付费）与**预算熔断**（日/小时/单次 token） |
 | **卡片投递** | 列表页 ↔ 详情页**同一条消息换页**（更新卡片实体，不是发新消息）；元素预算自检；按钮可扩展（第三方 hook） |
-| **事件流** | 每次投递 / 点击 / 收藏 / 降级 / 失败都落 `state/events/<date>.jsonl`；消费确认幂等。**hook 实时推送 + 事件流补漏**两条路都有 |
+| **事件流** | 每次投递 / 点击 / 收藏 / 降级 / 失败都落 `state/events/<date>.jsonl`；消费确认幂等。**没有推送通道** —— 宿主/脚本靠轮询契约拿数据，点击回显走卡片 toast |
 | **可运维** | 心跳（区分「缺配置」与「故障」）、投递去重、失败重试、状态原子写、`doctor` 自检 |
 | **给 Agent 的接口** | 所有命令输出**统一结果信封**（`ok`/`changed`/`data`/`error`/`next`）+ 语义化退出码；写操作先校验后落盘，支持 `--dry-run` |
 
 ### 不做什么
 
-- **不替人做决定。** 「⭐ 收藏」这类动作只**进队列**，是否真的写进知识库由人确认。
+- **不直接写知识库。** 「⭐ 收藏」只是记一条入库意图（`favorite` 事件），真正写进知识库的
+  动作发生在**宿主侧的消费器**里（要不要人审由部署自选；作者的默认部署 = Hermes 定时任务
+  自动编译入库）。newspipe 自己既不写知识库，也不调用宿主的入库流程 —— 但入库必须留回执
+  （`queue ack --note <入库路径>`），没有回执的入库等于没入库。
 - **不绑宿主。** 不 import 宿主任何模块，也不被宿主 import；两边只通过 CLI 契约、hook 声明、
   事件流说话（防腐层）。
 - **不在转发路径上做重活。** 卡片回调有 3 秒预算，转发链路只做「查表 + 转发」。
@@ -98,6 +101,35 @@ newspipe 想解决的是**中间那一层**：把「采集 → 判断 → 加工
 两种方式的业务代码**完全相同**，差别只在事件从哪个入口进来；项目启动时会检测
 「同一应用 + 双方都要长连接」的冲突并直接报错。协议与参考实现见
 [`docs/host-integration.md`](docs/host-integration.md)。
+
+### 部署形态：不带宿主能用吗？接 Hermes 要做什么？
+
+**能，完全独立可用。** 选 `inbound.mode: ws`（自带长连接），调度、采集、AI 加工、发卡、
+网页面板、事件流全部自带，不需要任何宿主 Agent。唯一的差别是**收藏入库没有内置消费器**：
+⭐ 只把意图记进队列，你要么自己在 `/ops` 页点「标记已入库」做回执，要么写个轮询脚本消费它
+（读 `queue list --json` → 入库 → `queue ack --note <路径>`，几十行的事）。配套地，
+进程守护、凭据存储、事件盯守这些运维责任也从宿主转到你自己头上（见文末「边界与运维责任」）。
+
+**已经有 Hermes（或任何宿主 Agent）的话，接过去更省事**，六步：
+
+1. 长连接归宿主：平台后台的事件订阅配在宿主的应用上；newspipe 设
+   `inbound.mode: http`（**不要**再开 ws —— 一个应用两条长连接会随机抢事件）。
+2. 注册卡片域：宿主转发器注册表加一行
+   `news: http://127.0.0.1:8787/feishu/events`（协议见
+   [`docs/host-integration.md`](docs/host-integration.md)，注册表热加载不用重启宿主）。
+3. 凭据与模型复用宿主：挂载宿主的 `.env`/`config.yaml`（`NEWSPIPE_HOST_HOME`）+
+   `NEWSPIPE_MODEL_BACKEND=host`；容器部署再显式给三个部署事实
+   （`NEWSPIPE_BIND_HOST` / `NEWSPIPE_LOOPBACK_ALIAS` / `NEWSPIPE_PROXY`，
+   `compose.yaml` 里都有现成示例）。
+4. 收藏入库消费器：宿主定时任务轮询 `queue list --json`，逐条走你自己的入库流程
+   （作者的部署 = Knowledge vault 的 wiki-C-compile 自动编译），成功后
+   `queue ack <id> --note <入库路径>` 出队。没这一步收藏会在队列里一直攒着。
+5. （可选）把 `GET /view` 或页面地址注册进宿主的服务面板 —— 宿主读契约，**不要**解析
+   `state/**`（教训见 `webui/server/data/news.py` 的模块注释）。
+6. 自检三连：`newspipe doctor --json` → `newspipe probe-model --json` →
+   `newspipe probe-channel --json`（真发一张卡点一下，确认转发与 toast 全通）。
+
+> AI/Agent 视角的同一份说明在 [`AGENTS.md`](AGENTS.md) §1「不用宿主能跑吗」与 §4.5。
 
 ### 状态布局
 
@@ -180,7 +212,7 @@ newspipe view --html     # 同一份数据的服务端渲染页（无前端构�
 | `GET /items` | 条目 | **内容浏览**：近 3/7/14 天所有条目 + 服务端筛选（关键词/源/状态），批次列可点进详情 |
 | `GET /batch/<日期>/<文件>` | 条目 | **批次详情**：一个批次里到底有哪些条目（标题/发布者/分类/分数/摘要/原文链接/状态） |
 | `GET /config` | 配置 | 信源增删改（表单由引擎 schema 生成）+ RSS 搜索/订阅 |
-| `GET /ops` | 运维 | 管理动作：跑一轮、启停信源、⭐确认入库、事件已消费、现在发队列 |
+| `GET /ops` | 运维 | 管理动作：跑一轮、启停信源、⭐标记已入库（回执/兜底）、事件已消费、现在发队列 |
 
 四个路由都需 `service.yaml: view.enabled`；写操作额外需 `view.actions`。
 自带 `contract_version`。**宿主不要解析 `<news_dir>/state/**`**：那是本项目的私有布局，
@@ -347,7 +379,7 @@ newspipe source set hn --from-json - --dry-run --json     # 演练
 newspipe hooks add --from-json '{"id":"myapp.wiki","label":"⭐ 入库",
     "action":"myapp.wiki","handler":"~/bin/hook.sh"}' --json
 newspipe events list --unconsumed --json                  # 未消费事件
-newspipe queue list --json                                # 待入库（人确认后才 ack）
+newspipe queue list --json                                # 待入库台账（消费器入库后 ack 出队）
 ```
 
 细节与硬规则见 [`AGENTS.md`](AGENTS.md)。
@@ -379,9 +411,11 @@ python -m unittest discover -s tests        # 351 个用例，无第三方测试
 
 ## 边界与运维责任
 
-独立运行意味着下面四件事从「宿主帮你做」变成「你自己做」：
-**凭据存储、进程守护、投递重试、事件订阅**。代码里都有对应实现，但运维责任一并转移 ——
-钥匙串/环境变量自己管、launchd/systemd 自己装、投递失败自己看日志、事件订阅自己盯连接。
+独立运行意味着下面五件事从「宿主帮你做」变成「你自己做」：
+**凭据存储、进程守护、投递重试、事件订阅、收藏入库消费**。前四件代码里都有对应实现，
+但运维责任一并转移 —— 钥匙串/环境变量自己管、launchd/systemd 自己装、投递失败自己看日志、
+事件订阅自己盯连接。第五件（入库消费）是设计上的留白：知识库是宿主侧的东西，newspipe
+只记台账，消费器你自己提供（`/ops` 手动回执或一个几十行的轮询脚本）。
 如果你已经有一个稳定的宿主 Agent，用「宿主转发」那条路会省掉大部分运维。
 
 ## 许可

@@ -18,8 +18,11 @@
    `inbound_conflict`）。
 2. **密钥永不进仓库、永不打印。** 凭据只从 显式配置 → 进程环境 → dotenv → 系统钥匙串 读
    （见 `src/newspipe/credentials.py`）。任何探测/自检命令只输出「有没有、够不够」，不输出值。
-3. **人环不能省。** `favorite`（⭐ 入库）这类事件只**进队列**（`state/events` + `queue`），
-   是否真的写进用户的知识库必须由人确认。Agent 可以展示、可以建议，不许自动落库。
+3. **写知识库的动作只发生在宿主侧，且必须留回执。** `favorite`（⭐ 收藏）只**进台账**
+   （`state/events` + `queue`）：本项目自己**永不**写知识库、**永不**调宿主的入库流程。
+   入库由宿主侧的消费器执行（自动化或人审由部署自选；本项目作者的默认部署 = Hermes
+   定时任务走 wiki-C-compile 自动编译，无需人审）。无论哪种消费器，成功入库后必须
+   `queue ack <id> --note <入库路径>` 出队 —— 没有回执的入库等于没入库。
 
 ---
 
@@ -42,6 +45,13 @@
 
 两种方式的**业务代码完全相同**：事件解析、去重、翻页、hook 调用都走同一个 `dispatch()`。
 差别只在「事件从哪个入口进来」。
+
+### 不用宿主能跑吗？（能）
+
+选 ① `ws` 模式本项目就是**完全自足**的：调度、长连接、发卡、页面、队列全部自带，
+不需要任何宿主 Agent。唯一的差别是**收藏入库没有内置消费器** —— `favorite` 事件会
+留在队列里等人消费，你要么用 `/ops` 页手动回执，要么自己写个轮询脚本（见 §3）。
+配套的运维责任（进程守护、凭据、事件盯守）也一并转到你自己头上，见 README「边界与运维责任」。
 
 ### ① ws：自带长连接
 
@@ -202,18 +212,32 @@ docker compose up -d --build        # ① 容器（restart: unless-stopped 兜�
 <news_dir>/state/events/acks.jsonl            消费确认
 ```
 
-事件类型：`delivered`（发卡成功）/ `clicked`（点了）/ `favorite`（⭐）/ `muted`（🔕）/
-`degraded`（AI 加工降级）/ `failed`（投递失败）。
+事件类型：`delivered`（发卡成功）/ `clicked`（点了）/ `favorite`（⭐ 收藏，入库意图的台账）/
+`muted`（🔕）/ `degraded`（AI 加工降级）/ `failed`（投递失败）。
 
 ```sh
 newspipe events list --unconsumed --json       # 还没被消费的
 newspipe events ack ev_xxx --by myagent --json # 消费掉（幂等：区分 acked/already/unknown）
-newspipe queue list --json                     # 只看「待入库」的收藏
-newspipe queue ack ev_xxx --by myagent --json  # 人确认入库之后才调
+newspipe queue list --json                     # 只看「待入库」的收藏（= 未 ack 的 favorite）
+newspipe queue ack ev_xxx --note <入库路径> --by myagent --json  # 真的入库之后才调（回执）
 ```
 
-实时性靠 hook（事件发生当下就把 payload 推给宿主的脚本），补漏靠轮询 `events list`。
-**两者都要有**：hook 会失败（fail-soft），事件流才是真相。
+**收藏的入库（硬规则 3）**：⭐ 只把意图记进台账，执行在宿主侧。两种消费器任选：
+
+- **自动化（本项目默认部署）**：Hermes 定时任务 `sch_news-favorite-ingest` 轮询
+  `queue list --json`，对每条收藏走 Knowledge vault 的 wiki-C-compile 流程
+  （propose → 自审 → approve → promote，自动晋升），成功后
+  `queue ack <id> --note <wiki 页面路径> --by hermes-ingest`。人审不是必须环节，
+  只有提案可能失实时才留给人工。
+- **人工兜底**：`/ops` 页的「标记已入库」按钮（同一个 `queue ack`），用于自动化失败的补录。
+
+队列是自愈的：消费器挂了条目就留在队列里，`status --json` 会一直报
+「待入库队列有 N 条」，修好后重跑即可 —— 所以**先 ack 再入库是绝对禁止**的。
+
+消费没有推送通道，靠**轮询**：宿主按需轮询 `events list --unconsumed` 与 `queue list`，
+轮询间隔自定（收藏入库的实时性要求不高，分钟级足够）。卡片上的第三方 hook 按钮
+（`hooks.yaml`，见 §2）是点击瞬间跑第三方脚本的路径，但它不是事件推送 —— 事件流的
+真相永远以文件为准，轮询永远能补上错过的。
 
 ---
 
@@ -264,6 +288,30 @@ def on_card_action(event):
 3. 宿主注册表加一段：`news: http://127.0.0.1:8787/feishu/events`。
 4. 自检：`newspipe doctor --json`，再用宿主侧的路由自检打一发。
 5. 真发一张卡点一下：`newspipe probe-channel --json`。
+
+### 4.5 用 Hermes 做宿主：接入清单（本项目作者的默认部署）
+
+Hermes 是「宿主协议」的一个具体实现，上面 §4.1–4.4 的步骤对它原样成立。落地时的
+操作清单（照做即可）：
+
+1. **长连接归 Hermes**：平台后台的事件订阅（长连接）+「卡片回传交互」都配在 Hermes
+   的应用上；newspipe 侧 `service.yaml: inbound.mode: http`（别开 ws，硬规则 1）。
+2. **注册卡片域**：Hermes 的转发器注册表加
+   `news: http://127.0.0.1:8787/feishu/events`（参考 `docs/host-integration.md`
+   的两份实现；注册表热加载，不用重启 Hermes）。
+3. **凭据复用宿主**：容器部署时挂载 Hermes 的 `.env` + `config.yaml`
+   （`NEWSPIPE_HOST_HOME=/hermes`），模型跟随宿主配置（`NEWSPIPE_MODEL_BACKEND=host`）；
+   三个部署事实显式给：`NEWSPIPE_BIND_HOST=0.0.0.0`、`NEWSPIPE_LOOPBACK_ALIAS=
+   host.docker.internal`、`NEWSPIPE_PROXY`（见 §5 排障表与 compose.yaml）。
+4. **收藏入库消费器**：Hermes 定时任务轮询 `queue list --json` → 逐条走你自己的
+   入库流程 → `queue ack --note <入库路径>`（本项目作者用 Knowledge vault 的
+   wiki-C-compile，条目定义在 vault 的 `_meta/automation/schedules.md`）。
+   没有这一步，收藏只会在队列里攒着 —— `status --json` 会一直 warning。
+5. **（可选）面板入 portal**：把 `GET /view` 与页面地址注册进宿主的服务面板，
+   读契约不读 `state/**`（见 §2.1）。
+6. **自检三连**：`newspipe doctor --json` → `newspipe probe-model --json`（看
+   `base_url` 是否按容器事实改写）→ `newspipe probe-channel --json`（真发一张卡，
+   点一下，确认转发链路与 toast 都通）。
 
 ---
 

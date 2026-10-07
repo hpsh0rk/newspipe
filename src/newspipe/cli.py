@@ -99,7 +99,7 @@ CONTRACT: list[dict[str, Any]] = [
     {"name": "queue list", "summary": "待入库队列（未被确认的收藏事件）",
      "usage": "newspipe queue list [--json] [--days N]", "args": ["--days"], "writes": False,
      "examples": ["newspipe queue list --json"]},
-    {"name": "queue ack", "summary": "标记某条收藏已入库（人确认后才调它）",
+    {"name": "queue ack", "summary": "标记某条收藏已入库（入库自动化或人工兜底成功后调用）",
      "usage": "newspipe queue ack <event_id> [--note <入库路径>] [--by NAME] [--json]",
      "args": ["event_id", "--note", "--by"], "writes": True,
      "examples": ["newspipe queue ack ev_20261003T180000_ab12 --note "
@@ -589,7 +589,7 @@ def _sub_queue(args: argparse.Namespace, news_dir: Path) -> result.Result:
     if args.action == "list":
         items = events.queue(news_dir, days=args.days)
         return result.ok(command, {"count": len(items), "items": items},
-                         next=["处理完入库后：newspipe queue ack <event_id> --note <路径> --json"]
+                         next=["入库完成后出队：newspipe queue ack <event_id> --note <路径> --json"]
                          if items else [])
     if args.action == "ack":
         if not args.event_id:

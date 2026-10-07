@@ -927,7 +927,7 @@ class InteractionTests(unittest.TestCase):
         msg = self._handle("wiki")
         batch = self.store.read_batch("2026-10-03", "s", "am")
         self.assertEqual(batch["items"][0]["status"], "wiki")
-        self.assertIn("待入库队列", msg)          # 给用户明确的回执
+        self.assertIn("已提交入库", msg)          # 给用户明确的回执
         pending = events.queue(self.news)
         self.assertEqual(len(pending), 1)
         self.assertEqual(pending[0]["type"], "favorite")

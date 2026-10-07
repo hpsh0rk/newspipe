@@ -88,7 +88,7 @@ def _argv_source_toggle(form: dict[str, list[str]]) -> list[str]:
 
 
 def _argv_queue_ack(form: dict[str, list[str]]) -> list[str]:
-    """⭐ 待入库队列的「确认入库」—— 人环动作。"""
+    """⭐ 待入库队列的「标记已入库」—— 回执/兜底动作。"""
     event_id = _one(form, "event_id")
     argv = ["queue", "ack", event_id, "--by", "webui"]
     note = (form.get("note") or [""])[0].strip()
@@ -201,7 +201,7 @@ ACTIONS: dict[str, Action] = {
         Action("source-toggle", "启用 / 停用信源", _argv_source_toggle, danger=True),
         Action("source-save", "保存信源（新增 / 修改）", _argv_source_save, danger=True),
         Action("source-remove", "删除信源", _argv_source_remove, danger=True),
-        Action("queue-ack", "确认入库（⭐）", _argv_queue_ack),
+        Action("queue-ack", "标记已入库（⭐）", _argv_queue_ack),
         Action("events-ack", "标记事件已消费", _argv_events_ack),
         Action("flush", "现在发掉顺延队列", _argv_flush, danger=True),
     )

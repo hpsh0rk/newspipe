@@ -677,9 +677,9 @@ def _health_rows(view: dict[str, Any]) -> str:
 
 
 def _cockpit_stats(view: dict[str, Any], page: dict[str, Any] | None) -> str:
-    """KPI 收敛到 4 个：今日条目 / 今日发卡 / ⭐待确认 / AI 降级（仅异常时出现）。
+    """KPI 收敛到 4 个：今日条目 / 今日发卡 / ⭐待入库 / AI 降级（仅异常时出现）。
 
-    ⭐ 待确认是唯一带入口的 KPI —— 它指向运维页的人环动作（「做」的部分去运维页）。
+    ⭐ 待入库是唯一带入口的 KPI —— 它指向运维页的入库回执（「做」的部分去运维页）。
     """
     s = view["summary"]
     pending = page.get("queue_pending") if isinstance(page, dict) else 0
@@ -688,8 +688,8 @@ def _cockpit_stats(view: dict[str, Any], page: dict[str, Any] | None) -> str:
         f'<div class="stat"><b>{s["items"]}</b><span>今日条目</span></div>',
         f'<div class="stat"><b>{s["cards_today"] or 0}</b><span>今日发卡</span></div>',
         (f'<a class="statlink" href="/ops#queue"><div class="stat attn"><b>{pending}</b>'
-         "<span>待确认 ⭐</span></div></a>" if pending
-         else f'<div class="stat"><b>{pending}</b><span>待确认 ⭐</span></div>'),
+         "<span>待入库 ⭐</span></div></a>" if pending
+         else f'<div class="stat"><b>{pending}</b><span>待入库 ⭐</span></div>'),
     ]
     degraded = int(view["llm"]["degraded"] or 0)
     if degraded:
@@ -723,7 +723,7 @@ def cockpit_html(view: dict[str, Any], *, flash: dict[str, Any] | None = None,
 
 def ops_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
              flash: dict[str, Any] | None = None) -> str:
-    """运维：**动作面** —— 跑一轮 / 启停 / ⭐确认入库 / 顺延队列。
+    """运维：**动作面** —— 跑一轮 / 启停 / ⭐入库回执 / 顺延队列。
 
     与驾驶舱拆开（审计 §4）：这里不再重复渲染趋势 / 今日批次 / 诊断抽屉；
     未消费事件不再给人点 —— `events-ack` 动作保留在白名单里，消费归宿主/CLI。
@@ -735,7 +735,7 @@ def ops_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
     if not on:
         # 动作页没开动作就直说 —— 别渲染一堆按不动的按钮，也别装作这页有内容
         body = (_banner(flash) + '<h2>运维</h2><p class="empty">写操作未开启'
-                "（<code>service.yaml: view.actions</code>）—— 跑一轮 / 启停 / ⭐确认入库 / "
+                "（<code>service.yaml: view.actions</code>）—— 跑一轮 / 启停 / ⭐入库回执 / "
                 "现在发顺延，都在开启后出现在本页。</p>")
         return _page(tab="ops", sub_meta=view, svc=svc, body=body)
 
@@ -761,12 +761,13 @@ def ops_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
             f'<td><code>{html.escape(str(e.get("ts") or ""))}</code></td>'
             f'<td>{html.escape(str(e.get("source") or ""))}</td>'
             f'<td>{_link(title, str(p.get("url") or ""))}</td>'
-            f'<td class="actions">{_form("queue-ack", token, {"event_id": str(e.get("id") or "")}, "确认入库", cls="primary", extra=note_input)}</td>'
+            f'<td class="actions">{_form("queue-ack", token, {"event_id": str(e.get("id") or "")}, "标记已入库", cls="primary", extra=note_input)}</td>'
             "</tr>")
     queue_section = (
-        '<h2 id="queue">待入库队列 ⭐ <span class="hint">确认 = 人环放行，真的写进知识库</span></h2>'
+        '<h2 id="queue">待入库队列 ⭐ <span class="hint">回执 = 已真的写进知识库；'
+        "自动入库失败时在这里手动补</span></h2>"
         "<table><thead><tr><th>时间</th><th>来源</th><th>标题</th><th>操作</th></tr></thead>"
-        "<tbody>" + ("".join(qrows) or '<tr><td colspan="4" class="empty">没有待确认的收藏</td></tr>')
+        "<tbody>" + ("".join(qrows) or '<tr><td colspan="4" class="empty">没有待入库的收藏</td></tr>')
         + "</tbody></table>")
 
     rows = []

@@ -38,7 +38,7 @@ from newspipe import _atomic
 
 TYPES = ("delivered", "clicked", "favorite", "degraded", "failed", "service", "config")
 
-#: 待人确认入库的事件类型（`newspipe queue list` 读的就是它）
+#: 待入库的事件类型（`newspipe queue list` 读的就是它）
 QUEUE_TYPES = ("favorite",)
 
 _DAY_FILE = re.compile(r"^\d{4}-\d{2}-\d{2}\.jsonl$")

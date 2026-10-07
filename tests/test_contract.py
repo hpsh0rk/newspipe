@@ -169,7 +169,7 @@ class EventStreamTests(unittest.TestCase):
             self.assertEqual([e["id"] for e in queued], [fav["id"]])
             events.ack(news, [fav["id"]], by="agent", note="notes/x.md")
             self.assertEqual(events.queue(news), [])
-            # 确认记录里带上了入库路径（人确认过才写）
+            # 回执记录里带上了入库路径（真的入库之后才写）
             ack_line = json.loads(events.acks_path(news).read_text(encoding="utf-8").strip())
             self.assertEqual(ack_line["note"], "notes/x.md")
 
