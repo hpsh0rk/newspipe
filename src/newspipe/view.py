@@ -1001,7 +1001,7 @@ def config_html(view: dict[str, Any], *, schema: dict[str, Any], actions: dict[s
 # ------------------------------------------------------------------ 内容层（条目浏览）
 def _item_rows(rows: list[dict[str, Any]], *, show_batch: bool = False,
                with_summary: bool = True) -> str:
-    """条目表格行。
+    """条目表格行 —— 摘要并入标题行下方（第二行小字），表格少一列、扫读快一截。
 
     标题链 **`original_url` 优先** —— 那才是真实出处；`url` 常是抓取侧的代理页
     （aihot 那种 `/items/<id>`）。两个都没有就不加链接。
@@ -1015,6 +1015,7 @@ def _item_rows(rows: list[dict[str, Any]], *, show_batch: bool = False,
             meta.append(f"分 {html.escape(str(row['score']))}")
         status = str(row.get("status") or "unread")
         tone = {"read": "ok", "favorite": "warn", "dismissed": "muted"}.get(status, "muted")
+        summary = html.escape(str(row.get("summary") or "")[:160])
         cells = [f"<td>{idx}</td>", f"<td>{_pill(tone, html.escape(status))}</td>"]
         if show_batch:
             date = html.escape(str(row.get("date") or ""))
@@ -1022,10 +1023,12 @@ def _item_rows(rows: list[dict[str, Any]], *, show_batch: bool = False,
             label = (f'{date[5:]} {html.escape(str(row.get("batch_source") or ""))}'
                      f'/{html.escape(str(row.get("slot") or ""))}')
             cells.append(f'<td><a href="/batch/{date}/{stem}"><code>{label}</code></a></td>')
-        cells.append(f"<td>{title}</td>")
+        title_cell = f"<td>{title}"
+        if with_summary and summary:
+            title_cell += f'<div class="hint clamp2">{summary}</div>'
+        title_cell += "</td>"
+        cells.append(title_cell)
         cells.append(f'<td class="hint">{" · ".join(meta) or "—"}</td>')
-        if with_summary:
-            cells.append(f'<td class="note">{html.escape(str(row.get("summary") or "")[:180])}</td>')
         out.append("<tr>" + "".join(cells) + "</tr>")
     return "".join(out)
 
@@ -1080,15 +1083,14 @@ def items_html(view: dict[str, Any], *, page: dict[str, Any] | None = None,
         '<a class="btn" href="/items">清空</a>'
         f'<span class="hint">近 {days} 天共 {len(all_rows)} 条，命中 {len(rows)} 条{truncation}</span>'
         "</form>")
-    fallback = ('<tr><td colspan="6" class="empty">没有命中的条目'
+    fallback = ('<tr><td colspan="5" class="empty">没有命中的条目'
                 "（换个关键词、放宽天数，或去 <a href=\"/config\">配置</a> 加信源）</td></tr>")
     body = (
         f'{_banner(flash)}{form}'
         "<table><thead><tr><th>#</th><th>状态</th><th>批次</th><th>标题</th>"
-        "<th>发布者/分类/分</th><th>摘要</th></tr></thead>"
+        "<th>发布者/分类/分</th></tr></thead>"
         f'<tbody>{_item_rows(shown, show_batch=True) or fallback}</tbody></table>')
-    return _page(tab="items", sub_meta=view, svc=view["service"], body=body,
-                 footer_extra="条目来自 <code>state/batches/&lt;日期&gt;/</code>（页面专用，不进契约）。")
+    return _page(tab="items", sub_meta=view, svc=view["service"], body=body)
 
 
 def batch_html(view: dict[str, Any], *, page: dict[str, Any] | None = None,
@@ -1121,7 +1123,7 @@ def batch_html(view: dict[str, Any], *, page: dict[str, Any] | None = None,
         f'生成 <code>{html.escape(str(batch.get("created_at") or ""))}</code>',
         f'更新 <code>{html.escape(str(batch.get("updated_at") or ""))}</code>',
     ]))
-    fallback = '<tr><td colspan="5" class="empty">这个批次没有条目</td></tr>'
+    fallback = '<tr><td colspan="4" class="empty">这个批次没有条目</td></tr>'
     body = (
         f'{_banner(flash)}'
         '<p class="note"><a href="/items">← 条目</a> · <a href="/">驾驶舱</a> · '
@@ -1129,7 +1131,7 @@ def batch_html(view: dict[str, Any], *, page: dict[str, Any] | None = None,
         f'<h2>{html.escape(str(batch.get("title") or stem))}</h2>'
         f'<p class="sub">{meta}</p><div class="stats">{stats}</div>'
         "<h2>条目</h2><table><thead><tr><th>#</th><th>状态</th><th>标题</th>"
-        "<th>发布者/分类/分</th><th>摘要</th></tr></thead>"
+        "<th>发布者/分类/分</th></tr></thead>"
         f'<tbody>{_item_rows(items) or fallback}</tbody></table>')
     return _page(tab="items", sub_meta=view, svc=view["service"], body=body)
 
