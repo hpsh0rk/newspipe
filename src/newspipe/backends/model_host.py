@@ -57,7 +57,14 @@ class HostModelResolver:
     def resolve(self, capability: str, models_cfg: dict, *,
                 host_config_path: Path | None = None,
                 env_path: Path | None = None) -> ModelRef:
-        home = hostenv.host_home(required=True)
+        # 显式注入的路径优先（嵌入式调用/测试用）；两者都没给才要求宿主环境变量。
+        # 若无条件先查环境变量，注入参数就形同虚设，干净机器上必挂。
+        if host_config_path is not None:
+            home = host_config_path.parent
+        elif env_path is not None:
+            home = env_path.parent
+        else:
+            home = hostenv.host_home(required=True)
         host_cfg = _cached_yaml(host_config_path or (home / "config.yaml"))
         env = hostenv.read_env(env_path if env_path is not None else (home / ".env"))
         h_model = host_cfg.get("model") or {}
@@ -93,7 +100,7 @@ class HostModelResolver:
                     provider = default_provider
                     base_url = str((own_providers.get(provider) or {}).get("base_url") or base_url)
 
-        host_cfg_hint = hostenv.host_config_path()
+        host_cfg_hint = host_config_path or (home / "config.yaml")
         if not base_url or not model:
             raise ConfigError(
                 f"模型解析失败：capability={capability} name={name!r} —— "
@@ -106,7 +113,7 @@ class HostModelResolver:
             api_key = str(h_model.get("api_key") or "")
         if not api_key:
             raise ConfigError(f"模型 {model}（provider={provider}）缺密钥："
-                              f"在宿主 .env（{hostenv.host_env_path()}）里设置 "
+                              f"在宿主 .env（{env_path or (home / '.env')}）里设置 "
                               f"{key_env or '<provider>.key_env'}")
         return ModelRef(model=model, provider=provider, base_url=rewrite_loopback(base_url.rstrip("/")),
                         api_key=api_key, source=source)

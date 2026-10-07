@@ -752,6 +752,11 @@ class LlmTests(unittest.TestCase):
         (self.home / ".env").write_text("LOCAL_KEY=fresh-key\n", encoding="utf-8")
         self.env = self.home / ".env"
         self.cfg = self.home / "config.yaml"
+        # 干净机器上没有宿主环境变量；把宿主目录钉到本用例的临时目录（patch 自动还原），
+        # host 后端的用例不赌开发机的 shell / 钥匙串。
+        host_patcher = patch.dict(os.environ, {"NEWSPIPE_HOST_HOME": str(self.home)})
+        host_patcher.start()
+        self.addCleanup(host_patcher.stop)
 
     def tearDown(self) -> None:
         self._tmp.cleanup()

@@ -416,10 +416,12 @@ class ChannelWiringTests(unittest.TestCase):
     def test_direct_channel_installed_when_configured(self) -> None:
         with TemporaryDirectory() as tmp:
             cfg = _cfg(service=config.ServiceCfg(channel="feishu_direct", feishu={"app_id": "cli_x"}))
-            service.prepare_channel(cfg, news_dir=Path(tmp))
-            channel = backends.get_channel()
-            self.assertIsInstance(channel, backends.FeishuDirectChannel)
-            self.assertEqual(channel.creds.app_id, "cli_x")
+            # 凭据解析第一优先是进程环境：注入哑值，测试不读开发机的 env / 钥匙串。
+            with mock.patch.dict("os.environ", {"NEWSPIPE_FEISHU_APP_SECRET": "test-secret"}):
+                service.prepare_channel(cfg, news_dir=Path(tmp))
+                channel = backends.get_channel()
+                self.assertIsInstance(channel, backends.FeishuDirectChannel)
+                self.assertEqual(channel.creds.app_id, "cli_x")
 
     def test_available_channels_lists_both(self) -> None:
         self.assertEqual(backends.available_channels(), ["feishu_direct", "feishu_lark_cli"])

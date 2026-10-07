@@ -10,12 +10,13 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import threading
 import unittest
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -62,7 +63,12 @@ class ItemsFixture(unittest.TestCase):
         (self.news / "state").mkdir(parents=True)
         (self.news / "sources.yaml").write_text(SOURCES, encoding="utf-8")
         self.store = state.Store(self.news)
-        self._write("2026-10-04", "aihot-am", [
+        self._seed_batches("2026-10-04", "2026-10-03")
+
+    def _seed_batches(self, day_new: str, day_old: str) -> None:
+        """两天的批次。日期由调用方给：纯视图测试注入 `NOW` ⇒ 写死即可；
+        走 HTTP 路由的测试用真实墙钟 ⇒ 必须相对今天生成（见 BatchRouteTests）。"""
+        self._write(day_new, "aihot-am", [
             {"ext_id": "a1", "title": "开源模型 Vicuna 发布", "url": "https://aihot.news/items/a1",
              "original_url": "https://lmsys.org/blog/vicuna", "source": "LMSYS：Blog",
              "summary": "训练成本约 $300", "category": "模型", "score": 79, "status": "read"},
@@ -70,7 +76,7 @@ class ItemsFixture(unittest.TestCase):
              "source": "量子位", "summary": "降价 40%", "category": "算力", "score": 61,
              "status": "unread"},
         ])
-        self._write("2026-10-03", "hn-pm", [
+        self._write(day_old, "hn-pm", [
             {"ext_id": "h1", "title": "Surely you have ultra-wideband", "url": "https://news.ycombinator.com/item?id=1",
              "original_url": "https://example.com/uwb", "source": "HN", "summary": "UWB 讨论",
              "category": "", "score": 120, "status": "wiki"},
@@ -256,6 +262,12 @@ class BatchRouteTests(ItemsFixture):
 
     def setUp(self) -> None:
         super().setUp()
+        # 路由按真实墙钟算「近 N 天」窗口 ⇒ 批次日期必须相对今天重新播种，
+        # 否则写死的日子会滚出窗口（10-03 写的用例，10-07 跑 days=3 就红了）。
+        self.today = state.today()
+        yesterday = (date.fromisoformat(self.today) - timedelta(days=1)).isoformat()
+        shutil.rmtree(self.news / "state" / "batches")
+        self._seed_batches(self.today, yesterday)
         self.service_cfg = {"http": {"host": "127.0.0.1", "port": 0, "path": "/feishu/events"}}
         server, _path = inbound.start_http(service_cfg=self.service_cfg, creds=None,
                                            news_dir=self.news, accept_events=True)
@@ -285,12 +297,12 @@ class BatchRouteTests(ItemsFixture):
         self.assertIn("近 7 天共", page)                                    # 回落默认值，不 500
 
     def test_batch_route_serves_a_real_batch(self) -> None:
-        code, page = self._get("/batch/2026-10-04/aihot-am")
+        code, page = self._get(f"/batch/{self.today}/aihot-am")
         self.assertEqual(code, 200)
         self.assertIn("开源模型 Vicuna 发布", page)
 
     def test_batch_route_404s_for_a_missing_batch(self) -> None:
-        code, page = self._get("/batch/2026-10-04/nosuch-am")
+        code, page = self._get(f"/batch/{self.today}/nosuch-am")
         self.assertEqual(code, 404)
         self.assertIn("没有这个批次", page)
 
