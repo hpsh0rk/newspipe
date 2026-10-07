@@ -925,7 +925,7 @@ def config_html(view: dict[str, Any], *, schema: dict[str, Any], actions: dict[s
             f"{cell}"
             "</tr>")
     source_table = (
-        "<h2>信源清单 <span class=\"hint\">改配置走 CLI：这里是表单，落盘仍是 `source set`</span></h2>"
+        '<h2>信源清单 <span class="hint">编辑 / 启停 / 删除；保存前默认先演练</span></h2>'
         "<table><thead><tr><th>源</th><th>适配器</th><th>节奏</th><th>形态/加工</th><th>启用</th>"
         "<th>操作</th></tr></thead><tbody>"
         + ("".join(rows) or '<tr><td colspan="6" class="empty">还没有信源</td></tr>')
@@ -938,13 +938,13 @@ def config_html(view: dict[str, Any], *, schema: dict[str, Any], actions: dict[s
                         + _source_form(schema, name=edit_name, values=pg["values"], token=token,
                                        base_hash=src_hash, is_new=False, submit="保存这个信源"))
     if on:
-        new_section = ('<h2 id="new">新增信源</h2>'
+        new_section = ('<h3 id="new">路径② 直接手填</h3>'
                        + _source_form(schema, name=str(pg.get("prefill_name") or ""),
                                       values=pg.get("prefill") or {}, token=token,
                                       base_hash=src_hash, is_new=True, submit="新建信源"))
     else:
         # 没开写操作就不渲染表单：按下去只会 403 的按钮是骗人
-        new_section = ('<h2 id="new">新增信源</h2><p class="empty">写操作未开启'
+        new_section = ('<h3 id="new">路径② 直接手填</h3><p class="empty">写操作未开启'
                        '（<code>service.yaml: view.actions</code>）—— 表单不渲染。</p>')
 
     # ---- RSS 搜索
@@ -973,12 +973,11 @@ def config_html(view: dict[str, Any], *, schema: dict[str, Any], actions: dict[s
                 f'<div><a class="btn" href="/config?feed={urlquote(str(cand.get("url") or ""))}#new">'
                 "用这个新建信源</a></div></div>")
     rss_section = (
-        '<h2 id="rss">RSS 搜索 / 订阅</h2>'
+        '<h3 id="rss">路径① RSS 搜索 / 订阅 <span class="hint">目录里的条目都在本机 RSSHub 上实测可用</span></h3>'
         '<form method="get" action="/config" class="toolbar">'
         f'<label class="f">关键词 <input type="text" name="q" value="{html.escape(q)}" size="24" '
         'placeholder="如 AI、羊毛、少数派"></label>'
-        '<button class="btn primary" type="submit">搜目录</button>'
-        '<span class="hint">目录里的条目都是在本机 RSSHub 上实测可用的</span></form>'
+        '<button class="btn primary" type="submit">搜目录</button></form>'
         + ("".join(cand_rows) or ('<p class="empty">目录里没有匹配的条目</p>' if q else ""))
         + '<form method="get" action="/config" class="toolbar">'
         f'<label class="f">站点地址 <input type="text" name="u" size="30" '
@@ -992,13 +991,11 @@ def config_html(view: dict[str, Any], *, schema: dict[str, Any], actions: dict[s
         + ("".join(found_rows) or ('<p class="empty">没发现 feed</p>'
                                    if discover else "")))
 
-    body = (f'<p class="sub">配置权威 = <code>sources.yaml</code> · 当前哈希 '
-            f'<code>{html.escape(src_hash[:12])}</code> · 写操作走 CLI 的同一份 handler'
-            f'{"（<b>写操作未开启</b>：service.yaml: view.actions）" if not on else ""}</p>'
-            + _banner(flash) + edit_section + source_table + rss_section + new_section)
-    return _page(tab="config", sub_meta=view, svc=svc, body=body,
-                 footer_extra="本页的表单由 <code>newspipe config describe --json</code> 生成"
-                              "（字段的唯一事实来源），落盘一律经 CLI。")
+    # 动线重排（审计 §4）：「添加信源」是这页的高频意图，搜索与手填表单合成一个区块置顶，
+    # 消掉原来「页中搜索 → 跳页底 #new」的两头跳；清单降为第二块。
+    add_section = ('<h2 id="add">添加信源</h2>' + rss_section + new_section)
+    body = _banner(flash) + edit_section + add_section + source_table
+    return _page(tab="config", sub_meta=view, svc=svc, body=body)
 
 
 # ------------------------------------------------------------------ 内容层（条目浏览）
