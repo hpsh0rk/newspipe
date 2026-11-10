@@ -110,3 +110,80 @@ class CallbackAcceptanceTests(unittest.TestCase):
             worker.run()
         self.assertEqual(callback_jobs.stats(self.news)["done"], 1)
         self.assertEqual(len(events.queue(self.news)), 1)
+
+    def test_terminal_payload_leaves_active_queue_but_dedup_survives(self):
+        payload = {"domain": "news", "news_action": "open_detail", "body": "large" * 1000}
+        job = callback_jobs.enqueue(self.news, payload, event_id="terminal")
+        with patch.object(interaction, "handle_json", return_value=""):
+            callback_jobs.drain(self.news)
+        self.assertEqual(list(callback_jobs.folder(self.news).glob("*.json")), [])
+        duplicate = callback_jobs.enqueue(self.news, payload, event_id="terminal")
+        self.assertEqual(duplicate["id"], job["id"])
+        self.assertEqual(duplicate["state"], "done")
+        self.assertNotIn("payload", duplicate)
+        self.assertEqual(callback_jobs.stats(self.news)["done"], 1)
+        from newspipe.errors import InboundError
+        with self.assertRaises(InboundError):
+            callback_jobs.enqueue(self.news, dict(payload, body="changed"), event_id="terminal")
+
+    def test_drain_does_not_read_terminal_history(self):
+        job = callback_jobs.enqueue(self.news, {"news_action": "open_detail"}, event_id="old")
+        with patch.object(interaction, "handle_json", return_value=""):
+            callback_jobs.drain(self.news)
+        with patch.object(callback_jobs.state, "read_json", side_effect=AssertionError("history scan")):
+            self.assertEqual(callback_jobs.drain(self.news), 0)
+
+    def test_legacy_done_jobs_migrate_without_replaying(self):
+        job = callback_jobs.enqueue(self.news, {"news_action": "open_detail"}, event_id="legacy")
+        job.update(state="done")
+        state.write_json_atomic(callback_jobs.folder(self.news) / f"{job['id']}.json", job)
+        with patch.object(interaction, "handle_json", side_effect=AssertionError("replay")):
+            callback_jobs.drain(self.news)
+        self.assertEqual(list(callback_jobs.folder(self.news).glob("*.json")), [])
+        self.assertEqual(callback_jobs.stats(self.news)["done"], 1)
+        self.assertEqual(callback_jobs.enqueue(self.news, job["payload"], event_id="legacy")["state"], "done")
+
+    def test_terminal_retirement_interruption_preserves_dedup_and_counts(self):
+        job = callback_jobs.enqueue(self.news, {"news_action": "open_detail"}, event_id="interrupted")
+        active = callback_jobs.folder(self.news) / f"{job['id']}.json"
+        original_unlink = Path.unlink
+
+        def interrupted_unlink(path, *args, **kw):
+            if path == active:
+                raise OSError("interrupted retirement")
+            return original_unlink(path, *args, **kw)
+
+        with patch.object(interaction, "handle_json", return_value=""), \
+             patch.object(Path, "unlink", autospec=True, side_effect=interrupted_unlink):
+            with self.assertRaises(OSError):
+                callback_jobs.drain(self.news)
+        self.assertEqual(callback_jobs.enqueue(self.news, job["payload"], event_id="interrupted")["state"], "done")
+        self.assertEqual(callback_jobs.stats(self.news)["done"], 1)
+        with patch.object(interaction, "handle_json", side_effect=AssertionError("replay")):
+            callback_jobs.drain(self.news)
+        self.assertEqual(callback_jobs.stats(self.news)["done"], 1)
+
+    def test_corrupt_dedup_record_is_not_overwritten_or_replayed(self):
+        from newspipe.errors import InboundError
+        job = callback_jobs.enqueue(self.news, {"news_action": "external"}, event_id="corrupt")
+        path = callback_jobs.folder(self.news) / f"{job['id']}.json"
+        path.write_text("{corrupt", encoding="utf-8")
+        with self.assertRaises(InboundError):
+            callback_jobs.enqueue(self.news, job["payload"], event_id="corrupt")
+        self.assertEqual(path.read_text(), "{corrupt")
+
+    def test_failed_hook_input_is_retained_outside_active_queue(self):
+        payload = {"news_action": "external", "batch": "test-batch", "argument": "needed for reconciliation"}
+        job = callback_jobs.enqueue(self.news, payload, event_id="failed-hook")
+        with patch.object(interaction, "handle_json", return_value="⚠️ uncertain effect"):
+            callback_jobs.drain(self.news, logger=lambda _: None)
+        self.assertEqual(list(callback_jobs.folder(self.news).glob("*.json")), [])
+        receipt = callback_jobs.enqueue(self.news, payload, event_id="failed-hook")
+        self.assertEqual(receipt["payload"], payload)
+        self.assertEqual(receipt["state"], "failed")
+        self.assertEqual(callback_jobs.stats(self.news)["failed"], 1)
+        path = callback_jobs.receipt_path(self.news, job["id"], "failed")
+        path.write_text("{corrupt", encoding="utf-8")
+        from newspipe.errors import InboundError
+        with self.assertRaises(InboundError):
+            callback_jobs.enqueue(self.news, payload, event_id="failed-hook")

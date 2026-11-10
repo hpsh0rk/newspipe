@@ -17,14 +17,64 @@ def folder(news_dir: Path) -> Path:
     return Path(news_dir) / "state" / "callbacks"
 
 
+def receipt_path(news_dir: Path, job_id: str, status: str) -> Path:
+    return folder(news_dir) / "receipts" / job_id[:2] / f"{job_id}.{status}.json"
+
+
+def _fingerprint(payload: dict) -> str:
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                                     separators=(",", ":")).encode()).hexdigest()
+
+
+def _read_evidence(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and data.get("id") and data.get("state") in ("queued", "running", "done", "failed"):
+            return data
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        pass
+    raise InboundError("回调去重记录损坏，拒绝覆盖或重放；请核对存储与第三方回执")
+
+
+def _receipt(news_dir: Path, job_id: str) -> dict | None:
+    for status in ("done", "failed"):
+        receipt = _read_evidence(receipt_path(news_dir, job_id, status))
+        if receipt is not None:
+            if receipt.get("state") != status or receipt.get("id") != job_id:
+                raise InboundError("回调去重回执身份或状态不一致，拒绝重放")
+            return receipt
+    return None
+
+
+def _retire(news_dir: Path, path: Path, job: dict) -> None:
+    # Receipt first, removal last: interruptions can leave duplicate evidence, never lose it.
+    with _atomic.file_lock(folder(news_dir) / ".inbox.lock"):
+        receipt = _receipt(news_dir, job["id"])
+        if receipt is None:
+            receipt = {key: value for key, value in job.items()
+                       if key not in ("payload", "retry_at", "accepted_ns")}
+            receipt["payload_hash"] = _fingerprint(job["payload"])
+            if job["state"] == "failed":
+                # Unknown third-party effects need their original input for reconciliation.
+                receipt["payload"] = job["payload"]
+            _atomic.write_json_atomic(receipt_path(news_dir, job["id"], job["state"]), receipt)
+        elif receipt.get("payload_hash") != _fingerprint(job["payload"]):
+            raise InboundError("回调任务与去重回执不一致，拒绝丢弃原始证据")
+        path.unlink(missing_ok=True)
+
+
 def enqueue(news_dir: Path, payload: dict, *, event_id: str = "") -> dict:
     identity = event_id or uuid.uuid4().hex
     job_id = hashlib.sha256(identity.encode()).hexdigest()
     path = folder(news_dir) / f"{job_id}.json"
     with _atomic.file_lock(folder(news_dir) / ".inbox.lock"):
-        existing = state.read_json(path)
+        existing = _receipt(news_dir, job_id) or _read_evidence(path)
         if existing:
-            if existing.get("payload") != payload:
+            same = (existing.get("payload_hash") == _fingerprint(payload) if "payload_hash" in existing
+                    else existing.get("payload") == payload)
+            if not same:
                 raise InboundError("同一平台事件 ID 对应不同动作，拒绝覆盖已接收任务")
             return existing
         job = {"id": job_id, "event_id": event_id, "payload": payload, "state": "queued",
@@ -35,9 +85,14 @@ def enqueue(news_dir: Path, payload: dict, *, event_id: str = "") -> dict:
 
 def stats(news_dir: Path) -> dict[str, int]:
     result = {"queued": 0, "running": 0, "done": 0, "failed": 0}
+    # Count compact receipt filenames; explicit status reads never parse historical payloads.
+    for status in ("done", "failed"):
+        result[status] = sum(1 for _ in (folder(news_dir) / "receipts").glob(f"*/*.{status}.json"))
     for path in folder(news_dir).glob("*.json"):
         job = state.read_json(path)
         if isinstance(job, dict) and job.get("state") in result:
+            if job["state"] in ("done", "failed") and receipt_path(news_dir, job["id"], job["state"]).exists():
+                continue
             result[job["state"]] += 1
     return result
 
@@ -48,8 +103,15 @@ def drain(news_dir: Path, *, hook_set: Any = None, config_provider=None, logger=
     completed = 0
     # Separate from the acceptance lock: slow jobs must never block HTTP acknowledgement.
     with _atomic.file_lock(folder(news_dir) / ".worker.lock"):
-        jobs = [(path, state.read_json(path)) for path in folder(news_dir).glob("*.json")]
-        jobs = [(path, job) for path, job in jobs if isinstance(job, dict)]
+        jobs = []
+        for path in folder(news_dir).glob("*.json"):
+            job = state.read_json(path)
+            if not isinstance(job, dict):
+                continue
+            if job.get("state") in ("done", "failed"):
+                _retire(news_dir, path, job)  # Legacy terminal files migrate without replay.
+            else:
+                jobs.append((path, job))
         jobs.sort(key=lambda entry: (entry[1].get("created_at", ""), entry[1].get("accepted_ns", 0)))
         for path, job in jobs:
             if completed >= limit:
@@ -94,6 +156,8 @@ def drain(news_dir: Path, *, hook_set: Any = None, config_provider=None, logger=
                 job.pop("error", None)
             job["updated_at"] = state.now_iso()
             _atomic.write_json_atomic(path, job)
+            if job["state"] in ("done", "failed"):
+                _retire(news_dir, path, job)
             completed += 1
     return completed
 
