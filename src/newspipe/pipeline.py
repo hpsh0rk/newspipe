@@ -29,17 +29,20 @@ from newspipe.state import now_iso, today
 
 
 def _record_event(store: state.Store, event_type: str, *, payload: dict[str, Any],
-                  source: str, slot: str, digest: str, now: datetime | None = None) -> None:
+                  source: str, slot: str, digest: str, now: datetime | None = None,
+                  event_id: str = "") -> bool:
     """记一条事件。**事件写失败不能让投递失败**（卡已经发出去了），但也不许静默。
 
     契约里 `--dry` 零副作用：调用方负责不要在没有副作用时调它。
     """
     try:
         events.append(store.news_dir, event_type, payload=payload, source=source,
-                      slot=slot, digest=digest, ts=now)
+                      slot=slot, digest=digest, ts=now, event_id=event_id)
+        return True
     except Exception as exc:                             # noqa: BLE001
         print(f"⚠️ 事件写入失败（{event_type} {source}-{slot}）："
               f"{type(exc).__name__}: {exc}"[:300])
+        return False
 
 ID_PREFIX = {"append_card": "a", "card": "n", "state_only": "s"}
 # 这些状态不推进游标：条目还没被消费（下轮要重取），推进了就等于丢掉
@@ -225,6 +228,17 @@ def _process_locked(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slo
                     dry: bool, now: datetime, mode: str, force: bool = False) -> SourceRun:
     run = SourceRun(source=scfg.name, adapter=scfg.adapter)
     since = store.cursor(scfg.name) if mode == "poll" else None
+    unfinished = None if dry else store.unfinished_batch(scfg.name)
+    if unfinished and unfinished.get("delivery_effect_done"):
+        # A confirmed remote success needs only local repair, even if fetching/budgets now fail.
+        for key, value in (unfinished.get("delivery_run") or {}).items():
+            setattr(run, key, value)
+        recovered = _complete_delivery(store, unfinished, run)
+        if recovered.status != "ok" or (unfinished["digest"], unfinished["slot"]) == (digest, slot):
+            return recovered
+        # Repairing yesterday must not consume today's only scheduled collection.
+        run = SourceRun(source=scfg.name, adapter=scfg.adapter)
+        since = store.cursor(scfg.name) if mode == "poll" else None
     if mode == "poll" and since is None and not force and not dry:
         # 首轮只建基线：否则会把全部历史条目当新内容推给用户
         store.set_cursor(scfg.name, now.timestamp(), at=now)
@@ -310,7 +324,22 @@ def _process_locked(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slo
         return run
 
     try:
+        if not batch.get("delivery_pending"):
+            batch["delivery_id"] = uuid.uuid4().hex
+            batch["delivery_at"] = now.isoformat()
+            batch["delivery_date"] = digest
+            batch["delivery_chat"] = cfg.chat
+        batch.setdefault("delivery_id", uuid.uuid4().hex)
+        batch.setdefault("delivery_at", now.isoformat())
+        batch.setdefault("delivery_date", digest)
+        batch.setdefault("delivery_chat", cfg.chat)
+        batch["delivery_run"] = {key: getattr(run, key) for key in ("fetched", "kept", "new", "planned", "enrich")}
+        if mode == "poll":
+            batch["delivery_cursor"] = _watermark(since, kept, raw, now)
+        else:
+            batch.pop("delivery_cursor", None)
         batch["delivery_pending"] = True
+        batch["delivery_effect_done"] = False
         if is_append and batch.get("card_id"):
             seq = int(batch.get("seq") or 1) + 1
             # Reserve the sequence durably: a lost response cannot make us reuse it.
@@ -334,9 +363,11 @@ def _process_locked(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slo
                 raise DeliveryError("发送结果未确认且已超过平台幂等窗口；请核对消息并修复批次回执，禁止自动重发")
             batch.setdefault("send_started_at", now.isoformat())
             store.write_batch(batch)
-            batch["message_id"] = channel.send_card(cfg.chat, str(batch["card_id"]),
+            batch["message_id"] = channel.send_card(batch["delivery_chat"], str(batch["card_id"]),
                                                     idempotency_key=batch["send_uuid"])
             run.card = "sent"
+        batch["delivery_effect_done"] = True
+        batch["delivery_card"] = run.card
         store.write_batch(batch)
     except Exception as exc:
         _queue(store, scfg.name, batch["items"])
@@ -348,28 +379,43 @@ def _process_locked(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slo
                       source=scfg.name, slot=slot, digest=digest, now=now)
         return run
 
-    # 语义 = "已投递"：只记真正上了卡的那些（batch["items"]），装不下顺延的不算已投递
-    store.record_pushed(scfg.name, batch["items"], batch["digest"])
-    store.remove_pending(scfg.name, store.pushed_ids(scfg.name))
-    batch["delivery_pending"] = False
-    store.write_batch(batch)
-    run.queued = store.pending_count(scfg.name)
-    store.note_card(digest, at=now)
+    return _complete_delivery(store, batch, run)
+
+
+def _complete_delivery(store: state.Store, batch: dict, run: SourceRun) -> SourceRun:
+    source, digest, slot = batch["source"], batch["digest"], batch["slot"]
+    operation_id = batch["delivery_id"]
+    delivered_at = datetime.fromisoformat(batch["delivery_at"])
+    run.card = batch["delivery_card"]
+    store.record_pushed(source, batch["items"], digest)
+    store.remove_pending(source, store.pushed_ids(source))
+    run.queued = store.pending_count(source)
+    store.note_card(batch["delivery_date"], at=delivered_at, operation_id=operation_id)
     run.status = "ok"
-    _record_event(store, "delivered",
+    recorded = _record_event(store, "delivered",
                   payload={"card": run.card, "card_id": batch.get("card_id"),
-                           "message_id": batch.get("message_id"), "chat": cfg.chat,
+                           "message_id": batch.get("message_id"), "chat": batch["delivery_chat"],
                            "items": len(batch.get("items") or []), "queued": run.queued,
                            "title": (batch.get("card") or {}).get("title") or batch.get("title")},
-                  source=scfg.name, slot=slot, digest=digest, now=now)
+                  source=source, slot=slot, digest=digest, now=delivered_at,
+                  event_id=f"ev_delivery_{operation_id}")
     degraded = int((run.enrich or {}).get("degraded") or 0)
     if degraded:
-        _record_event(store, "degraded", payload={"count": degraded, "enrich": run.enrich},
-                      source=scfg.name, slot=slot, digest=digest, now=now)
-    store.heartbeat(scfg.name, status="ok", digest=digest, fetched=run.fetched, kept=run.kept,
+        recorded = _record_event(store, "degraded", payload={"count": degraded, "enrich": run.enrich},
+                                source=source, slot=slot, digest=digest, now=delivered_at,
+                                event_id=f"ev_delivery_{operation_id}_degraded") and recorded
+    if not recorded:
+        run.status, run.note = "error", "投递已确认，事件台账未完成；下轮只修复本地回执"
+        store.heartbeat(source, status=run.status, digest=digest, note=run.note)
+        return run
+    store.heartbeat(source, status="ok", digest=digest, fetched=run.fetched, kept=run.kept,
                     new=run.new, planned=run.planned, queued=run.queued, card=run.card,
                     card_id=batch.get("card_id"), enrich=run.enrich)
-    _advance(store, scfg, mode, since, kept, raw, now)
+    if "delivery_cursor" in batch:
+        current = store.cursor(source)
+        store.set_cursor(source, max(float(current or 0), batch["delivery_cursor"]), at=delivered_at)
+    batch["delivery_pending"] = False
+    store.write_batch(batch)
     return run
 
 

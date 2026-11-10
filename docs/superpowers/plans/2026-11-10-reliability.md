@@ -85,3 +85,22 @@ Stage 5 verification: 395 offline tests passed. Every HTTP attempt is durably re
 Ruling: The scanner covers tracked and non-ignored working-tree files, not Git history or ignored local credentials. This restores the missing CI publication gate without reading the user's real credentials; historical exposures still require credential rotation.
 
 Stage 5 follow-up: The broad `*_secret*` ignore rule also excluded the scanner and its regression tests. Add exact exceptions rather than weakening credential ignores; a regression now checks that the CI gate can be published. Scanner restoration is a separate follow-up commit because the model-budget commit was already created.
+
+## Final Review Corrections
+
+- [x] Serialize enrich-only with the workflow lock, scope its channel, and reserve its update sequence before transport. Dry runs skip runtime/locks and leave the file tree unchanged.
+- [x] Route legacy card/service entrypoints through the selected news directory and configured runtime.
+- [x] Give callback workers the service's last-known-good config instead of independently reloading rejected disk config.
+- [x] Separate content/run dates from model attempt clocks in production enrichment.
+- [x] Refuse positively detected same-application WS conflicts before opening any connection; report the same configuration error in doctor.
+- [x] Return explicit WS error feedback when durable acceptance fails rather than a silent normal response.
+- [x] Preserve successful deliveries until all local completion bookkeeping is done. Persist an operation identity and remote-success marker; repair local ledgers without fetching/replaying remote operations. Budget and events deduplicate by operation identity; clear pending last.
+- [x] After repairing a prior day/slot, continue the requested collection rather than incorrectly marking today's only slot as completed.
+
+Verification: 409 offline tests passed, including fault injection after pushed, budget, delivered event, heartbeat, cursor, and before final completion persistence. Each local recovery sends once, makes zero extra card updates, counts one card, and retains one delivered event. A separate cross-day scheduling regression confirms today's new collection/delivery still runs. Secret scan: 120 files, zero findings. Temporary example-config doctor: 13 items, 187/200 elements.
+
+Compatibility verification: the complete 409-test offline suite also passed on Python 3.11 and 3.12, matching the CI matrix (in addition to the primary Python 3.13 run).
+
+Ruling: A WS storage failure returns an explicit not-accepted error toast and asks the user to click again. The SDK response does not establish a reliable platform retry contract, so we do not claim automatic recovery of events that were never durably accepted.
+
+Ruling: Keep this branch and all stage commits locally. Merging, pushing and deployment are outside the user's requested fix-and-commit scope.

@@ -613,7 +613,8 @@ def make_action_handler(*, sdk: _Sdk, news_dir: Path | None = None,
         except Exception as exc:                            # 回调里任何异常都不能冒泡
             counters["errors"] = counters.get("errors", 0) + 1
             logger(f"入站 ws：处理失败（{type(exc).__name__}: {exc}）")
-            return sdk.response_cls()
+            return sdk.response_cls({"toast": {"type": "error",
+                                               "content": "未接收，存储或配置不可用，请稍后重新点击"}})
 
     return on_action
 

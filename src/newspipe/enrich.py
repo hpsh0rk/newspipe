@@ -97,9 +97,10 @@ def _summarize(item: dict, scfg: Any, store: Any, models_cfg: dict, budget: dict
     if mode == "article" and len(body.strip()) < _MIN_BODY_FOR_ARTICLE:
         name = "summarize-title"  # 抓不到正文 → 只译标题，不硬编摘要
     user = _fill(prompts.text(name), _vars(item, scfg, body, now))
+    # Content dates use the run clock; billable attempts use the model's execution clock.
     result = llm.chat_json("summarize", system=_SYSTEM, user=user,
                            prompt_version=prompts.version(name), store=store,
-                           models_cfg=models_cfg, budget=budget, now=now)
+                           models_cfg=models_cfg, budget=budget)
     if not result.ok:
         return {}, result.state, result.note
     data = result.data or {}
@@ -130,7 +131,7 @@ def translate_body(item: dict, scfg: Any, store: Any, models_cfg: dict, budget: 
                  {"blocks": json.dumps(blocks, ensure_ascii=False)})
     result = llm.chat_json("translate", system=_SYSTEM, user=user,
                            prompt_version=prompts.version(name), store=store,
-                           models_cfg=models_cfg, budget=budget, now=now,
+                           models_cfg=models_cfg, budget=budget,
                            max_tokens=2400)
     if not result.ok:
         return "", result.state

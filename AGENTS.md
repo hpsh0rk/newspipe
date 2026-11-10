@@ -16,6 +16,7 @@
    要么由宿主持有、把点击转发过来（`inbound.mode: http`）——**不能两个都开**。
    本项目启动时会检测「同一应用 + 双方都要 ws」并直接报错（`doctor --json` 的
    `inbound_conflict`）。
+   冲突是配置错误：`serve` 在打开连接前拒绝启动，`doctor` 的错误详情包含 `inbound_conflict`。
 2. **密钥永不进仓库、永不打印。** 凭据只从 显式配置 → 进程环境 → dotenv → 系统钥匙串 读
    （见 `src/newspipe/credentials.py`）。任何探测/自检命令只输出「有没有、够不够」，不输出值。
 3. **写知识库的动作只发生在宿主侧，且必须留回执。** `favorite`（⭐ 收藏）只**进台账**

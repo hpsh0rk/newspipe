@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from newspipe import callback_jobs, channel, events, inbound, interaction, state
+from newspipe import callback_jobs, channel, config, events, inbound, interaction, state
 
 
 class CallbackAcceptanceTests(unittest.TestCase):
@@ -96,3 +96,17 @@ class CallbackAcceptanceTests(unittest.TestCase):
         with patch.object(interaction, "handle_json", side_effect=lambda value, **kw: handled.append(json.loads(value)["_callback_id"]) or ""):
             callback_jobs.drain(self.news)
         self.assertEqual(handled, [first["id"], second["id"]])
+
+    def test_worker_uses_last_good_service_config_not_rejected_disk_config(self):
+        from newspipe.errors import ConfigError
+        inbound.dispatch(self.event, news_dir=self.news, defer=True)
+        (self.news / "sources.yaml").touch()
+        cfg = config.Config(chat="oc_test", slots={}, sources={})
+        worker = callback_jobs.Worker(self.news, logger=lambda _m: None)
+        worker.config_provider = lambda: cfg
+        with patch.object(config, "load", side_effect=ConfigError("rejected disk config")), \
+             patch.object(channel, "update_entity", return_value=True), \
+             patch.object(worker.stop_event, "wait", side_effect=lambda _seconds: worker.stop_event.set()):
+            worker.run()
+        self.assertEqual(callback_jobs.stats(self.news)["done"], 1)
+        self.assertEqual(len(events.queue(self.news)), 1)

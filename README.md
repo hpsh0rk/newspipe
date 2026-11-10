@@ -144,7 +144,8 @@ newspipe 想解决的是**中间那一层**：把「采集 → 判断 → 加工
   state/pushed/<source>.jsonl                        去重（推过就不再推）
   state/cursors/                                     分页游标
   state/status/                                      各源心跳
-  state/budget/<date>.json                           模型预算与用量
+  state/budget/<date>.json                           发卡打扰预算
+  llm/usage/<date>.json                              模型用量与小时窗口
   state/events/<date>.jsonl + acks.jsonl             事件流与消费确认
   llm/receipts/  llm/usage/<date>.json               回执缓存与账单
 ```

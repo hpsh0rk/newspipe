@@ -12,7 +12,8 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from newspipe import llm, state
+from newspipe import enrich, llm, state
+from test_news_pipeline import _item, _src
 
 NOW = datetime(2026, 11, 10, 10)
 GOOD = {"choices": [{"finish_reason": "stop", "message": {"content": '{"ok": true}'}}]}
@@ -144,3 +145,15 @@ class ModelBudgetTests(unittest.TestCase):
             result = self.call()
         send.assert_not_called()
         self.assertIn("hourly_calls", result.note)
+
+    def test_production_enrichment_accounts_retry_at_actual_execution_time(self):
+        before = NOW.replace(hour=23, minute=55)
+        after = (NOW + timedelta(days=1)).replace(hour=0, minute=5)
+        self.budget.update(max_calls_per_day=1, max_calls_per_hour=10, max_chars_per_call=8000)
+        with patch.object(llm, "datetime", wraps=datetime) as model_clock, \
+             patch.object(llm.urllib.request, "urlopen", side_effect=[Response(EMPTY), Response()]) as send:
+            model_clock.now.side_effect = [before, before, after, after]
+            enrich.enrich([_item(1)], _src(summary="title"), self.store, {}, self.budget, now=before)
+        self.assertEqual(send.call_count, 2)
+        self.assertEqual(self.store.usage(before.date().isoformat())["calls"], 1)
+        self.assertEqual(self.store.usage(after.date().isoformat())["calls"], 1)

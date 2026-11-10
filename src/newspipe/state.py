@@ -293,13 +293,20 @@ class Store:
         data = read_json(self.root / "budget" / f"{date}.json")
         return data if isinstance(data, dict) else {"cards": 0, "last_card_ts": None}
 
-    def note_card(self, date: str, *, at: datetime | None = None) -> dict:
-        state = self.budget_state(date)
-        state["cards"] = int(state.get("cards") or 0) + 1
-        when = at or (datetime.now(TZ) if TZ else datetime.now())
-        state["last_card_ts"] = when.isoformat(timespec="seconds")
-        write_json_atomic(self._path("budget", f"{date}.json"), state, sort_keys=False)
-        return state
+    def note_card(self, date: str, *, at: datetime | None = None, operation_id: str = "") -> dict:
+        with self.transaction():
+            data = self.budget_state(date)
+            if operation_id and operation_id in data.get("operations", []):
+                return data
+            data["cards"] = int(data.get("cards") or 0) + 1
+            if operation_id:
+                data.setdefault("operations", []).append(operation_id)
+            when = at or datetime.now(TZ)
+            previous = data.get("last_card_ts")
+            if not previous or datetime.fromisoformat(previous).timestamp() < when.timestamp():
+                data["last_card_ts"] = when.isoformat(timespec="seconds")
+            write_json_atomic(self._path("budget", f"{date}.json"), data, sort_keys=False)
+            return data
 
     # ── 回执与用量 ──────────────────────────────────────────────────────────
     @staticmethod

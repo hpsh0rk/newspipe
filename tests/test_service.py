@@ -208,6 +208,19 @@ class RunOnceTests(unittest.TestCase):
 
 
 class RunForeverTests(unittest.TestCase):
+    def test_known_shared_application_conflict_is_rejected_before_opening_ws(self) -> None:
+        with TemporaryDirectory() as tmp:
+            news_dir = Path(tmp)
+            cfg = _cfg(service=config.ServiceCfg(inbound={"mode": "ws"}))
+            with mock.patch.object(service, "shared_app_ws_conflict", return_value="shared application conflict"), \
+                 mock.patch.object(service, "prepare_channel"), \
+                 mock.patch.object(service, "start_inbound_for") as start, \
+                 mock.patch.object(service, "run_once", return_value=[]):
+                code = service.run_forever(cfg, state.Store(news_dir), news_dir=news_dir,
+                                           once=True, logger=lambda _m: None)
+            self.assertEqual(code, 2)
+            start.assert_not_called()
+
     def test_unexpected_failure_stops_inbound_and_worker(self) -> None:
         with TemporaryDirectory() as tmp:
             news_dir = Path(tmp)

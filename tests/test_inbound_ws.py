@@ -14,6 +14,8 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -133,6 +135,19 @@ class RunWsAssemblyTests(unittest.TestCase):
         inbound.run_ws(_creds(), logger=self.logs.append, sdk=self.sdk, client=client)
         self.assertTrue(client.started)
         self.assertEqual(self.lark.registered, [], "注入 client 时不该再建 dispatcher")
+
+    def test_failed_durable_acceptance_returns_an_error_toast(self) -> None:
+        from newspipe import callback_jobs
+        with TemporaryDirectory() as tmp:
+            news_dir = Path(tmp)
+            fn = inbound.make_action_handler(sdk=self.sdk, news_dir=news_dir, logger=self.logs.append)
+            data = SimpleNamespace(header=SimpleNamespace(event_id="event-1"),
+                                   event=SimpleNamespace(action=SimpleNamespace(value={"domain": "news", "news_action": "wiki"})))
+            with mock.patch.object(callback_jobs, "enqueue", side_effect=OSError("disk full")):
+                response = fn(data)
+            self.assertEqual(response.body.get("toast", {}).get("type"), "error")
+            self.assertIn("未接收", response.body["toast"]["content"])
+            self.assertEqual(callback_jobs.stats(news_dir)["queued"], 0)
 
 
 class MissingSdkTests(unittest.TestCase):

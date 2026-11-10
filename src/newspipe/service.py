@@ -6,7 +6,8 @@
 ```
 newspipe --serve
   ├─ 调度线程（本模块）：到点跑 run_slot(am/noon/pm)；每 tick 跑一次 run_poll（节流在 state 里）
-  └─ 入站线程（inbound.py）：长连接或 HTTP，接卡片回调 → interaction.handle
+  ├─ 入站线程（inbound.py）：长连接或 HTTP，接卡片回调 → 持久化 inbox
+  └─ 消费线程（callback_jobs.py）：读 inbox → interaction.handle（使用服务当前有效配置）
 ```
 
 为什么不是一个 cron 表：槽位时刻写在 `sources.yaml: slots`（权威），进程自己按它算下一次触发，
@@ -124,7 +125,7 @@ def run_once(cfg: config.Config, store: state.Store, *, now: datetime,
              news_dir: Path | None = None, dry: bool = False,
              logger: Callable[[str], None] = print) -> list[pipeline.SourceRun]:
     """跑一轮：所有到期的槽位 + 一次轮询检查。返回所有 SourceRun。"""
-    news_dir = Path(news_dir or config.default_news_dir())
+    news_dir = Path(news_dir or store.news_dir)
     last_runs = load_runs(news_dir)
     runs: list[pipeline.SourceRun] = []
 
@@ -256,7 +257,7 @@ def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None
     等待用 `stop_event.wait()`（可被信号打断），`wait_fn` 可注入以便测试不真等：
     返回 True 表示「要求停止」。
     """
-    news_dir = Path(news_dir or config.default_news_dir())
+    news_dir = Path(news_dir or store.news_dir)
     logger = logger or make_logger(cfg)
     stop_event = stop_event or threading.Event()
     waiter = wait_fn or stop_event.wait
@@ -264,13 +265,18 @@ def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None
     # 入站线程按需读 hooks（lambda 而不是快照）⇒ 热加载的 hooks 立刻对点击生效
     live: dict[str, config.Config] = {"cfg": cfg}
 
+    conflict = shared_app_ws_conflict(cfg, news_dir=news_dir) if with_inbound and not dry else None
+    if conflict:
+        logger(f"⚠️ 拒绝启动：{conflict}")
+        return 2
+
     prepare_channel(cfg, news_dir=news_dir)
     channel_sig = _channel_sig(cfg)
     handle = inbound_mod.InboundHandle(mode="none")
     worker = None
     try:
         if with_inbound and not dry:
-            worker = callback_jobs.Worker(news_dir, hook_set=lambda: live["cfg"].hooks, logger=logger)
+            worker = callback_jobs.Worker(news_dir, config_provider=lambda: live["cfg"], logger=logger)
             worker.start()
             try:
                 handle = start_inbound_for(cfg, news_dir=news_dir,
@@ -283,9 +289,6 @@ def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None
         logger(f"服务启动：通道={cfg.service.channel} 入站={handle.mode} tick={cfg.service.tick_seconds:g}s "
                f"槽位={{{', '.join(f'{k}:{v}' for k, v in cfg.slots.items())}}}"
                f"{' [dry]' if dry else ''}{' [once]' if once else ''}")
-        conflict = shared_app_ws_conflict(cfg, news_dir=news_dir)
-        if conflict:
-            logger(f"⚠️ {conflict}")
 
         exit_code = 0
         while not stop_event.is_set():

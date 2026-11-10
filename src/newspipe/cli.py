@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from newspipe import (channel, config, edit, events, llm, pipeline, render, result,  # noqa: E402
+from newspipe import (channel, config, edit, events, llm, pipeline, render, result, runtime,  # noqa: E402
                       service, state)
 from newspipe.errors import ConfigError, DeliveryError, NewsError  # noqa: E402
 
@@ -100,7 +100,7 @@ CONTRACT: list[dict[str, Any]] = [
      "usage": "newspipe queue list [--json] [--days N]", "args": ["--days"], "writes": False,
      "examples": ["newspipe queue list --json"]},
     {"name": "queue ack", "summary": "标记某条收藏已入库（入库自动化或人工兜底成功后调用）",
-     "usage": "newspipe queue ack <event_id> [--note <入库路径>] [--by NAME] [--json]",
+     "usage": "newspipe queue ack <event_id> --note <入库路径> [--by NAME] [--json]",
      "args": ["event_id", "--note", "--by"], "writes": True,
      "examples": ["newspipe queue ack ev_20261003T180000_ab12 --note "
                   "notes/xxx.md --by agent --json"]},
@@ -257,6 +257,16 @@ def cmd_list_sources(cfg: config.Config, *, json_out: bool) -> int:
 def cmd_enrich_only(store: state.Store, cfg: config.Config, *, date: str, dry: bool,
                     verbose: bool, json_out: bool, retry_degraded: bool = False) -> int:
     """补加工：把当天批次里还没加工的条目补上（回执保证已加工的不重算）。"""
+    if dry:
+        return _enrich_only_locked(store, cfg, date=date, dry=True, verbose=verbose,
+                                   json_out=json_out, retry_degraded=retry_degraded)
+    with runtime.activate(cfg, store.news_dir), store.transaction():
+        return _enrich_only_locked(store, cfg, date=date, dry=dry, verbose=verbose,
+                                   json_out=json_out, retry_degraded=retry_degraded)
+
+
+def _enrich_only_locked(store: state.Store, cfg: config.Config, *, date: str, dry: bool,
+                        verbose: bool, json_out: bool, retry_degraded: bool) -> int:
     day = store.root / "batches" / date
     if not day.is_dir():
         _emit(f"没有 {date} 的批次")
@@ -288,9 +298,10 @@ def cmd_enrich_only(store: state.Store, cfg: config.Config, *, date: str, dry: b
                 card = render.render(batch, cfg.hooks)
                 render.assert_within_limit(card, what=f"{batch.get('source')}-{batch.get('slot')}")
                 seq = int(batch.get("seq") or 1) + 1
-                if channel.update_entity(str(batch["card_id"]), seq, card):
-                    batch["seq"] = seq
-                    store.save_batch_at(path, batch)
+                batch["seq"] = seq
+                store.save_batch_at(path, batch)
+                if not channel.update_entity(str(batch["card_id"]), seq, card):
+                    _emit(f"⚠️ {batch.get('source')} 卡片更新失败：状态已保留，下次交互会自愈")
             except Exception as exc:  # 补加工失败不该让整个命令挂掉
                 _emit(f"⚠️ {batch.get('source')} 卡片更新失败：{type(exc).__name__}: {exc}"[:200])
         if verbose:
@@ -412,11 +423,12 @@ def _sub_doctor(args: argparse.Namespace, news_dir: Path) -> result.Result:
     data["inbound"] = cfg.service.inbound_mode
 
     # 同一应用第二个长连接 ⇒ 飞书随机投递（普通聊天消息可能被本项目静默丢弃）。
-    # 这条是**警告不是硬失败**：本机没有第二个 client（比如在别的机器上独立跑）时是合法的。
+    # Positive detection is a configuration error, matching serve's pre-connection refusal.
     conflict = service.shared_app_ws_conflict(cfg, news_dir=news_dir)
     data["inbound_conflict"] = conflict
     if conflict:
-        warnings.append(conflict)
+        problems.append({"code": "E_CONFIG", "message": conflict,
+                         "hint": "改用 inbound.mode=http，由宿主转发；或使用不同应用"})
 
     # hooks：被跳过的声明必须报出来（否则"按钮没出现"没人知道为什么）
     data["hooks"] = {"count": len(cfg.hooks.hooks),
@@ -461,8 +473,11 @@ def _sub_doctor(args: argparse.Namespace, news_dir: Path) -> result.Result:
 
     if problems:
         first = problems[0]
+        details = {"problems": problems}
+        if conflict:
+            details["inbound_conflict"] = conflict
         return result.fail("doctor", first["code"], first["message"],
-                           hint=first.get("hint", ""), details={"problems": problems},
+                           hint=first.get("hint", ""), details=details,
                            warnings=warnings,
                            next=["修完后重跑：newspipe doctor --json"])
     return result.ok("doctor", data, warnings=warnings,
@@ -685,12 +700,16 @@ def _sub_migrate(args: argparse.Namespace, news_dir: Path) -> result.Result:
 
 def _sub_card(args: argparse.Namespace, news_dir: Path) -> result.Result:
     """插件薄壳走的入口（旧 flag `--card` 的等价子命令）。"""
-    from newspipe import interaction, runtime
-
     cfg, _store = _load(news_dir)
-    with runtime.activate(cfg, news_dir):
-        message = interaction.handle_json(args.payload, news_dir=news_dir, hook_set=cfg.hooks)
+    message = _card_message(args.payload, cfg, news_dir)
     return result.ok("card", {"message": message}, changed=bool(message))
+
+
+def _card_message(payload: str, cfg: config.Config, news_dir: Path) -> str:
+    from newspipe import interaction
+
+    with runtime.activate(cfg, news_dir):
+        return interaction.handle_json(payload, news_dir=news_dir, hook_set=cfg.hooks)
 
 
 def _sub_card_preview(args: argparse.Namespace, news_dir: Path) -> result.Result:
@@ -900,16 +919,14 @@ def _main_legacy(argv: list[str]) -> int:
         return 0
     if args.card:
         # 插件薄壳走这里：成功路径 stdout 为空（不在聊天里插消息）
-        from newspipe import interaction
-
-        message = interaction.handle_json(args.card, hook_set=cfg.hooks)
+        message = _card_message(args.card, cfg, news_dir)
         if message:
             print(message)
         return 0
     if args.probe_channel:
         return cmd_probe_channel(cfg, chat=args.chat or cfg.chat, json_out=args.json)
     if args.serve:
-        return service.run_forever(cfg, store, dry=args.dry, once=args.once)
+        return service.run_forever(cfg, store, news_dir=news_dir, dry=args.dry, once=args.once)
     if args.enrich_only:
         return cmd_enrich_only(store, cfg, date=args.date or state.today(), dry=args.dry,
                                verbose=args.verbose, json_out=args.json,

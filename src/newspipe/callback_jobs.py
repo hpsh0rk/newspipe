@@ -42,7 +42,7 @@ def stats(news_dir: Path) -> dict[str, int]:
     return result
 
 
-def drain(news_dir: Path, *, hook_set: Any = None, logger=print,
+def drain(news_dir: Path, *, hook_set: Any = None, config_provider=None, logger=print,
           now: float | None = None, limit: int = 20) -> int:
     now = time.time() if now is None else now
     completed = 0
@@ -68,8 +68,10 @@ def drain(news_dir: Path, *, hook_set: Any = None, logger=print,
                 _atomic.write_json_atomic(path, job)
                 try:
                     hooks = hook_set() if callable(hook_set) else hook_set
-                    if (Path(news_dir) / "sources.yaml").is_file():
+                    cfg = config_provider() if config_provider is not None else None
+                    if cfg is None and (Path(news_dir) / "sources.yaml").is_file():
                         cfg = config.load(news_dir)
+                    if cfg is not None:
                         with runtime.activate(cfg, news_dir):
                             message = interaction.handle_json(json.dumps(payload), news_dir=news_dir,
                                                               hook_set=hooks if hooks is not None else cfg.hooks)
@@ -97,8 +99,9 @@ def drain(news_dir: Path, *, hook_set: Any = None, logger=print,
 
 
 class Worker:
-    def __init__(self, news_dir: Path, *, hook_set=None, logger=print):
+    def __init__(self, news_dir: Path, *, hook_set=None, config_provider=None, logger=print):
         self.news_dir, self.hook_set, self.logger = news_dir, hook_set, logger
+        self.config_provider = config_provider
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self.run, name="newspipe-callback-worker", daemon=True)
 
@@ -112,7 +115,8 @@ class Worker:
     def run(self):
         while not self.stop_event.is_set():
             try:
-                drain(self.news_dir, hook_set=self.hook_set, logger=self.logger)
+                drain(self.news_dir, hook_set=self.hook_set, config_provider=self.config_provider,
+                      logger=self.logger)
             except Exception as exc:
                 self.logger(f"卡片后台消费者失败：{type(exc).__name__}: {exc}")
             self.stop_event.wait(0.2)
