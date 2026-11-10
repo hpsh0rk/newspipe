@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from newspipe import channel, interaction, pipeline, state
+from newspipe import channel, cli, events, interaction, pipeline, state
 from test_news_pipeline import _item, _src
 
 NOW = datetime(2026, 11, 10, 10)
@@ -131,3 +131,45 @@ class WorkflowRecoveryTests(unittest.TestCase):
             store.record_pushed("src", [_item(1)], "2026-11-10")
             store.record_pushed("src", [_item(1), _item(2)], "2026-11-10")
             self.assertEqual(store.pushed_by_day(), {"2026-11-10": {"src": 2}})
+
+
+class FavoriteContractTests(unittest.TestCase):
+    def test_old_favorite_is_visible_and_not_pruned(self):
+        with TemporaryDirectory() as tmp:
+            news = Path(tmp)
+            favorite = events.append(news, "favorite", ts=datetime.now() - timedelta(days=100))
+            self.assertEqual([e["id"] for e in events.queue(news)], [favorite["id"]])
+            events.prune(news, keep_days=30)
+            self.assertEqual([e["id"] for e in events.queue(news)], [favorite["id"]])
+
+    def test_queue_ack_requires_receipt_and_correct_type(self):
+        with TemporaryDirectory() as tmp:
+            news = Path(tmp)
+            favorite = events.append(news, "favorite")
+            click = events.append(news, "clicked")
+            for args in (["queue", "ack", favorite["id"]],
+                         ["queue", "ack", click["id"], "--note", "wiki/page"],
+                         ["events", "ack", favorite["id"], "--by", "test"]):
+                with self.subTest(args=args):
+                    result = cli.run_subcommand([*args, "--json"], news)
+                    self.assertFalse(result.ok)
+                    self.assertEqual(events.acked_ids(news), set())
+            result = cli.run_subcommand(["queue", "ack", favorite["id"], "--note", "wiki/page", "--json"], news)
+            self.assertTrue(result.ok)
+            self.assertEqual(events.queue(news), [])
+
+    def test_invalid_bulk_ack_writes_nothing(self):
+        with TemporaryDirectory() as tmp:
+            news = Path(tmp)
+            click = events.append(news, "clicked")
+            result = cli.run_subcommand(["events", "ack", click["id"], "ev_unknown", "--by", "test", "--json"], news)
+            self.assertFalse(result.ok)
+            self.assertEqual(events.acked_ids(news), set())
+
+    def test_old_favorite_can_be_acked_with_a_receipt(self):
+        with TemporaryDirectory() as tmp:
+            news = Path(tmp)
+            favorite = events.append(news, "favorite", ts=datetime.now() - timedelta(days=100))
+            result = cli.run_subcommand(["queue", "ack", favorite["id"], "--note", "wiki/page", "--json"], news)
+            self.assertTrue(result.ok)
+            self.assertEqual(events.queue(news), [])

@@ -67,6 +67,12 @@ def _iso(ts: datetime) -> str:
 def append(news_dir: Path, type: str, *, payload: dict[str, Any] | None = None,
            source: str = "", slot: str = "", digest: str = "",
            ts: datetime | None = None) -> dict[str, Any]:
+    with _atomic.file_lock(events_dir(news_dir) / ".consume.lock"):
+        return _append(news_dir, type, payload=payload, source=source, slot=slot, digest=digest, ts=ts)
+
+
+def _append(news_dir: Path, type: str, *, payload: dict[str, Any] | None,
+            source: str, slot: str, digest: str, ts: datetime | None) -> dict[str, Any]:
     """追加一个事件并返回它（含生成的 `id`）。类型未登记时抛 ValueError —— 宁可在写入侧炸，
     也不要在读侧让 agent 遇到一个它不认识的事件类型。"""
     if type not in TYPES:
@@ -110,7 +116,7 @@ def acked_ids(news_dir: Path) -> set[str]:
     return {str(a.get("id")) for a in _read_lines(acks_path(news_dir)) if a.get("id")}
 
 
-def list_events(news_dir: Path, *, days: int = 7, since: datetime | None = None,
+def list_events(news_dir: Path, *, days: int | None = 7, since: datetime | None = None,
                 types: Iterable[str] | None = None, unconsumed: bool = False,
                 limit: int | None = None, newest_first: bool = False) -> list[dict[str, Any]]:
     """按时间升序返回事件。`days` 只限制扫描范围（不是过滤条件本身）。"""
@@ -118,7 +124,8 @@ def list_events(news_dir: Path, *, days: int = 7, since: datetime | None = None,
     folder = events_dir(news_dir)
     if not folder.is_dir():
         return []
-    cutoff = since.date() if since else (_date.today() - timedelta(days=max(1, days) - 1))
+    cutoff = since.date() if since else (_date.min if days is None else
+                                         _date.today() - timedelta(days=max(1, days) - 1))
     wanted = set(types) if types else None
     events: list[dict[str, Any]] = []
     for path in sorted(p for p in folder.iterdir() if _DAY_FILE.match(p.name)):
@@ -145,6 +152,18 @@ def list_events(news_dir: Path, *, days: int = 7, since: datetime | None = None,
 
 def ack(news_dir: Path, ids: Iterable[str], *, by: str, ts: datetime | None = None,
         note: str = "") -> dict[str, Any]:
+    with _atomic.file_lock(events_dir(news_dir) / ".consume.lock"):
+        return _ack(news_dir, ids, by=by, ts=ts, note=note, favorites=False)
+
+
+def ack_queue(news_dir: Path, ids: Iterable[str], *, by: str, note: str,
+              ts: datetime | None = None) -> dict[str, Any]:
+    with _atomic.file_lock(events_dir(news_dir) / ".consume.lock"):
+        return _ack(news_dir, ids, by=by, ts=ts, note=note, favorites=True)
+
+
+def _ack(news_dir: Path, ids: Iterable[str], *, by: str, ts: datetime | None,
+         note: str, favorites: bool) -> dict[str, Any]:
     """确认消费。结果**明确区分**三种情况（agent 需要据此判断是否重试）：
 
     - `acked`：本次真的写入了确认；
@@ -152,17 +171,22 @@ def ack(news_dir: Path, ids: Iterable[str], *, by: str, ts: datetime | None = No
     - `unknown`：事件 id 不存在（**必须让 agent 知道**，否则它会以为处理完了）。
     """
     news_dir = Path(news_dir)
-    wanted = [str(i) for i in ids if str(i).strip()]
-    known = {str(e.get("id")) for e in list_events(news_dir, days=90)}
+    wanted = list(dict.fromkeys(str(i) for i in ids if str(i).strip()))
+    known = {str(e.get("id")): e for e in list_events(news_dir, days=None)}
     done = acked_ids(news_dir)
     now = ts or datetime.now()
-    acked, already, unknown = [], [], []
+    acked, already, unknown = [], [], [i for i in wanted if i not in known]
+    invalid = [i for i in wanted if i in known and
+               ((known[i].get("type") in QUEUE_TYPES) != favorites or
+                (favorites and not note.strip()))]
+    out = {"acked": acked, "already": already, "unknown": unknown,
+           "invalid": invalid, "by": by, "at": _iso(now)}
+    # Validate the complete request before the first append, including mixed bulk requests.
+    if unknown or invalid:
+        return out
     path = acks_path(news_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     for event_id in wanted:
-        if event_id not in known:
-            unknown.append(event_id)
-            continue
         if event_id in done:
             already.append(event_id)
             continue
@@ -171,16 +195,20 @@ def ack(news_dir: Path, ids: Iterable[str], *, by: str, ts: datetime | None = No
             record["note"] = note
         _atomic.atomic_append_line(path, json.dumps(record, ensure_ascii=False))
         acked.append(event_id)
-    return {"acked": acked, "already": already, "unknown": unknown,
-            "by": by, "at": _iso(now)}
+    return out
 
 
 def queue(news_dir: Path, *, days: int = 30) -> list[dict[str, Any]]:
-    """待入库队列 = 未被确认的 `favorite` 事件（时间升序）。"""
-    return list_events(news_dir, days=days, types=QUEUE_TYPES, unconsumed=True)
+    """All unacknowledged favorites; days remains accepted for CLI compatibility."""
+    return list_events(news_dir, days=None, types=QUEUE_TYPES, unconsumed=True)
 
 
 def prune(news_dir: Path, *, keep_days: int = 30, now: datetime | None = None) -> dict[str, Any]:
+    with _atomic.file_lock(events_dir(news_dir) / ".consume.lock"):
+        return _prune(news_dir, keep_days=keep_days, now=now)
+
+
+def _prune(news_dir: Path, *, keep_days: int, now: datetime | None) -> dict[str, Any]:
     """删掉过期的事件日文件。acks 不单独清理——它随事件文件一起过期，
     引用不存在的事件只会让 `unknown` 多一条，不影响正确性。"""
     news_dir = Path(news_dir)
@@ -188,7 +216,8 @@ def prune(news_dir: Path, *, keep_days: int = 30, now: datetime | None = None) -
     if not folder.is_dir():
         return {"removed": [], "kept": 0}
     cutoff = (now or datetime.now()).date() - timedelta(days=max(1, keep_days))
-    removed, kept = [], 0
+    removed, kept, protected = [], 0, []
+    done = acked_ids(news_dir)
     for path in sorted(folder.iterdir()):
         if not _DAY_FILE.match(path.name):
             continue
@@ -197,11 +226,15 @@ def prune(news_dir: Path, *, keep_days: int = 30, now: datetime | None = None) -
         except ValueError:
             continue
         if day < cutoff:
+            if any(e["id"] not in done for e in _read_lines(path)):
+                protected.append(path.name)
+                kept += 1
+                continue
             path.unlink()
             removed.append(path.name)
         else:
             kept += 1
-    return {"removed": removed, "kept": kept, "keep_days": keep_days}
+    return {"removed": removed, "kept": kept, "protected": protected, "keep_days": keep_days}
 
 
 def stats(news_dir: Path, *, days: int = 7) -> dict[str, Any]:
@@ -222,5 +255,5 @@ def stats(news_dir: Path, *, days: int = 7) -> dict[str, Any]:
     }
 
 
-__all__ = ["TYPES", "QUEUE_TYPES", "append", "list_events", "ack", "acked_ids", "queue",
+__all__ = ["TYPES", "QUEUE_TYPES", "append", "list_events", "ack", "ack_queue", "acked_ids", "queue",
            "prune", "stats", "events_dir", "acks_path", "_atomic"]

@@ -751,7 +751,7 @@ def ops_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
         '<button class="btn primary" type="submit">跑一轮</button>'
         "</form>")
 
-    note_input = '<input type="text" name="note" placeholder="备注" size="10">'
+    note_input = '<input type="text" name="note" placeholder="入库路径或回执（必填）" size="16" required>'
     qrows = []
     for e in act.get("queue") or []:
         p = e.get("payload") or {}

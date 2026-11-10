@@ -167,7 +167,7 @@ class EventStreamTests(unittest.TestCase):
             events.append(news, "clicked", payload={"item_id": "n02"})
             queued = events.queue(news)
             self.assertEqual([e["id"] for e in queued], [fav["id"]])
-            events.ack(news, [fav["id"]], by="agent", note="notes/x.md")
+            events.ack_queue(news, [fav["id"]], by="agent", note="notes/x.md")
             self.assertEqual(events.queue(news), [])
             # 回执记录里带上了入库路径（真的入库之后才写）
             ack_line = json.loads(events.acks_path(news).read_text(encoding="utf-8").strip())
@@ -187,6 +187,7 @@ class EventStreamTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             news = Path(tmp)
             old = events.append(news, "delivered", ts=datetime.now() - timedelta(days=60))
+            events.ack(news, [old["id"]], by="test")
             new = events.append(news, "delivered")
             out = events.prune(news, keep_days=30)
             self.assertEqual(out["removed"], [f"{old['ts'][:10]}.jsonl"])

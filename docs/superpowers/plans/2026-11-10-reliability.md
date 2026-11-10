@@ -40,9 +40,9 @@ Files: _atomic.py, state.py, pipeline.py, interaction.py, channel.py, ports.py, 
 
 Files: events.py, cli.py, actions.py, view.py, docs and regression tests.
 
-- [ ] Add failing tests for old favorites, prune protection, missing receipts, generic ack bypass, and partial bulk ack.
-- [ ] Scan all pending favorites, validate acknowledgements before writing, require favorite-specific receipts, and protect unconsumed events from pruning.
-- [ ] Update CLI/Web contracts and documentation; run the full suite and commit.
+- [x] Add failing tests for old favorites, prune protection, missing receipts, generic ack bypass, and partial bulk ack.
+- [x] Scan all pending favorites, validate acknowledgements before writing, require favorite-specific receipts, and protect unconsumed events from pruning.
+- [x] Update CLI/Web contracts and documentation; run the full suite and commit.
 
 ## Stage 3: Runtime Assembly
 
@@ -73,3 +73,5 @@ Files: llm.py, state.py, scripts/scan_secrets.py, docs and regression tests.
 Ruling: Keep JSONL compatibility rather than introduce a SQLite migration in a bug-fix series. Durable workflow identity plus writer serialization addresses the observed faults without requiring deployment migration. Remote exactly-once guarantees remain bounded by the platform's idempotency retention.
 
 Stage 1 verification: 361 offline tests passed. Doctor projected 187/200 elements for 13 items. Unfinished delivery identities survive across dates; unknown send results beyond the one-hour message idempotency window stop automatic re-sending for reconciliation.
+
+Stage 2 verification: 365 offline tests passed. Queue reads and acknowledgements cover retained history; pruning protects all unconsumed event day files. Generic event ack cannot consume favorites and invalid bulk requests write nothing.

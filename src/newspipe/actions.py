@@ -91,9 +91,8 @@ def _argv_queue_ack(form: dict[str, list[str]]) -> list[str]:
     """⭐ 待入库队列的「标记已入库」—— 回执/兜底动作。"""
     event_id = _one(form, "event_id")
     argv = ["queue", "ack", event_id, "--by", "webui"]
-    note = (form.get("note") or [""])[0].strip()
-    if note:
-        argv += ["--note", note]
+    note = _one(form, "note")
+    argv += ["--note", note]
     return argv
 
 

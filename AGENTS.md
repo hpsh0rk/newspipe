@@ -234,6 +234,10 @@ newspipe queue ack ev_xxx --note <入库路径> --by myagent --json  # 真的入
 队列是自愈的：消费器挂了条目就留在队列里，`status --json` 会一直报
 「待入库队列有 N 条」，修好后重跑即可 —— 所以**先 ack 再入库是绝对禁止**的。
 
+待入库收藏没有天数上限（`queue list --days` 仅兼容旧调用）。`queue ack` 必须带非空
+`--note`，只能确认收藏；通用 `events ack` 禁止确认收藏。批量确认有无效 ID 时整批不写。
+`events prune` 只清理全部已消费的过期日文件，不删除尚未消费的收藏或其他事件。
+
 消费没有推送通道，靠**轮询**：宿主按需轮询 `events list --unconsumed` 与 `queue list`，
 轮询间隔自定（收藏入库的实时性要求不高，分钟级足够）。卡片上的第三方 hook 按钮
 （`hooks.yaml`，见 §2）是点击瞬间跑第三方脚本的路径，但它不是事件推送 —— 事件流的

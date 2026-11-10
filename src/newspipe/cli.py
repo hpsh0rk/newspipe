@@ -572,6 +572,10 @@ def _sub_events(args: argparse.Namespace, news_dir: Path) -> result.Result:
                                hint="newspipe events list --unconsumed --json 拿到 id")
         out = events.ack(news_dir, args.ids, by=args.by, note=args.note or "")
         nexts = ["newspipe events list --unconsumed --json"]
+        if out["invalid"]:
+            return result.fail(command, "E_VALIDATION", "收藏必须用 queue ack 并提供入库回执；整批确认未写入",
+                               hint="入库成功后运行 newspipe queue ack <id> --note <入库路径> --json",
+                               details=out)
         if out["unknown"]:
             return result.fail(command, "E_NOT_FOUND",
                                f"{len(out['unknown'])} 个事件 id 不存在",
@@ -594,7 +598,10 @@ def _sub_queue(args: argparse.Namespace, news_dir: Path) -> result.Result:
     if args.action == "ack":
         if not args.event_id:
             return result.fail(command, "E_USAGE", "需要事件 id")
-        out = events.ack(news_dir, [args.event_id], by=args.by, note=args.note or "")
+        out = events.ack_queue(news_dir, [args.event_id], by=args.by, note=args.note or "")
+        if out["invalid"]:
+            return result.fail(command, "E_VALIDATION", "只能确认收藏，且必须提供非空入库回执",
+                               hint="newspipe queue ack <id> --note <入库路径> --json", details=out)
         if out["unknown"]:
             return result.fail(command, "E_NOT_FOUND", f"事件 id 不存在：{args.event_id}",
                                hint="newspipe queue list --json 拿正确的 id", details=out)
@@ -749,9 +756,9 @@ def _build_sub_parser() -> argparse.ArgumentParser:
     qu = add("queue")
     qu.add_argument("action", choices=["list", "ack"])
     qu.add_argument("event_id", nargs="?", help="ack 的事件 id")
-    qu.add_argument("--days", type=int, default=30)
+    qu.add_argument("--days", type=int, default=30, help="兼容参数；待入库收藏始终全量返回，不按天数过期")
     qu.add_argument("--by", default="agent")
-    qu.add_argument("--note", help="入库路径等")
+    qu.add_argument("--note", help="必填：入库成功后的路径或回执")
 
     rn = add("run")
     rn.add_argument("--slot", choices=["am", "noon", "pm"])

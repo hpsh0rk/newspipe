@@ -73,8 +73,8 @@ class ActionFormTests(unittest.TestCase):
         argv = actions.ACTIONS["queue-ack"].argv({"event_id": ["ev_1"], "note": ["好文"]})
         self.assertEqual(argv, ["queue", "ack", "ev_1", "--by", "webui", "--note", "好文"])
         # 没有 note 就不加这个 flag（CLI 侧不需要空串）
-        self.assertEqual(actions.ACTIONS["queue-ack"].argv({"event_id": ["ev_1"]}),
-                         ["queue", "ack", "ev_1", "--by", "webui"])
+        with self.assertRaises(actions.ActionInputError):
+            actions.ACTIONS["queue-ack"].argv({"event_id": ["ev_1"]})
 
     def test_events_ack_accepts_several_ids_and_caps_them(self) -> None:
         argv = actions.ACTIONS["events-ack"].argv({"ids": ["ev_1, ev_2"]})
@@ -151,7 +151,7 @@ class ActionDispatchTests(unittest.TestCase):
         self.assertTrue(out["ok"], out)
         self.assertEqual(events.queue(self.news), [])
         # 幂等：再点一次是 already，不是错
-        again = self._dispatch("queue-ack", {"event_id": [ev["id"]]})
+        again = self._dispatch("queue-ack", {"event_id": [ev["id"]], "note": ["已入库"]})
         self.assertTrue(again["ok"], again)
 
     def test_events_ack_surfaces_unknown_ids_instead_of_pretending(self) -> None:
