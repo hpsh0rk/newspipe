@@ -657,6 +657,28 @@ class EnrichTests(unittest.TestCase):
         self.assertGreater(len(blocks), 1)
         self.assertEqual("".join(blocks).replace("\n\n", ""), text)
 
+    def test_chunks_preserve_long_fragments_and_whitespace(self) -> None:
+        for text in ("a" * 1200, "  First.\n\n" + "b" * 1200 + "; Next?\tTail  ",
+                     "No punctuation\n" * 100, "。" * 1001):
+            with self.subTest(text=text[:30]):
+                blocks = enrich._chunks(text, size=500)
+                self.assertEqual("".join(blocks), text)
+                self.assertTrue(all(0 < len(block) <= 500 for block in blocks))
+
+    def test_chunks_reject_nonpositive_size(self) -> None:
+        for size in (0, -1):
+            with self.assertRaises(ValueError):
+                enrich._chunks("text", size=size)
+
+    def test_translate_rejects_blank_or_nontext_blocks(self) -> None:
+        for block in ("", "  ", None, 42, {"unexpected": "text"}):
+            with self.subTest(block=block), patch.object(llm, "chat_json",
+                    return_value=llm.ChatResult({"t": [block]}, "ok")):
+                translated, status = enrich.translate_body({}, _src(summary="post"), self.store,
+                    {}, self.budget, "Single sentence.", NOW)
+            self.assertEqual(translated, "")
+            self.assertEqual(status, "incomplete")
+
     def test_degraded_keeps_failure_note_on_item(self) -> None:
         """降级必须把原因留在条目上——只有计数的话没人知道是模型/网络/预算的问题。"""
         fail = llm.ChatResult(None, "failed", "空响应（finish_reason='length'，思考吃满 1024 tokens）")

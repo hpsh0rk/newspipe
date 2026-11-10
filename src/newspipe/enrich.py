@@ -43,8 +43,10 @@ def is_chinese(text: str, *, threshold: float = 0.3) -> bool:
 
 
 def _chunks(text: str, size: int = _TRANSLATE_CHUNK) -> list[str]:
-    """按句末标点切成不超过 size 的块（保证块数稳定，便于校验译文数量）。"""
-    parts = [p for p in re.split(r"(?<=[。！？；.!?;])\s*", text) if p.strip()]
+    """Bounded sentence-aware chunks; concatenating them reconstructs the input."""
+    if size <= 0:
+        raise ValueError("chunk size must be positive")
+    parts = re.split(r"(?<=[。！？；.!?;])", text)
     out: list[str] = []
     buf = ""
     for p in parts:
@@ -52,10 +54,13 @@ def _chunks(text: str, size: int = _TRANSLATE_CHUNK) -> list[str]:
             buf += p
         else:
             if buf:
-                out.append(buf.strip())
-            buf = p if len(p) <= size else p[:size]
-    if buf.strip():
-        out.append(buf.strip())
+                out.append(buf)
+            while len(p) > size:
+                out.append(p[:size])
+                p = p[size:]
+            buf = p
+    if buf:
+        out.append(buf)
     return out
 
 
@@ -136,10 +141,11 @@ def translate_body(item: dict, scfg: Any, store: Any, models_cfg: dict, budget: 
     if not result.ok:
         return "", result.state
     got = (result.data or {}).get("t")
-    if not isinstance(got, list) or len(got) != len(blocks):
+    if (not isinstance(got, list) or len(got) != len(blocks)
+            or any(not isinstance(block, str) or not block.strip() for block in got)):
         # 丢块/多块 = 结构不可信：保留原文，不猜
         return "", "incomplete"
-    return "\n\n".join(str(x).strip() for x in got if str(x).strip()), "ok"
+    return "\n\n".join(block.strip() for block in got), "ok"
 
 
 def enrich(items: list[dict], scfg: Any, store: Any, models_cfg: dict, budget: dict,
