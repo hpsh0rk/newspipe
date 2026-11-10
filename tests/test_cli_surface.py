@@ -237,6 +237,15 @@ class SubcommandSurfaceTests(unittest.TestCase):
                 self.assertEqual(payload["error"]["code"], error_code)
                 self.assertEqual(payload["error"]["details"]["exit_code"], exit_code)
 
+    def test_status_reads_runtime_from_selected_directory(self) -> None:
+        from newspipe import state
+        state.write_json_atomic(self.news / "state" / "service.json", {"runtime": {
+            "restart_required": ["service.inbound"], "effective": {"inbound_mode": "http"}}})
+        code, payload = self._cli("status")
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["data"]["service"]["runtime"]["effective"]["inbound_mode"], "http")
+        self.assertTrue(any("service.inbound" in warning for warning in payload["warnings"]))
+
     def test_json_flag_works_on_both_sides_of_the_subcommand(self) -> None:
         for argv in (["--news-dir", str(self.news), "status", "--json"],
                      ["--json", "--news-dir", str(self.news), "status"]):

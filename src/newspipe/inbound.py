@@ -623,7 +623,7 @@ def run_ws(creds: credentials.FeishuCreds, *, news_dir: Path | None = None,
            hook_set: Any = None, logger: Callable[[str], None] = print,
            sdk: _Sdk | None = None, client: Any | None = None,
            state: dict[str, Any] | None = None,
-           log_level: str | None = None) -> Any:
+           log_level: str | None = None, on_client: Callable[[Any], None] | None = None) -> Any:
     """起长连接并**阻塞**（SDK 自带重连）。`sdk` / `client` 可注入以便测试。
 
     SDK 日志级别默认 INFO（能看到「connected to」）；排查入站问题时用
@@ -644,6 +644,8 @@ def run_ws(creds: credentials.FeishuCreds, *, news_dir: Path | None = None,
         client = sdk.lark.ws.Client(creds.app_id, creds.app_secret, event_handler=handler,
                                     domain=creds.base_url,
                                     log_level=levels.get(wanted, sdk.lark.LogLevel.INFO))
+    if on_client is not None:
+        on_client(client)
     logger(f"入站 ws：连接 {creds.base_url}（app_id={creds.app_id}）…")
     client.start()
     return client
@@ -669,6 +671,8 @@ class InboundHandle:
             info["path"] = self.path
         if self.view_path:
             info["view"] = self.view_path
+        if self.server is not None:
+            info["address"] = list(self.server.server_address)
         if self.state:
             info["counters"] = dict(self.state)
         if self.error:
@@ -724,7 +728,7 @@ def start_inbound(*, mode: str, service_cfg: dict[str, Any], creds: credentials.
             server, thread, vpath = _view_only()
         except OSError as exc:                              # 端口被占不该拖垮调度
             logger(f"⚠️ 只读视图未启动（{type(exc).__name__}: {exc}）")
-            return InboundHandle(mode="none")
+            return InboundHandle(mode="none", error="view_unavailable")
         logger(f"只读视图：监听 {server.server_address[0]}:{server.server_address[1]}{vpath}")
         return InboundHandle(mode="none", thread=thread, server=server, view_path=vpath, state=state)
 
@@ -743,24 +747,26 @@ def start_inbound(*, mode: str, service_cfg: dict[str, Any], creds: credentials.
     if mode == "ws":
         if creds is None:
             raise InboundError("inbound.mode=ws 需要飞书应用凭据（app_id/app_secret）")
-        holder: dict[str, Any] = {}
+        handle = InboundHandle(mode="ws", client=client, state=state)
 
         def _run() -> None:
             try:
-                holder["client"] = run_ws(creds, news_dir=news_dir, hook_set=hook_set,
-                                          logger=logger, sdk=sdk, client=client, state=state)
+                run_ws(creds, news_dir=news_dir, hook_set=hook_set,
+                       logger=logger, sdk=sdk, client=client, state=state,
+                       on_client=lambda value: setattr(handle, "client", value))
             except Exception as exc:                       # 连接失败要留痕，不许静默
-                holder["error"] = f"{type(exc).__name__}: {exc}"
-                logger(f"入站 ws：连接失败（{holder['error']}）")
+                handle.error = type(exc).__name__
+                logger(f"入站 ws：连接失败（{type(exc).__name__}: {exc}）")
 
         thread = threading.Thread(target=_run, name="newspipe-inbound-ws", daemon=True)
+        handle.thread = thread
         thread.start()
-        handle = InboundHandle(mode="ws", thread=thread, client=client, state=state)
         if view_on:
             try:
                 server, _vt, vpath = _view_only()
             except OSError as exc:
                 logger(f"⚠️ 只读视图未启动（{type(exc).__name__}: {exc}）")
+                handle.error = "view_unavailable"
             else:
                 handle.server = server
                 handle.view_path = vpath

@@ -371,7 +371,22 @@ class InboundHandleTests(unittest.TestCase):
                                        sdk=WsHandlerTests._Sdk(), client=None,
                                        logger=lambda _m: None)
         # 注入一个必然失败的 run_ws（缺 SDK 属性）
+        handle.thread.join(timeout=2)
+        self.assertTrue(handle.describe().get("error"))
         handle.stop()          # 不该抛
+
+    def test_constructed_ws_client_is_owned_before_start_blocks(self) -> None:
+        with mock.patch.object(inbound, "run_ws", side_effect=lambda _creds, **kw: kw["on_client"]("owned-client")):
+            handle = inbound.start_inbound(mode="ws", service_cfg={}, creds=_creds(),
+                                           logger=lambda _: None)
+            handle.thread.join(timeout=2)
+        self.assertEqual(handle.client, "owned-client")
+
+    def test_view_start_failure_is_visible(self) -> None:
+        with mock.patch.object(inbound, "start_http", side_effect=OSError("port occupied")):
+            handle = inbound.start_inbound(mode="none", service_cfg={}, creds=None,
+                view={"enabled": True}, logger=lambda _: None)
+        self.assertEqual(handle.error, "view_unavailable")
 
     def test_ws_with_injected_client_starts_thread(self) -> None:
         class Client:

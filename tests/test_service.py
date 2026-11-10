@@ -25,7 +25,7 @@ for _p in (str(SRC_ROOT), str(REPO_ROOT)):
         sys.path.insert(0, _p)
 
 from newspipe import backends, config, pipeline, service, state  # noqa: E402
-from newspipe.errors import ConfigError, NewsError  # noqa: E402
+from newspipe.errors import ConfigError, InboundError, NewsError  # noqa: E402
 
 SLOTS = {"am": "08:15", "noon": "12:35", "pm": "18:35"}
 
@@ -273,6 +273,52 @@ class RunOnceTests(unittest.TestCase):
 
 
 class RunForeverTests(unittest.TestCase):
+    def test_resource_changes_require_restart_but_business_changes_reload(self) -> None:
+        with TemporaryDirectory() as tmp:
+            news_dir = Path(tmp)
+            first = _cfg(service=config.ServiceCfg(inbound={"mode": "http", "http": {"port": 1001}},
+                view={"enabled": True, "actions": False}, feishu={"app_secret": "test-original"}))
+            desired = replace(first, chat="oc_new", service=replace(first.service,
+                inbound={"mode": "ws", "http": {"port": 1002}},
+                view={"enabled": True, "actions": True}, feishu={"app_secret": "test-replacement"},
+                schedule={"tick_seconds": 120}))
+            logs = []
+            with mock.patch.object(service, "prepare_channel"), \
+                 mock.patch.object(service, "shared_app_ws_conflict", return_value=None), \
+                 mock.patch.object(service, "start_inbound_for", return_value=service.inbound_mod.InboundHandle(mode="http")) as start, \
+                 mock.patch.object(service.callback_jobs, "Worker"), \
+                 mock.patch.object(service, "run_once", return_value=[]) as run:
+                code = service.run_forever(first, state.Store(news_dir), news_dir=news_dir,
+                    once=True, logger=logs.append, reload_fn=lambda: desired)
+            self.assertEqual(code, 0)
+            start.assert_called_once()
+            effective = run.call_args.args[0]
+            self.assertEqual(effective.chat, "oc_new")
+            self.assertEqual(effective.service.tick_seconds, 120)
+            self.assertEqual(effective.service.inbound, first.service.inbound)
+            self.assertEqual(effective.service.view, first.service.view)
+            self.assertEqual(effective.service.feishu, first.service.feishu)
+            self.assertTrue(any("需重启" in line for line in logs))
+            info = service.describe_service(desired, news_dir=news_dir)["runtime"]
+            self.assertEqual(set(info["restart_required"]), {"service.inbound", "service.view", "service.feishu"})
+            self.assertEqual(info["effective"]["inbound_mode"], "http")
+            self.assertEqual(info["desired"]["inbound_mode"], "ws")
+            self.assertNotIn("test-original", json.dumps(info))
+            self.assertNotIn("test-replacement", json.dumps(info))
+            self.assertFalse(info["running"])
+
+    def test_inbound_startup_failure_returns_nonzero_and_stops_worker(self) -> None:
+        with TemporaryDirectory() as tmp:
+            news_dir = Path(tmp)
+            with mock.patch.object(service, "prepare_channel"), \
+                 mock.patch.object(service, "shared_app_ws_conflict", return_value=None), \
+                 mock.patch.object(service, "start_inbound_for", side_effect=InboundError("test unavailable")), \
+                 mock.patch.object(service.callback_jobs, "Worker") as worker, \
+                 mock.patch.object(service, "run_once", return_value=[]):
+                code = service.run_forever(_cfg(), state.Store(news_dir), once=True, logger=lambda _: None)
+            self.assertNotEqual(code, 0)
+            worker.return_value.stop.assert_called_once()
+
     def test_known_shared_application_conflict_is_rejected_before_opening_ws(self) -> None:
         with TemporaryDirectory() as tmp:
             news_dir = Path(tmp)
@@ -293,6 +339,8 @@ class RunForeverTests(unittest.TestCase):
                  mock.patch.object(service, "start_inbound_for") as start, \
                  mock.patch.object(service.callback_jobs, "Worker") as worker, \
                  mock.patch.object(service, "shared_app_ws_conflict", return_value=None):
+                start.return_value.describe.return_value = {"mode": "none"}
+                start.return_value.error = ""
                 with self.assertRaisesRegex(RuntimeError, "clock failed"):
                     service.run_forever(_cfg(), state.Store(news_dir), news_dir=news_dir,
                                         logger=lambda _m: None,

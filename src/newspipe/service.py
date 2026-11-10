@@ -24,7 +24,7 @@ import os
 import threading
 import hashlib
 from contextlib import nullcontext
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -305,8 +305,8 @@ def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None
                 reload_fn: Callable[[], config.Config] | None = None) -> int:
     """常驻主循环。`once=True` 跑一轮就返回（给系统 cron / 测试用）。
 
-    **每轮重新读配置**（`sources.yaml` / `service.yaml` / `hooks.yaml`）：用户或宿主改完
-    配置不必重启进程。改坏了也不会静默——重载失败时沿用上一份并**吵一声**。
+    每轮重载业务策略和 hooks；监听资源、权限与凭据变更明确标为需重启。
+    改坏了也不会静默——重载失败时沿用上一份并吵一声。
 
     等待用 `stop_event.wait()`（可被信号打断），`wait_fn` 可注入以便测试不真等：
     返回 True 表示「要求停止」。
@@ -318,6 +318,10 @@ def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None
     reloader = reload_fn or (lambda: config.load(news_dir))
     # 入站线程按需读 hooks（lambda 而不是快照）⇒ 热加载的 hooks 立刻对点击生效
     live: dict[str, config.Config] = {"cfg": cfg}
+    started_cfg = cfg
+    desired_cfg = cfg
+    restart_required: list[str] = []
+    resource_error = ""
 
     conflict = shared_app_ws_conflict(cfg, news_dir=news_dir) if with_inbound and not dry else None
     if conflict:
@@ -337,6 +341,10 @@ def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None
                                            hook_set=lambda: live["cfg"].hooks, logger=logger)
             except (ConfigError, InboundError) as exc:
                 logger(f"⚠️ 入站未启动：{type(exc).__name__}: {exc}")
+                resource_error = type(exc).__name__
+                return 2 if isinstance(exc, ConfigError) else 1
+            if handle.error:
+                resource_error = "inbound_unavailable"
         if handle.mode != "none":
             logger(f"入站已启动：{handle.describe()}")
 
@@ -344,7 +352,7 @@ def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None
                f"槽位={{{', '.join(f'{k}:{v}' for k, v in cfg.slots.items())}}}"
                f"{' [dry]' if dry else ''}{' [once]' if once else ''}")
 
-        exit_code = 0
+        exit_code = 1 if resource_error else 0
         while not stop_event.is_set():
             now = now_fn()
             try:
@@ -353,6 +361,20 @@ def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None
                 logger(f"⚠️ 配置重载失败，沿用上一份：{exc}")
             else:
                 if fresh is not None and fresh is not cfg:
+                    desired_cfg = fresh
+                    fields = ["log"]
+                    if with_inbound and not dry:
+                        fields += ["inbound", "view", "feishu"]
+                    pending = [f"service.{field}" for field in fields
+                               if getattr(fresh.service, field) != getattr(started_cfg.service, field)]
+                    if pending != restart_required:
+                        if pending:
+                            logger(f"配置已保存但需重启服务：{', '.join(pending)}；当前资源保持不变")
+                        elif restart_required:
+                            logger("待重启配置已撤回；当前资源与配置一致")
+                    restart_required = pending
+                    fresh = replace(fresh, service=replace(fresh.service, **{
+                        field: getattr(started_cfg.service, field) for field in fields}))
                     if _channel_sig(fresh) != channel_sig:
                         # Rebuild only after configuration changes, preserving token caches otherwise.
                         try:
@@ -364,6 +386,12 @@ def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None
                             fresh = cfg
                     cfg = fresh
                     live["cfg"] = cfg
+            if not dry:
+                if handle.error:
+                    resource_error = handle.error
+                    exit_code = 1
+                _record_runtime(news_dir, cfg, desired_cfg, handle, restart_required,
+                                running=True, error=resource_error)
             try:
                 runs = run_once(cfg, store, now=now, news_dir=news_dir, dry=dry, logger=logger)
                 report(runs, logger)
@@ -382,6 +410,9 @@ def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None
         finally:
             if worker is not None:
                 worker.stop()
+            if not dry:
+                _record_runtime(news_dir, cfg, desired_cfg, handle, restart_required,
+                                running=False, error=resource_error)
     logger("服务退出")
     return exit_code
 
@@ -390,6 +421,32 @@ def _channel_sig(cfg: config.Config) -> tuple[str, tuple[tuple[str, str], ...]]:
     """通道签名：通道名 + 凭据配置。变了才重建通道实例（保住 token 缓存）。"""
     return (cfg.service.channel,
             tuple(sorted((str(k), str(v)) for k, v in (cfg.service.feishu or {}).items())))
+
+
+def _resource_values(cfg: config.Config) -> dict[str, Any]:
+    """Only explicitly public fields; never serialize the credential mapping."""
+    http = cfg.service.inbound.get("http") or {}
+    return {"channel": cfg.service.channel, "inbound_mode": cfg.service.inbound_mode,
+            "http_host": http.get("host", "127.0.0.1"), "http_port": http.get("port", 8787),
+            "http_path": http.get("path", "/feishu/events"),
+            "view_enabled": cfg.service.view_enabled, "view_path": cfg.service.view_path,
+            "view_actions": cfg.service.view_actions}
+
+
+def _record_runtime(news_dir: Path, effective: config.Config, desired: config.Config,
+                    handle: inbound_mod.InboundHandle, pending: list[str], *,
+                    running: bool, error: str = "") -> None:
+    with file_lock(runs_path(news_dir).with_suffix(".lock")):
+        data = load_runs(news_dir)
+        data["runtime"] = {"pid": os.getpid(), "running": running, "updated_at": state.now_iso(),
+                           "effective": _resource_values(effective), "desired": _resource_values(desired),
+                           "restart_required": list(pending), "inbound": handle.describe(), "error": error}
+        _save_runs(news_dir, data)
+
+
+def runtime_status(news_dir: Path) -> dict[str, Any]:
+    """Last observed runtime, not an assertion based on desired disk configuration."""
+    return load_runs(news_dir).get("runtime") or {}
 
 
 def describe_service(cfg: config.Config, *, news_dir: Path | None = None) -> dict[str, Any]:
@@ -404,6 +461,7 @@ def describe_service(cfg: config.Config, *, news_dir: Path | None = None) -> dic
         "tick_seconds": cfg.service.tick_seconds,
         "slots": dict(cfg.slots),
         "last_runs": load_runs(news_dir),
+        "runtime": runtime_status(news_dir),
     }
     if cfg.service.channel == "feishu_direct":
         try:

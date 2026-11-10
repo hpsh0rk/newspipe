@@ -399,6 +399,7 @@ def flash_decode(token: str) -> dict[str, Any] | None:
 
 def build(news_dir: Path | None = None, *, now: datetime | None = None) -> dict[str, Any]:
     """构建视图。`now` 可注入（测试别用墙钟）；配置坏了就让 ConfigError 冒出去。"""
+    from newspipe.service import runtime_status
     news_dir = Path(news_dir or config.default_news_dir())
     from newspipe import callback_jobs
     cfg = config.load(news_dir)
@@ -426,6 +427,7 @@ def build(news_dir: Path | None = None, *, now: datetime | None = None) -> dict[
             "tick_seconds": cfg.service.tick_seconds,
             "view_path": cfg.service.view_path,
             "view_enabled": cfg.service.view_enabled,
+            "runtime": runtime_status(news_dir),
         },
         "sources": rows,
         "sources_hash": edit.file_hash(news_dir / "sources.yaml"),

@@ -180,7 +180,7 @@ def _service_is_custom(cfg: config.Config) -> bool:
 def _status_rows(store: state.Store, cfg: config.Config) -> tuple[list[dict], dict, dict | None]:
     rows = pipeline.stats(store, cfg)
     usage = store.usage(state.today())
-    svc = service.describe_service(cfg) if _service_is_custom(cfg) else None
+    svc = service.describe_service(cfg, news_dir=store.news_dir) if _service_is_custom(cfg) else None
     return rows, usage, svc
 
 
@@ -375,6 +375,11 @@ def _sub_status(args: argparse.Namespace, news_dir: Path) -> result.Result:
         warnings.append(f"待入库队列有 {data['events']['queue']} 条（newspipe queue list --json）")
     if data["callbacks"]["failed"]:
         warnings.append(f"有 {data['callbacks']['failed']} 个卡片后台任务失败（newspipe events list --type failed --json）")
+    runtime_info = (svc or {}).get("runtime") or {}
+    if runtime_info.get("restart_required"):
+        warnings.append("配置变更需重启服务：" + ", ".join(runtime_info["restart_required"]))
+    if runtime_info.get("error"):
+        warnings.append("入站资源不可用，请检查服务日志并重启")
     return result.ok("status", data, printed=not args.json, warnings=warnings)
 
 
