@@ -340,10 +340,12 @@ def _sub_config_describe(args: argparse.Namespace, news_dir: Path) -> result.Res
 
 
 def _sub_status(args: argparse.Namespace, news_dir: Path) -> result.Result:
+    from newspipe import callback_jobs
     cfg, store = _load(news_dir)
     rows, usage, svc = _status_rows(store, cfg)
     data: dict[str, Any] = {"sources": rows, "llm_usage": usage,
-                            "events": events.stats(news_dir, days=args.days)}
+                            "events": events.stats(news_dir, days=args.days),
+                            "callbacks": callback_jobs.stats(news_dir)}
     if svc is not None:
         data["service"] = svc
     if not args.json:
@@ -351,7 +353,12 @@ def _sub_status(args: argparse.Namespace, news_dir: Path) -> result.Result:
         stat = data["events"]
         print(f"\n事件（近 {args.days} 天）：{stat['total']} 条"
               f"，未消费 {stat['unconsumed']}，待入库 {stat['queue']}")
-    return result.ok("status", data, printed=not args.json)
+    warnings = []
+    if data["events"]["queue"]:
+        warnings.append(f"待入库队列有 {data['events']['queue']} 条（newspipe queue list --json）")
+    if data["callbacks"]["failed"]:
+        warnings.append(f"有 {data['callbacks']['failed']} 个卡片后台任务失败（newspipe events list --type failed --json）")
+    return result.ok("status", data, printed=not args.json, warnings=warnings)
 
 
 def _sub_view(args: argparse.Namespace, news_dir: Path) -> result.Result:

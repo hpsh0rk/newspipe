@@ -208,6 +208,20 @@ class RunOnceTests(unittest.TestCase):
 
 
 class RunForeverTests(unittest.TestCase):
+    def test_unexpected_failure_stops_inbound_and_worker(self) -> None:
+        with TemporaryDirectory() as tmp:
+            news_dir = Path(tmp)
+            with mock.patch.object(service, "prepare_channel"), \
+                 mock.patch.object(service, "start_inbound_for") as start, \
+                 mock.patch.object(service.callback_jobs, "Worker") as worker, \
+                 mock.patch.object(service, "shared_app_ws_conflict", return_value=None):
+                with self.assertRaisesRegex(RuntimeError, "clock failed"):
+                    service.run_forever(_cfg(), state.Store(news_dir), news_dir=news_dir,
+                                        logger=lambda _m: None,
+                                        now_fn=mock.Mock(side_effect=RuntimeError("clock failed")))
+                start.return_value.stop.assert_called_once()
+                worker.return_value.stop.assert_called_once()
+
     def test_once_returns_zero_and_stops(self) -> None:
         with TemporaryDirectory() as tmp:
             news_dir = Path(tmp)

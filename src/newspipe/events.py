@@ -66,20 +66,25 @@ def _iso(ts: datetime) -> str:
 
 def append(news_dir: Path, type: str, *, payload: dict[str, Any] | None = None,
            source: str = "", slot: str = "", digest: str = "",
-           ts: datetime | None = None) -> dict[str, Any]:
+           ts: datetime | None = None, event_id: str = "") -> dict[str, Any]:
     with _atomic.file_lock(events_dir(news_dir) / ".consume.lock"):
-        return _append(news_dir, type, payload=payload, source=source, slot=slot, digest=digest, ts=ts)
+        if event_id:
+            existing = next((e for e in list_events(news_dir, days=None) if e["id"] == event_id), None)
+            if existing is not None:
+                return existing
+        return _append(news_dir, type, payload=payload, source=source, slot=slot, digest=digest, ts=ts,
+                       event_id=event_id)
 
 
 def _append(news_dir: Path, type: str, *, payload: dict[str, Any] | None,
-            source: str, slot: str, digest: str, ts: datetime | None) -> dict[str, Any]:
+            source: str, slot: str, digest: str, ts: datetime | None, event_id: str) -> dict[str, Any]:
     """追加一个事件并返回它（含生成的 `id`）。类型未登记时抛 ValueError —— 宁可在写入侧炸，
     也不要在读侧让 agent 遇到一个它不认识的事件类型。"""
     if type not in TYPES:
         raise ValueError(f"未登记的事件类型：{type!r}（合法值：{'/'.join(TYPES)}）")
     now = ts or datetime.now()
     event: dict[str, Any] = {
-        "id": _new_id(now),
+        "id": event_id or _new_id(now),
         "ts": _iso(now),
         "type": type,
         "source": source,

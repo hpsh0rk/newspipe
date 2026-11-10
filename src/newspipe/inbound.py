@@ -151,7 +151,7 @@ def _resolve_hooks(hook_set: Any) -> Any:
 
 
 def dispatch(event: dict[str, Any], *, news_dir: Path | None = None,
-             hook_set: Any = None) -> dict[str, Any] | None:
+             hook_set: Any = None, defer: bool = False) -> dict[str, Any] | None:
     """事件 → 响应体。返回 None 表示「不是我们的事件」，调用方应静默忽略。
 
     - URL 校验（`url_verification`）→ 回 challenge；
@@ -166,6 +166,16 @@ def dispatch(event: dict[str, Any], *, news_dir: Path | None = None,
     value = extract_action(event)
     if value is None:
         return None
+    if defer:
+        from newspipe import callback_jobs, config
+
+        header = event.get("header") or {}
+        event_id = header.get("event_id") or event.get("event_id") or ""
+        job = callback_jobs.enqueue(news_dir or config.default_news_dir(), value,
+                                    event_id=str(event_id))
+        message = {"done": "该点击已处理", "failed": "处理失败，请查看运维日志"}.get(job["state"], "已接收，后台处理中")
+        return {"accepted": True, "job_id": job["id"], "state": job["state"],
+                "toast": {"type": "error" if job["state"] == "failed" else "info", "content": message}}
     message = interaction.handle_json(json.dumps(value, ensure_ascii=False),
                                      news_dir=news_dir, hook_set=_resolve_hooks(hook_set))
     return {"toast": {"type": "info", "content": message}} if message else {}
@@ -484,7 +494,7 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                 self._send(400, {"error": "bad request"})
                 return
             try:
-                result = dispatch(payload, news_dir=news_dir, hook_set=hook_set)
+                result = dispatch(payload, news_dir=news_dir, hook_set=hook_set, defer=True)
             except Exception as exc:                       # 回调绝不能让进程崩
                 logger(f"入站：处理失败（{type(exc).__name__}: {exc}）")
                 self._send(500, {"error": "handler failed"})
@@ -584,9 +594,13 @@ def make_action_handler(*, sdk: _Sdk, news_dir: Path | None = None,
             if not isinstance(value, dict):
                 counters["ignored"] = counters.get("ignored", 0) + 1
                 return sdk.response_cls()
-            result = dispatch({"header": {"event_type": CARD_ACTION_EVENT},
+            header = getattr(data, "header", None)
+            event_id = (getattr(header, "event_id", None) or getattr(data, "event_id", None)
+                        or getattr(event, "token", ""))
+            result = dispatch({"header": {"event_type": CARD_ACTION_EVENT,
+                                           "event_id": event_id if isinstance(event_id, str) else ""},
                                "event": {"action": {"value": value}}},
-                              news_dir=news_dir, hook_set=hook_set)
+                              news_dir=news_dir, hook_set=hook_set, defer=True)
             if result is None:
                 counters["ignored"] = counters.get("ignored", 0) + 1
                 return sdk.response_cls()

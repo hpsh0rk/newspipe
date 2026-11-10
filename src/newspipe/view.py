@@ -400,6 +400,7 @@ def flash_decode(token: str) -> dict[str, Any] | None:
 def build(news_dir: Path | None = None, *, now: datetime | None = None) -> dict[str, Any]:
     """构建视图。`now` 可注入（测试别用墙钟）；配置坏了就让 ConfigError 冒出去。"""
     news_dir = Path(news_dir or config.default_news_dir())
+    from newspipe import callback_jobs
     cfg = config.load(news_dir)
     store = state.Store(news_dir)
     moment = now or datetime.now()
@@ -446,6 +447,7 @@ def build(news_dir: Path | None = None, *, now: datetime | None = None) -> dict[
             "reasons": usage.get("reasons") or {},
         },
         "history": history(store, days=HISTORY_DAYS, now=moment),
+        "callbacks": callback_jobs.stats(news_dir),
         "preferences_preview": (preferences.read_text(encoding="utf-8")[-600:]
                                 if preferences.is_file() else ""),
     }

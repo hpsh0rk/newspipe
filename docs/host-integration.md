@@ -22,8 +22,9 @@
   → 宿主的长连接收到 card.action.trigger
   → 宿主按 value.domain 查注册表
   → POST 给本项目（127.0.0.1）
-  → 本项目改状态 / 更新卡片实体，返回一行 toast
+  → 本项目持久化点击任务，立即返回接收 toast
   → 宿主把 toast 回给用户
+  → 本项目后台消费者改状态 / 更新卡片实体 / 执行 hook
 ```
 
 本项目侧的配置只有一个：
@@ -53,6 +54,7 @@ Content-Type: application/json
   "source": "myagent.card-router",
   "domain": "news",
   "tag": "button",
+  "event_id": "平台原始事件 ID，重试必须保持不变",
   "value": { …卡片按钮的 value 原样… },
   "received_at": "2026-01-01T12:00:00+0800"
 }
@@ -63,6 +65,7 @@ Content-Type: application/json
 | `domain` | ✅ | 域标识。本项目只处理 `value.domain == "news"` 的事件，其他一律忽略 |
 | `value` | ✅ | 卡片按钮的 `value`（含 `domain` / `action` / 定位字段）。**原样透传**，宿主不要改写 |
 | `tag` | ➖ | 动作标签（飞书回调里的 `action.tag`），用于日志与排障 |
+| `event_id` | 推荐 | 原始平台事件 ID；同一事件重试复用，独立点击使用不同 ID。缺失时兼容接收，但不能可靠去重 |
 | `protocol_version` | ➖ | 协议版本，当前 `1` |
 | `source` | ➖ | 转发方标识，写进日志便于定位是哪一层出的问题 |
 
@@ -73,16 +76,21 @@ Content-Type: application/json
 
 ```json
 {"code": 0}
-{"code": 0, "toast": {"type": "info", "content": "已记录 ⭐"}}
+{"code": 0, "accepted": true, "job_id": "...", "state": "queued", "toast": {"type": "info", "content": "已接收，后台处理中"}}
 ```
 
-- `code = 0`：处理完成。`toast.content` 非空时，宿主应当把它回显给用户（飞书 toast）。
+- `code = 0, accepted = true`：已持久化接收，不代表慢操作已经完成。`toast.content` 非空时回显给用户。
 - `code != 0` 或 HTTP 非 200：宿主应回一句「服务未响应」，**不要静默**。
 
 ### 2.3 时限
 
 **3 秒预算**：飞书要求卡片回调在 3 秒内响应。转发链路要留余量，建议宿主侧超时 2.5s。
 不要在转发路径上跑 LLM、抓网页、写大文件 —— 那些属于异步任务。
+
+后台任务由 `newspipe serve` 消费，重启后继续处理；`status --json` 与 `/view` 的 `callbacks`
+给出 queued/running/done/failed 数量，失败同时记入 `failed` 事件。核心动作重试使用同一业务事件
+ID，收藏不会重复入队。第三方 hook 没有通用幂等保证：运行中断后标记结果不确定，不自动重放，
+必须核对第三方回执。嵌入式只启动 HTTP 辅助函数时，调用方需要运行 `callback_jobs.Worker`。
 
 ---
 
@@ -142,7 +150,7 @@ def load_routes() -> tuple[dict, str]:
     return routes, ""
 
 
-def forward(domain: str, tag: str, value: dict) -> str:
+def forward(domain: str, tag: str, value: dict, *, event_id: str = "") -> str:
     """转发一封卡片动作信封，返回要回显给用户的文本（空串 = 不提示）。"""
     routes, registry_error = load_routes()
     route = routes.get(domain)
@@ -151,7 +159,7 @@ def forward(domain: str, tag: str, value: dict) -> str:
             return f"⚠️ 卡片域注册表不可用：{registry_error[:140]}"
         return ""                                # 别人的卡片：静默
     envelope = {"protocol_version": 1, "source": "myagent.card-router",
-                "domain": domain, "tag": tag, "value": value}
+                "domain": domain, "tag": tag, "value": value, "event_id": event_id}
     timeout = max(0.3, min(int(route.get("timeout_ms") or 2500) / 1000.0, 5.0))
     try:
         request = urllib.request.Request(
@@ -170,7 +178,8 @@ def on_card_action(event) -> str:
     value = getattr(event.action, "value", None) or {}
     if not isinstance(value, dict) or not value.get("domain"):
         return ""
-    return forward(str(value["domain"]), getattr(event.action, "tag", "button"), value)
+    return forward(str(value["domain"]), getattr(event.action, "tag", "button"), value,
+                   event_id=str(getattr(event, "event_id", "") or ""))
 ```
 
 **接上宿主时需要改的只有一处**：`on_card_action` 的签名（对接你自己的事件管线）。
@@ -347,7 +356,7 @@ def _forward_command(route: dict, envelope: dict) -> str:
     return extract_toast(proc.stdout)
 
 
-def route_envelope(tag: str, value: dict[str, Any]) -> str:
+def route_envelope(tag: str, value: dict[str, Any], *, event_id: str = "") -> str:
     """查表 + 转发。返回给用户的 toast 文本（空 = 静默）。"""
     table, registry_error = load_routes()
     domain = str(value.get("domain") or "").strip()
@@ -360,6 +369,7 @@ def route_envelope(tag: str, value: dict[str, Any]) -> str:
         return ""                     # 不是我们管的域 ⇒ 静默，交给宿主自己
     envelope = {"protocol_version": PROTOCOL_VERSION, "source": "hermes.card-router",
                 "domain": domain, "tag": tag, "value": value,
+                "event_id": event_id,
                 "received_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     forward = _forward_http if route["transport"] == "http" else _forward_command
     try:
@@ -369,10 +379,10 @@ def route_envelope(tag: str, value: dict[str, Any]) -> str:
         return f"⚠️ {domain} 转发异常（{type(exc).__name__}）"
 
 
-def handle_card(args: str) -> str:
+def handle_card(args: str, *, event_id: str = "") -> str:
     """网关 `/card <tag> <value_json>` 的处理器。"""
     tag, value = parse_command(args)
-    return route_envelope(tag, value) if value else ""
+    return route_envelope(tag, value, event_id=event_id) if value else ""
 
 
 def handle_routes(args: str) -> str:
@@ -395,6 +405,9 @@ def register(ctx) -> None:
     ctx.register_command("card-routes", handle_routes,
                          description="Show the card-domain routing registry.")
 ```
+
+宿主适配层必须从原始平台事件提取 `event_id` 并传给上述入口；若斜杠命令管线已丢弃
+该 ID，需要先扩展宿主的命令上下文。不要拿条目 ID、动作名或转发时间代替事件 ID。
 
 配套的插件清单（`plugin.yaml`）：
 

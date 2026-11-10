@@ -90,7 +90,8 @@ Content-Type: application/json
 {"domain": "news", "tag": "button", "value": { …卡片按钮的 value… }}
 ```
 
-响应 `{"code": 0}` = 处理成功；`{"code": 0, "toast": {...}}` = 顺便回一个提示给用户；
+响应 `{"code": 0, "accepted": true}` = 点击已持久化接收（后台执行，不代表已完成）；
+`toast` 是即时接收提示，后台状态读 `status --json` 的 `callbacks`；
 非 0 或超时 = 宿主可以回一句「服务未响应」。**3 秒预算**：不要在转发路径上跑 LLM 或长任务。
 
 完整协议、注册表格式与两份参考实现（通用宿主 / 插件式宿主）见
@@ -269,7 +270,8 @@ def on_card_action(event):
     if not target:
         return ack()                                 # 不是我们认识的域：静默（别人的卡片）
     try:
-        r = httpx.post(target, json={"domain": domain, "tag": event.action.tag, "value": value},
+        r = httpx.post(target, json={"domain": domain, "tag": event.action.tag, "value": value,
+                                    "event_id": event.event_id},
                        timeout=2.5)                  # 3 秒预算：超时要留余量
         r.raise_for_status()
         return ack(toast=r.json().get("toast"))

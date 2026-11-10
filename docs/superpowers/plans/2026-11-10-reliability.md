@@ -56,9 +56,9 @@ Files: runtime.py, backends/__init__.py, config.py, cli.py, service.py, regressi
 
 Files: callback_jobs.py, inbound.py, interaction.py, service.py, host-integration.md, regression tests.
 
-- [ ] Add failing tests for immediate acceptance, event retry deduplication, restart recovery, and worker failure visibility.
-- [ ] Persist callback envelopes before acknowledgement; run slow effects in a service-owned worker and preserve platform event IDs through both ingress paths.
-- [ ] Document accepted-versus-completed semantics and hook recovery limits; run the full suite and commit.
+- [x] Add failing tests for immediate acceptance, event retry deduplication, restart recovery, and worker failure visibility.
+- [x] Persist callback envelopes before acknowledgement; run slow effects in a service-owned worker and preserve platform event IDs through both ingress paths.
+- [x] Document accepted-versus-completed semantics and hook recovery limits; run the full suite and commit.
 
 ## Stage 5: Model Budget and CI Gate
 
@@ -77,3 +77,5 @@ Stage 1 verification: 361 offline tests passed. Doctor projected 187/200 element
 Stage 2 verification: 365 offline tests passed. Queue reads and acknowledgements cover retained history; pruning protects all unconsumed event day files. Generic event ack cannot consume favorites and invalid bulk requests write nothing.
 
 Stage 3 verification: 370 offline tests passed. Runtime channel scopes are thread-local and shared across CLI/pipeline entrypoints. Hot switching clears the prior service channel, and optimistic configuration edits serialize hash checks with writes.
+
+Stage 4 verification: 378 offline tests passed. Callback acceptance does not call slow handlers. Queued jobs survive restarts, execute in acceptance order, and reuse business event identities. Core retries refresh current state rather than undo later actions; interrupted third-party hooks fail closed for manual reconciliation. Service resources close in finally, including unexpected failures.

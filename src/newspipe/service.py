@@ -25,7 +25,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
-from newspipe import (backends, config, credentials, hostenv, inbound as inbound_mod, pipeline, runtime,
+from newspipe import (backends, callback_jobs, config, credentials, hostenv, inbound as inbound_mod, pipeline, runtime,
                       state)
 from newspipe._atomic import write_json_atomic
 from newspipe.errors import ConfigError, DeliveryError, InboundError, NewsError
@@ -158,7 +158,7 @@ def report(runs: list[pipeline.SourceRun], logger: Callable[[str], None]) -> Non
 
 # ------------------------------------------------------------------ 主循环
 def prepare_channel(cfg: config.Config, *, news_dir: Path) -> None:
-    """把 `service.yaml: channel` 装到后端注册表上（默认仍是 lark-cli）。"""
+    """把 `service.yaml: channel` 装到后端注册表上（默认是独立直连）。"""
     channel = runtime.channel_for(cfg, news_dir)
     backends.set_default_channel_name(cfg.service.channel)
     backends.set_channel(channel)
@@ -267,58 +267,64 @@ def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None
     prepare_channel(cfg, news_dir=news_dir)
     channel_sig = _channel_sig(cfg)
     handle = inbound_mod.InboundHandle(mode="none")
-    if with_inbound and not dry:
-        try:
-            handle = start_inbound_for(cfg, news_dir=news_dir,
-                                       hook_set=lambda: live["cfg"].hooks, logger=logger)
-        except (ConfigError, InboundError) as exc:
-            # 入站起不来不等于服务不能跑：发卡照旧，但必须吵（否则「点了没反应」又要排查半天）
-            logger(f"⚠️ 入站未启动：{type(exc).__name__}: {exc}")
-    if handle.mode != "none":
-        logger(f"入站已启动：{handle.describe()}")
+    worker = None
+    try:
+        if with_inbound and not dry:
+            worker = callback_jobs.Worker(news_dir, hook_set=lambda: live["cfg"].hooks, logger=logger)
+            worker.start()
+            try:
+                handle = start_inbound_for(cfg, news_dir=news_dir,
+                                           hook_set=lambda: live["cfg"].hooks, logger=logger)
+            except (ConfigError, InboundError) as exc:
+                logger(f"⚠️ 入站未启动：{type(exc).__name__}: {exc}")
+        if handle.mode != "none":
+            logger(f"入站已启动：{handle.describe()}")
 
-    logger(f"服务启动：通道={cfg.service.channel} 入站={handle.mode} tick={cfg.service.tick_seconds:g}s "
-           f"槽位={{{', '.join(f'{k}:{v}' for k, v in cfg.slots.items())}}}"
-           f"{' [dry]' if dry else ''}{' [once]' if once else ''}")
-    # 同一个应用两个 client ⇒ 飞书随机投递（聊天消息可能被本项目静默吃掉）。启动即吵。
-    conflict = shared_app_ws_conflict(cfg, news_dir=news_dir)
-    if conflict:
-        logger(f"⚠️ {conflict}")
+        logger(f"服务启动：通道={cfg.service.channel} 入站={handle.mode} tick={cfg.service.tick_seconds:g}s "
+               f"槽位={{{', '.join(f'{k}:{v}' for k, v in cfg.slots.items())}}}"
+               f"{' [dry]' if dry else ''}{' [once]' if once else ''}")
+        conflict = shared_app_ws_conflict(cfg, news_dir=news_dir)
+        if conflict:
+            logger(f"⚠️ {conflict}")
 
-    exit_code = 0
-    while not stop_event.is_set():
-        now = now_fn()
+        exit_code = 0
+        while not stop_event.is_set():
+            now = now_fn()
+            try:
+                fresh = reloader()
+            except ConfigError as exc:
+                logger(f"⚠️ 配置重载失败，沿用上一份：{exc}")
+            else:
+                if fresh is not None and fresh is not cfg:
+                    if _channel_sig(fresh) != channel_sig:
+                        # Rebuild only after configuration changes, preserving token caches otherwise.
+                        try:
+                            prepare_channel(fresh, news_dir=news_dir)
+                            channel_sig = _channel_sig(fresh)
+                            logger(f"通道已按新配置重建：{fresh.service.channel}")
+                        except (ConfigError, DeliveryError) as exc:
+                            logger(f"⚠️ 新通道配置不可用，沿用上一份：{type(exc).__name__}: {exc}")
+                            fresh = cfg
+                    cfg = fresh
+                    live["cfg"] = cfg
+            try:
+                runs = run_once(cfg, store, now=now, news_dir=news_dir, dry=dry, logger=logger)
+                report(runs, logger)
+            except NewsError as exc:
+                exit_code = 1
+                logger(f"⚠️ 本轮失败：{type(exc).__name__}: {exc}")
+            if once:
+                break
+            wait = compute_wait(cfg, now_fn(), cfg.service.tick_seconds)
+            logger(f"下一轮：{wait:.0f}s 后（{now_fn().isoformat(timespec='seconds')}）")
+            if waiter(wait):
+                break
+    finally:
         try:
-            fresh = reloader()
-        except ConfigError as exc:
-            logger(f"⚠️ 配置重载失败，沿用上一份：{exc}")
-        else:
-            if fresh is not None and fresh is not cfg:
-                if _channel_sig(fresh) != channel_sig:
-                    # 通道/凭据变了才重建（重建会丢掉 tenant_access_token 缓存，所以别每轮都建）
-                    try:
-                        prepare_channel(fresh, news_dir=news_dir)
-                        channel_sig = _channel_sig(fresh)
-                        logger(f"通道已按新配置重建：{fresh.service.channel}")
-                    except (ConfigError, DeliveryError) as exc:
-                        logger(f"⚠️ 新通道配置不可用，沿用上一份：{type(exc).__name__}: {exc}")
-                        fresh = cfg
-                cfg = fresh
-                live["cfg"] = cfg
-        try:
-            runs = run_once(cfg, store, now=now, news_dir=news_dir, dry=dry, logger=logger)
-            report(runs, logger)
-        except NewsError as exc:
-            exit_code = 1
-            logger(f"⚠️ 本轮失败：{type(exc).__name__}: {exc}")
-        if once:
-            break
-        wait = compute_wait(cfg, now_fn(), cfg.service.tick_seconds)
-        logger(f"下一轮：{wait:.0f}s 后（{now_fn().isoformat(timespec='seconds')}）")
-        if waiter(wait):
-            break
-    if handle.mode != "none":
-        handle.stop()
+            handle.stop()
+        finally:
+            if worker is not None:
+                worker.stop()
     logger("服务退出")
     return exit_code
 

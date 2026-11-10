@@ -25,6 +25,8 @@ wiki-C-compile 自动编译入库，成功后 `queue ack --note <入库路径>` 
 from __future__ import annotations
 
 import json
+import hashlib
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +38,7 @@ ACTION_TO_STATUS = {"wiki": "wiki", "dismiss": "dismissed", "open_detail": "read
 
 #: 核心动作（hook 不得覆盖；见 hooks.CORE_ACTIONS）
 CORE_ACTIONS = ("open_detail", "back_to_list", "wiki", "dismiss")
+_callback_id: ContextVar[str] = ContextVar("newspipe_callback_id", default="")
 
 
 def _log_action(batch: dict, item: dict, action: str, news_dir: Path) -> None:
@@ -73,7 +76,9 @@ def _record(news_dir: Path, event_type: str, *, batch: dict, item: dict,
         payload.update(extra)
     events.append(news_dir, event_type, payload=payload,
                   source=str(item.get("source") or ""),
-                  slot=str(batch.get("slot") or ""), digest=str(batch.get("digest") or ""))
+                  slot=str(batch.get("slot") or ""), digest=str(batch.get("digest") or ""),
+                  event_id=("ev_cb_" + hashlib.sha256(f"{_callback_id.get()}:{event_type}:{action}".encode()).hexdigest()
+                            if _callback_id.get() else ""))
 
 
 def _resolve(store: state.Store, payload: dict) -> tuple[Path, dict] | None:
@@ -104,7 +109,17 @@ def handle(payload: dict, *, news_dir: Path | None = None,
            hook_set: hooks_mod.HookSet | None = None) -> str:
     news_dir = Path(news_dir or default_news_dir())
     with state.Store(news_dir).transaction():
-        return _handle_locked(payload, news_dir=news_dir, hook_set=hook_set)
+        token = _callback_id.set(str(payload.get("_callback_id") or "") if isinstance(payload, dict) else "")
+        try:
+            return _handle_locked(payload, news_dir=news_dir, hook_set=hook_set)
+        finally:
+            _callback_id.reset(token)
+
+
+def _mark_callback(batch: dict) -> None:
+    callback_id = _callback_id.get()
+    if callback_id:
+        batch.setdefault("applied_callbacks", []).append(callback_id)
 
 
 def _handle_locked(payload: dict, *, news_dir: Path,
@@ -124,11 +139,15 @@ def _handle_locked(payload: dict, *, news_dir: Path,
     path, batch = found
     items = batch.get("items") or []
 
-    if action == "back_to_list":
+    if _callback_id.get() and _callback_id.get() in batch.get("applied_callbacks", []):
+        # Retry only the remote refresh; never undo a more recent user's action.
+        pass
+    elif action == "back_to_list":
         batch["view"] = "list"
-        store.save_batch_at(path, batch)
         _log_action(batch, {"id": "", "source": "", "title": ""}, action, news_dir)
         _record(news_dir, "clicked", batch=batch, item={}, action=action)
+        _mark_callback(batch)
+        store.save_batch_at(path, batch)
     else:
         item = next((i for i in items if i.get("id") == payload.get("id")), None)
         if item is None:
@@ -160,6 +179,7 @@ def _handle_locked(payload: dict, *, news_dir: Path,
                 # 重复点收藏：条目已是 wiki 状态，但仍然把"想入库"的意图补记一次
                 _record(news_dir, "favorite", batch=batch, item=item, action=action)
         _log_action(batch, item, action, news_dir)
+        _mark_callback(batch)
         store.save_batch_at(path, batch)
 
     card_id = batch.get("card_id")

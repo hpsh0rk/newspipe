@@ -275,6 +275,9 @@ class HttpServerTests(unittest.TestCase):
         status, body = self._post(event)
         self.assertEqual(status, 200)
         self.assertEqual(body.get("code"), 0)
+        self.assertTrue(body.get("accepted"))
+        from newspipe import callback_jobs
+        callback_jobs.drain(self.news_dir, logger=lambda message: None)
         _path, batch = state.Store(self.news_dir).load_batch_by_rel(
             f"state/batches/{DIGEST}/s-am.json")
         self.assertEqual(batch["view"], {"item": "n02"})
@@ -327,6 +330,8 @@ class WsHandlerTests(unittest.TestCase):
                                             "id": "n01", "news_action": "open_detail"}))
         self.assertIsInstance(response, WsHandlerTests._Response)
         self.assertEqual(self.state.get("handled"), 1)
+        from newspipe import callback_jobs
+        callback_jobs.drain(self.news_dir, logger=lambda message: None)
         _path, batch = state.Store(self.news_dir).load_batch_by_rel(
             f"state/batches/{DIGEST}/s-am.json")
         self.assertEqual(batch["view"], {"item": "n01"})
