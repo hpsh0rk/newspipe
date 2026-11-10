@@ -18,6 +18,8 @@ dist/
 .env.*
 *.pem
 *_secret*
+!scripts/scan_secrets.py
+!tests/test_secret_scan.py
 credentials.json
 
 # 运行时数据（配置 + 状态；不该进版本库）

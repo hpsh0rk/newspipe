@@ -83,3 +83,5 @@ Stage 4 verification: 378 offline tests passed. Callback acceptance does not cal
 Stage 5 verification: 395 offline tests passed. Every HTTP attempt is durably reserved before transport, including reasoning retries and interruptions. Cached receipts remain free at limits; concurrent calls share reservations and identical prompts share receipts. Hourly usage rolls across midnight. Input overflow degrades without truncating prompts. Restored scanner passed with zero findings and only emits locations/rules.
 
 Ruling: The scanner covers tracked and non-ignored working-tree files, not Git history or ignored local credentials. This restores the missing CI publication gate without reading the user's real credentials; historical exposures still require credential rotation.
+
+Stage 5 follow-up: The broad `*_secret*` ignore rule also excluded the scanner and its regression tests. Add exact exceptions rather than weakening credential ignores; a regression now checks that the CI gate can be published. Scanner restoration is a separate follow-up commit because the model-budget commit was already created.
