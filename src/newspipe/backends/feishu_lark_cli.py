@@ -76,11 +76,14 @@ class LarkCliChannel:
             raise DeliveryError(f"创建卡片实体未返回 card_id：{str(data)[:300]}")
         return str(card_id)
 
-    def send_card(self, chat_id: str, card_id: str) -> str:
+    def send_card(self, chat_id: str, card_id: str, *, idempotency_key: str = "") -> str:
         """按 card_id 发卡，返回 message_id。"""
         content = json.dumps({"type": "card", "data": {"card_id": card_id}}, ensure_ascii=False)
-        data = _call("im", "+messages-send", "--chat-id", chat_id,
-                     "--msg-type", "interactive", "--content", content)
+        body = {"receive_id": chat_id, "msg_type": "interactive", "content": content}
+        if idempotency_key:
+            body["uuid"] = idempotency_key
+        data = _call("api", "POST", "/open-apis/im/v1/messages?receive_id_type=chat_id",
+                     "--data", json.dumps(body, ensure_ascii=False))
         if not data.get("ok"):
             raise DeliveryError(f"发送卡片失败：{(data.get('error') or {}).get('message', str(data)[:300])}")
         message_id = (data.get("data") or {}).get("message_id")

@@ -25,7 +25,7 @@ from typing import Any, Iterable
 
 
 from newspipe.errors import ConfigError  # noqa: E402
-from newspipe._atomic import atomic_append_line, atomic_write_text, write_json_atomic  # noqa: E402
+from newspipe._atomic import atomic_append_line, atomic_write_text, file_lock, write_json_atomic  # noqa: E402
 
 try:
     from zoneinfo import ZoneInfo
@@ -63,6 +63,10 @@ class Store:
         self.root = self.news_dir / "state"
         self.llm_root = self.news_dir / "llm"
 
+    def transaction(self):
+        """One state writer at a time; remote operations still require persisted identities."""
+        return file_lock(self.root / ".writer.lock")
+
     # ── 路径 ────────────────────────────────────────────────────────────────
     def _path(self, *parts: str) -> Path:
         p = self.root.joinpath(*parts)
@@ -89,11 +93,16 @@ class Store:
         return ids
 
     def record_pushed(self, source: str, items: Iterable[dict], digest: str) -> None:
-        p = self._path("pushed", f"{source}.jsonl")
-        for it in items:
-            line = json.dumps({"ext_id": it["ext_id"], "date": digest,
-                               "title": str(it.get("title", ""))[:60]}, ensure_ascii=False)
-            atomic_append_line(p, line)
+        with self.transaction():
+            known = self.pushed_ids(source)
+            p = self._path("pushed", f"{source}.jsonl")
+            for it in items:
+                if it["ext_id"] in known:
+                    continue
+                line = json.dumps({"ext_id": it["ext_id"], "date": digest,
+                                   "title": str(it.get("title", ""))[:60]}, ensure_ascii=False)
+                atomic_append_line(p, line)
+                known.add(it["ext_id"])
 
     def pushed_by_day(self) -> dict[str, dict[str, int]]:
         """`state/pushed/<源>.jsonl` 按日期分桶：`{date: {source: n}}`。
@@ -175,6 +184,14 @@ class Store:
         data = read_json(self.batch_path(digest, source, slot))
         return data if isinstance(data, dict) else None
 
+    def unfinished_batch(self, source: str) -> dict | None:
+        for path in sorted((self.root / "batches").glob("*/*.json")):
+            batch = read_json(path)
+            if (isinstance(batch, dict) and batch.get("source") == source
+                    and batch.get("delivery_pending")):
+                return batch
+        return None
+
     def load_batch_by_rel(self, batch_rel: str) -> tuple[Path, dict] | None:
         """按批次相对路径载入（卡片回调里带的就是它）。路径必须落在 news 目录内。"""
         rel = str(batch_rel or "").strip()
@@ -229,7 +246,14 @@ class Store:
         return sum(1 for line in p.read_text(encoding="utf-8").splitlines() if line.strip())
 
     def take_pending(self, source: str, limit: int) -> list[dict]:
-        """取出最多 limit 条并原地重写剩余部分（取出即消费）。"""
+        """Legacy destructive helper; workflows use peek_pending + remove_pending instead."""
+        with self.transaction():
+            head = self.peek_pending(source, limit)
+            self.remove_pending(source, {str(it.get("ext_id")) for it in head})
+            return head
+
+    def peek_pending(self, source: str, limit: int | None = None) -> list[dict]:
+        """Read candidates without consuming them before work succeeds."""
         p = self.root / "pending" / f"{source}.jsonl"
         if not p.is_file():
             return []
@@ -238,15 +262,20 @@ class Store:
             if not line.strip():
                 continue
             try:
-                rows.append(json.loads(line))
+                row = json.loads(line)
+                if isinstance(row, dict):
+                    rows.append(row)
             except json.JSONDecodeError:
                 continue
-        head, tail = rows[:limit], rows[limit:]
-        if tail:
+        return rows if limit is None else rows[:limit]
+
+    def remove_pending(self, source: str, ids: set[str]) -> None:
+        with self.transaction():
+            p = self.root / "pending" / f"{source}.jsonl"
+            if not p.is_file():
+                return
+            tail = [it for it in self.peek_pending(source) if str(it.get("ext_id")) not in ids]
             atomic_write_text(p, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in tail))
-        else:
-            p.unlink(missing_ok=True)
-        return head
 
     # ── 打扰预算 ────────────────────────────────────────────────────────────
     def budget_state(self, date: str) -> dict:

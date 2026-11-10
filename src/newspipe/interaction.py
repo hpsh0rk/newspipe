@@ -102,6 +102,13 @@ def _run_hook(hook: hooks_mod.Hook, payload: dict, *, news_dir: Path,
 
 def handle(payload: dict, *, news_dir: Path | None = None,
            hook_set: hooks_mod.HookSet | None = None) -> str:
+    news_dir = Path(news_dir or default_news_dir())
+    with state.Store(news_dir).transaction():
+        return _handle_locked(payload, news_dir=news_dir, hook_set=hook_set)
+
+
+def _handle_locked(payload: dict, *, news_dir: Path,
+                   hook_set: hooks_mod.HookSet | None = None) -> str:
     """入口：定位批次 → 改 view/status → 记事件/跑 hook → 重渲染 → 更新卡片实体。"""
     if not isinstance(payload, dict) or payload.get("domain") != "news":
         return ""
@@ -164,13 +171,13 @@ def handle(payload: dict, *, news_dir: Path | None = None,
     except ValueError as exc:
         return f"⚠️ 卡片渲染失败：{exc}"
     seq = int(batch.get("seq") or 1) + 1
+    batch["seq"] = seq
+    store.save_batch_at(path, batch)
     try:
         if not channel.update_entity(str(card_id), seq, card):
             return "⚠️ 状态已记录，但卡片更新失败（下次交互会自愈）"
     except Exception as exc:  # 通道故障不该让回调链路崩掉
         return f"⚠️ 状态已记录，但卡片更新失败：{exc}"
-    batch["seq"] = seq
-    store.save_batch_at(path, batch)
     if action == "wiki":
         return "⭐ 已提交入库（稍后自动编译进 Wiki）"
     return ""

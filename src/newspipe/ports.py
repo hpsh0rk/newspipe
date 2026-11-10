@@ -46,7 +46,7 @@ class CardChannel(Protocol):
         """建卡片实体，返回后续发送/更新都要用的 id。"""
         ...
 
-    def send_card(self, chat_id: str, card_id: str) -> str:
+    def send_card(self, chat_id: str, card_id: str, *, idempotency_key: str = "") -> str:
         """按实体 id 发卡，返回消息 id。"""
         ...
 

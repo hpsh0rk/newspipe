@@ -15,13 +15,48 @@ import fcntl
 import json
 import os
 import stat
+import threading
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
 
 def _temp_sibling(path: Path) -> Path:
-    return path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    return path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+
+
+_locks_guard = threading.Lock()
+_locks: dict[str, threading.RLock] = {}
+_held = threading.local()
+
+
+@contextmanager
+def file_lock(path: Path) -> Iterator[None]:
+    """Serialize a complete read/modify/write workflow across threads and processes."""
+    path = Path(path).resolve()
+    key = str(path)
+    with _locks_guard:
+        lock = _locks.setdefault(key, threading.RLock())
+    with lock:
+        held = getattr(_held, "paths", None)
+        if held is None:
+            held = _held.paths = set()
+        if key in held:
+            yield
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            held.add(key)
+            try:
+                yield
+            finally:
+                held.remove(key)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 def atomic_write_bytes(
@@ -57,6 +92,11 @@ def atomic_write_bytes(
         if mode is not None:
             os.chmod(temp, mode)
         os.replace(temp, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         temp.unlink(missing_ok=True)
 

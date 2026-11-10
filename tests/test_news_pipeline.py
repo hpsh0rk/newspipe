@@ -419,7 +419,7 @@ class PipelineTests(unittest.TestCase):
         self._patches = [
             patch.object(pipeline, "_adapter", lambda name: _FakeAdapter(self.items)),
             patch.object(channel, "create_entity", lambda card: "card_1"),
-            patch.object(channel, "send_card", lambda chat, cid: (self.sent.append(
+            patch.object(channel, "send_card", lambda chat, cid, **kwargs: (self.sent.append(
                 {"chat": chat, "card_id": cid}) or "om_1")),
             patch.object(channel, "update_entity", lambda cid, seq, card: (
                 self.updated.append(seq) or True)),

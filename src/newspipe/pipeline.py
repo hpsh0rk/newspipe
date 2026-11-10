@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -147,8 +148,8 @@ def _prepare_batch(cfg: Any, store: state.Store, scfg: Any, digest: str, slot: s
     返回 `(batch, is_append, excess)`：`excess` 是**装不下**的条目（已投递的前 cap 条必须留在
     卡上，多出来的顺延下一批）。不返回它们就会把批次撑到元素上限之外，整张卡被飞书拒收。
     """
-    existing = store.read_batch(digest, scfg.name, slot)
-    is_append = bool(existing and existing.get("card_id"))
+    existing = store.unfinished_batch(scfg.name) or store.read_batch(digest, scfg.name, slot)
+    is_append = bool(existing and existing.get("message_id"))
     if existing:
         batch = dict(existing)
     else:
@@ -157,7 +158,7 @@ def _prepare_batch(cfg: Any, store: state.Store, scfg: Any, digest: str, slot: s
                  "created_at": now_iso(), "card_id": None, "message_id": None, "seq": 0,
                  "view": "list", "items": [], "archived": [], "overflow": 0}
     # 回调 payload 里要带批次路径，而卡片是 write_batch 之前渲染的 ⇒ 这里先钉死
-    batch["batch"] = store.batch_rel(digest, scfg.name, slot)
+    batch["batch"] = store.batch_rel(batch["digest"], scfg.name, batch["slot"])
     merged = list(batch.get("items") or [])
     known = {str(i.get("ext_id") or "") for i in merged}
     for it in items:
@@ -212,6 +213,16 @@ def _enrich_new(cfg: Any, store: state.Store, scfg: Any, items: list[dict],
 # ── 主流程 ────────────────────────────────────────────────────────────────────
 def _process(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slot: str,
              dry: bool, now: datetime, mode: str, force: bool = False) -> SourceRun:
+    if dry:
+        return _process_locked(cfg, store, scfg, digest=digest, slot=slot, dry=dry,
+                               now=now, mode=mode, force=force)
+    with store.transaction():
+        return _process_locked(cfg, store, scfg, digest=digest, slot=slot, dry=dry,
+                               now=now, mode=mode, force=force)
+
+
+def _process_locked(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slot: str,
+                    dry: bool, now: datetime, mode: str, force: bool = False) -> SourceRun:
     run = SourceRun(source=scfg.name, adapter=scfg.adapter)
     since = store.cursor(scfg.name) if mode == "poll" else None
     if mode == "poll" and since is None and not force and not dry:
@@ -238,10 +249,13 @@ def _process(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slot: str,
     kept = filter_mod.apply(raw, scfg)
     run.kept = len(kept)
     fresh = dedup.fresh(kept, store, scfg.name)
+    unfinished = None if dry else store.unfinished_batch(scfg.name)
+    if unfinished:
+        fresh = _merge(list(unfinished.get("items") or []), fresh)
     run.new = len(fresh)
 
     cap = delivery.card_cap(scfg)
-    pending = [] if dry else store.take_pending(scfg.name, max(cap, 1) * 2)
+    pending = [] if dry else dedup.fresh(store.peek_pending(scfg.name, max(cap, 1) * 2), store, scfg.name)
     candidates = _merge(pending, fresh)
     plan = delivery.plan(candidates, scfg, store, digest=digest, slot=slot, now=now)
     run.planned, run.queued = len(plan.items), len(plan.queued)
@@ -252,7 +266,8 @@ def _process(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slot: str,
         return run
 
     if plan.reason != "ok":
-        queued = _queue(store, scfg.name, plan.queued)
+        _queue(store, scfg.name, candidates)
+        queued = store.pending_count(scfg.name)
         run.status, run.queued = plan.reason, queued
         store.heartbeat(scfg.name, status=plan.reason, digest=digest, fetched=run.fetched,
                         kept=run.kept, new=run.new, queued=queued)
@@ -260,9 +275,10 @@ def _process(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slot: str,
             store.set_cursor(scfg.name, _watermark(since, kept, raw, now))
         return run
 
-    plan.items, run.enrich = _enrich_new(cfg, store, scfg, plan.items, now)
-
+    # Persist every candidate first, and enrich only the final display set after merging.
+    _queue(store, scfg.name, candidates)
     batch, is_append, excess = _prepare_batch(cfg, store, scfg, digest, slot, plan.items, cap)
+    batch["items"], run.enrich = _enrich_new(cfg, store, scfg, batch["items"], now)
     batch["overflow"] = max(int(batch.get("overflow") or 0), plan.overflow, len(excess))
 
     if not scfg.sends_card:
@@ -271,7 +287,8 @@ def _process(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slot: str,
         # 痛点提炼 job 天天读到空原料，且心跳显示"故障"，看起来像采集坏了）。
         store.write_batch(batch)
         store.record_pushed(scfg.name, batch["items"], digest)
-        run.queued = _queue(store, scfg.name, [*plan.overflow_items, *excess])
+        store.remove_pending(scfg.name, store.pushed_ids(scfg.name))
+        run.queued = store.pending_count(scfg.name)
         run.status, run.card = "state_only", "none"
         store.heartbeat(scfg.name, status="ok", digest=digest, fetched=run.fetched, kept=run.kept,
                         new=run.new, planned=run.planned, queued=run.queued, card="none",
@@ -293,20 +310,37 @@ def _process(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slot: str,
         return run
 
     try:
+        batch["delivery_pending"] = True
         if is_append and batch.get("card_id"):
             seq = int(batch.get("seq") or 1) + 1
+            # Reserve the sequence durably: a lost response cannot make us reuse it.
+            batch["seq"] = seq
+            store.write_batch(batch)
             if not channel.update_entity(str(batch["card_id"]), seq, card):
                 raise DeliveryError("卡片实体更新返回失败")
-            batch["seq"] = seq
             run.card = "updated"
         else:
-            card_id = channel.create_entity(card)
-            batch["card_id"] = card_id
-            batch["message_id"] = channel.send_card(cfg.chat, card_id)
-            batch["seq"] = 1
+            if not batch.get("card_id"):
+                batch["card_id"] = channel.create_entity(card)
+                batch["seq"] = 1
+            else:
+                batch["seq"] = int(batch.get("seq") or 1) + 1
+                store.write_batch(batch)
+                if not channel.update_entity(str(batch["card_id"]), batch["seq"], card):
+                    raise DeliveryError("未发送卡片实体更新返回失败")
+            batch.setdefault("send_uuid", str(uuid.uuid4()))
+            started = batch.get("send_started_at")
+            if started and now.timestamp() - datetime.fromisoformat(started).timestamp() >= 3600:
+                raise DeliveryError("发送结果未确认且已超过平台幂等窗口；请核对消息并修复批次回执，禁止自动重发")
+            batch.setdefault("send_started_at", now.isoformat())
+            store.write_batch(batch)
+            batch["message_id"] = channel.send_card(cfg.chat, str(batch["card_id"]),
+                                                    idempotency_key=batch["send_uuid"])
             run.card = "sent"
+        store.write_batch(batch)
     except Exception as exc:
-        queued = _queue(store, scfg.name, batch["items"])
+        _queue(store, scfg.name, batch["items"])
+        queued = store.pending_count(scfg.name)
         run.status, run.note, run.queued = "send_failed", f"{type(exc).__name__}: {exc}"[:200], queued
         store.heartbeat(scfg.name, status="send_failed", digest=digest, note=run.note, queued=queued)
         _record_event(store, "failed", payload={"status": "send_failed", "error": run.note,
@@ -314,10 +348,12 @@ def _process(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slot: str,
                       source=scfg.name, slot=slot, digest=digest, now=now)
         return run
 
-    store.write_batch(batch)
     # 语义 = "已投递"：只记真正上了卡的那些（batch["items"]），装不下顺延的不算已投递
-    store.record_pushed(scfg.name, batch["items"], digest)
-    run.queued = _queue(store, scfg.name, [*plan.overflow_items, *excess])
+    store.record_pushed(scfg.name, batch["items"], batch["digest"])
+    store.remove_pending(scfg.name, store.pushed_ids(scfg.name))
+    batch["delivery_pending"] = False
+    store.write_batch(batch)
+    run.queued = store.pending_count(scfg.name)
     store.note_card(digest, at=now)
     run.status = "ok"
     _record_event(store, "delivered",

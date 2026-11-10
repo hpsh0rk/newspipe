@@ -18,8 +18,10 @@ def create_entity(card: dict) -> str:
     return get_channel().create_entity(card)
 
 
-def send_card(chat_id: str, card_id: str) -> str:
+def send_card(chat_id: str, card_id: str, *, idempotency_key: str = "") -> str:
     """按 card_id 发卡，返回 message_id。"""
+    if idempotency_key:
+        return get_channel().send_card(chat_id, card_id, idempotency_key=idempotency_key)
     return get_channel().send_card(chat_id, card_id)
 
 
