@@ -354,7 +354,7 @@ class ServiceConfigTests(unittest.TestCase):
     def test_missing_file_means_defaults(self) -> None:
         with TemporaryDirectory() as tmp:
             cfg = config.load_service(Path(tmp))
-            self.assertEqual(cfg.channel, "feishu_lark_cli")
+            self.assertEqual(cfg.channel, "feishu_direct")
             self.assertEqual(cfg.inbound_mode, "none")
             self.assertEqual(cfg.tick_seconds, 300)
 
@@ -398,7 +398,7 @@ class ServiceConfigTests(unittest.TestCase):
                 {"chat": "oc_x", "slots": {"am": "08:15"},
                  "sources": {"s": {"adapter": "aihot", "fetch": {"trigger": "slot", "slots": ["am"]}}}},
                 allow_unicode=True), encoding="utf-8")
-            self.assertEqual(config.load(news).service.channel, "feishu_lark_cli")
+            self.assertEqual(config.load(news).service.channel, "feishu_direct")
             (news / "service.yaml").write_text("channel: feishu_direct\n", encoding="utf-8")
             self.assertEqual(config.load(news).service.channel, "feishu_direct")
 
@@ -411,7 +411,7 @@ class ChannelWiringTests(unittest.TestCase):
     def test_default_channel_name_installed(self) -> None:
         with TemporaryDirectory() as tmp:
             service.prepare_channel(_cfg(), news_dir=Path(tmp))
-            self.assertIsInstance(backends.get_channel(), backends.LarkCliChannel)
+            self.assertIsInstance(backends.get_channel(), backends.FeishuDirectChannel)
 
     def test_direct_channel_installed_when_configured(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -435,10 +435,10 @@ class DescribeServiceTests(unittest.TestCase):
     def test_shape_for_default_config(self) -> None:
         with TemporaryDirectory() as tmp:
             info = service.describe_service(_cfg(), news_dir=Path(tmp))
-            self.assertEqual(info["channel"], "feishu_lark_cli")
+            self.assertEqual(info["channel"], "feishu_direct")
             self.assertEqual(info["inbound_mode"], "none")
             self.assertEqual(info["slots"], SLOTS)
-            self.assertNotIn("channel_detail", info)
+            self.assertIn("channel_detail", info)
 
     def test_direct_channel_reports_creds_without_secrets(self) -> None:
         secret = "SUPER-SECRET-VALUE-42"

@@ -29,13 +29,6 @@ from pathlib import Path
 from newspipe import hostenv
 from newspipe.errors import DeliveryError
 
-_extra = ["/opt/homebrew/bin", "/usr/local/bin", str(Path.home() / ".local/bin")]
-_p = os.environ.get("PATH", "").split(":")
-os.environ["PATH"] = ":".join(_p + [x for x in _extra if x not in _p])
-# 补上外部 CLI 需要的宿主目录（没配宿主就不猜，让它用自己的默认）
-hostenv.export_host_home_for_child()
-
-
 def _lark_cli() -> str:
     found = shutil.which("lark-cli")
     if found:
@@ -48,7 +41,14 @@ def _lark_cli() -> str:
 
 
 def _call(*args: str, timeout: int = 60) -> dict:
-    proc = subprocess.run([_lark_cli(), *args], capture_output=True, text=True, timeout=timeout)
+    env = dict(os.environ)
+    extra = ["/opt/homebrew/bin", "/usr/local/bin", str(Path.home() / ".local/bin")]
+    parts = env.get("PATH", "").split(":")
+    env["PATH"] = ":".join(parts + [x for x in extra if x not in parts])
+    home = hostenv.host_home()
+    if home is not None:
+        env.setdefault(env.get("NEWSPIPE_CLI_HOME_ENV") or "HERMES_HOME", str(home))
+    proc = subprocess.run([_lark_cli(), *args], capture_output=True, text=True, timeout=timeout, env=env)
     raw = proc.stdout or proc.stderr or ""
     try:
         data = json.loads(raw)

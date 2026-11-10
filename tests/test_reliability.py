@@ -15,8 +15,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from newspipe import channel, cli, events, interaction, pipeline, state
-from test_news_pipeline import _item, _src
+from newspipe import backends, channel, cli, config, edit, events, interaction, pipeline, service, state
+from test_news_pipeline import _item, _src, _write_registry
 
 NOW = datetime(2026, 11, 10, 10)
 
@@ -157,6 +157,74 @@ class FavoriteContractTests(unittest.TestCase):
             result = cli.run_subcommand(["queue", "ack", favorite["id"], "--note", "wiki/page", "--json"], news)
             self.assertTrue(result.ok)
             self.assertEqual(events.queue(news), [])
+
+
+class RuntimeAssemblyTests(unittest.TestCase):
+    def tearDown(self):
+        backends.set_channel(None)
+        backends.set_default_channel_name(None)
+
+    def test_switching_channel_clears_previous_override(self):
+        with TemporaryDirectory() as tmp:
+            news = Path(tmp)
+            direct = cfg_for(_src())
+            direct.service = config.ServiceCfg(channel="feishu_direct")
+            delegated = cfg_for(_src())
+            delegated.service = config.ServiceCfg(channel="feishu_lark_cli")
+            service.prepare_channel(direct, news_dir=news)
+            service.prepare_channel(delegated, news_dir=news)
+            self.assertIsInstance(backends.get_channel(), backends.LarkCliChannel)
+
+    def test_cli_pipeline_uses_configured_channel_not_environment(self):
+        with TemporaryDirectory() as tmp:
+            news = Path(tmp)
+            cfg = cfg_for(_src())
+            cfg.service = config.ServiceCfg(channel="feishu_lark_cli")
+            selected = []
+
+            def make(name, **kwargs):
+                selected.append(name)
+                return SimpleNamespace(create_entity=lambda card: "card", send_card=lambda *a, **k: "message")
+
+            with patch.object(cli, "_load", return_value=(cfg, state.Store(news))), patch.object(pipeline, "_adapter", return_value=SimpleNamespace(fetch=lambda *a, **k: [_item(1)])), patch.object(backends, "make_channel", side_effect=make), patch.dict("os.environ", {"NEWSPIPE_CHANNEL": "feishu_direct"}):
+                result = cli.run_subcommand(["run", "--slot", "am", "--json"], news)
+            self.assertTrue(result.ok)
+            self.assertEqual(selected, ["feishu_lark_cli"])
+
+    def test_default_service_is_standalone(self):
+        self.assertEqual(config.ServiceCfg().channel, "feishu_direct")
+
+    def test_scoped_channels_are_isolated_between_threads(self):
+        from newspipe import runtime
+        with TemporaryDirectory() as tmp:
+            start = threading.Barrier(2)
+            def run(name):
+                cfg = cfg_for(_src())
+                cfg.service = config.ServiceCfg(channel=name)
+                with runtime.activate(cfg, Path(tmp)):
+                    start.wait(timeout=5)
+                    return backends.get_channel().name
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                self.assertEqual(list(pool.map(run, ("feishu_direct", "feishu_lark_cli"))),
+                                 ["feishu_direct", "feishu_lark_cli"])
+
+    def test_concurrent_config_edits_reject_stale_base_hash(self):
+        with TemporaryDirectory() as tmp:
+            news = _write_registry(Path(tmp), {name: {"adapter": "aihot", "fetch": {"trigger": "slot", "slots": ["am"]}} for name in ("first", "second")})
+            base = edit.file_hash(news / "sources.yaml")
+            start = threading.Barrier(2)
+            actual_apply = edit._apply
+            def apply(*args, **kwargs):
+                time.sleep(0.02)
+                return actual_apply(*args, **kwargs)
+            def change(name):
+                start.wait(timeout=5)
+                return edit.set_source_enabled(news, name, False, base_hash=base)
+            with patch.object(edit, "_apply", side_effect=apply):
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    results = list(pool.map(change, ("first", "second")))
+            self.assertEqual(sum(bool(r.get("ok")) for r in results), 1)
+            self.assertEqual(sum(r.get("code") == "E_CONFLICT" for r in results), 1)
 
     def test_invalid_bulk_ack_writes_nothing(self):
         with TemporaryDirectory() as tmp:

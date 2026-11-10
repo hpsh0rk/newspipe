@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 from newspipe.backends.model_ref import ModelRef
@@ -38,6 +40,16 @@ _channel_override: Any = None
 _default_channel_name: str = ""
 _resolver_cache: dict[str, Any] = {}
 _channel_cache: dict[str, Any] = {}
+_active_channel: ContextVar[Any] = ContextVar("newspipe_channel", default=None)
+
+
+@contextmanager
+def use_channel(channel: Any):
+    token = _active_channel.set(channel)
+    try:
+        yield
+    finally:
+        _active_channel.reset(token)
 
 
 def available_channels() -> list[str]:
@@ -75,6 +87,9 @@ def make_channel(name: str, **kwargs: Any) -> Any:
 
 
 def get_channel() -> Any:
+    active = _active_channel.get()
+    if active is not None:
+        return active
     if _channel_override is not None:
         return _channel_override
     name = str(_default_channel_name or os.environ.get("NEWSPIPE_CHANNEL") or "feishu_direct")

@@ -20,13 +20,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from newspipe import config as config_mod
-from newspipe import _atomic, yamlblocks
+from newspipe import _atomic, state, yamlblocks
 from newspipe.errors import ConfigError
 
 
@@ -49,6 +50,16 @@ def _sources_path(news_dir: Path) -> Path:
 
 def _hooks_path(news_dir: Path) -> Path:
     return Path(news_dir) / "hooks.yaml"
+
+
+def _serialized(fn):
+    @wraps(fn)
+    def write(news_dir, *args, **kwargs):
+        if kwargs.get("dry_run"):
+            return fn(news_dir, *args, **kwargs)
+        with state.Store(news_dir).transaction():
+            return fn(news_dir, *args, **kwargs)
+    return write
 
 
 def _check_base_hash(path: Path, base_hash: str | None) -> dict[str, Any] | None:
@@ -86,6 +97,7 @@ def _apply(news_dir: Path, path: Path, candidate: str, *, dry_run: bool,
 
 
 # ------------------------------------------------------------------ sources
+@_serialized
 def set_source(news_dir: Path, name: str, body: dict[str, Any], *,
                base_hash: str | None = None, dry_run: bool = False) -> dict[str, Any]:
     """新增或整体替换一个信源。`body` 就是该源在 `sources.yaml` 里的那段映射。"""
@@ -117,6 +129,7 @@ def set_source(news_dir: Path, name: str, body: dict[str, Any], *,
     return result
 
 
+@_serialized
 def remove_source(news_dir: Path, name: str, *, base_hash: str | None = None,
                   dry_run: bool = False) -> dict[str, Any]:
     path = _sources_path(news_dir)
@@ -136,6 +149,7 @@ def remove_source(news_dir: Path, name: str, *, base_hash: str | None = None,
     return result
 
 
+@_serialized
 def set_source_enabled(news_dir: Path, name: str, enabled: bool, *,
                        base_hash: str | None = None, dry_run: bool = False) -> dict[str, Any]:
     """只翻 `enabled`，其余字段原样保留（比整体替换安全）。"""
@@ -157,6 +171,7 @@ def set_source_enabled(news_dir: Path, name: str, enabled: bool, *,
 
 
 # -------------------------------------------------------------------- hooks
+@_serialized
 def set_hook(news_dir: Path, hook: dict[str, Any], *, base_hash: str | None = None,
              dry_run: bool = False) -> dict[str, Any]:
     """新增或替换一个 hook 声明（按 id）。"""
@@ -194,6 +209,7 @@ def set_hook(news_dir: Path, hook: dict[str, Any], *, base_hash: str | None = No
     return result
 
 
+@_serialized
 def remove_hook(news_dir: Path, hook_id: str, *, base_hash: str | None = None,
                 dry_run: bool = False) -> dict[str, Any]:
     path = _hooks_path(news_dir)

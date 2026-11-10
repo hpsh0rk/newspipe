@@ -23,7 +23,7 @@ from datetime import datetime
 from typing import Any
 
 from newspipe import channel, dedup, delivery, enrich as enrich_mod, filter as filter_mod
-from newspipe import events, render, scheduler, state
+from newspipe import events, render, runtime, scheduler, state
 from newspipe.errors import ConfigError, DeliveryError
 from newspipe.state import now_iso, today
 
@@ -379,6 +379,7 @@ def _advance(store: state.Store, scfg: Any, mode: str, since: float | None,
         store.set_cursor(scfg.name, _watermark(since, kept, raw, now), at=now)
 
 
+@runtime.scoped
 def run_slot(cfg: Any, store: state.Store, slot: str, *, dry: bool = False,
              only: str | None = None, now: datetime | None = None) -> list[SourceRun]:
     now = now or datetime.now()
@@ -395,6 +396,7 @@ def run_slot(cfg: Any, store: state.Store, slot: str, *, dry: bool = False,
     return out
 
 
+@runtime.scoped
 def run_poll(cfg: Any, store: state.Store, *, dry: bool = False, only: str | None = None,
              force: bool = False, now: datetime | None = None) -> list[SourceRun]:
     now = now or datetime.now()
@@ -412,6 +414,7 @@ def run_poll(cfg: Any, store: state.Store, *, dry: bool = False, only: str | Non
     return out
 
 
+@runtime.scoped
 def run_source(cfg: Any, store: state.Store, name: str, *, slot: str | None = None,
                dry: bool = False, force: bool = True, now: datetime | None = None) -> list[SourceRun]:
     """手工调试单源：按该源的 trigger 走对应分支（poll 源 force 跳过节流）。"""

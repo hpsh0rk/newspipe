@@ -48,9 +48,9 @@ Files: events.py, cli.py, actions.py, view.py, docs and regression tests.
 
 Files: runtime.py, backends/__init__.py, config.py, cli.py, service.py, regression tests.
 
-- [ ] Add failing tests for CLI/service channel agreement and hot switching without stale overrides.
-- [ ] Centralize runtime channel assembly, remove import-time environment mutation, and default to the standalone direct channel.
-- [ ] Apply runtime changes only after successful construction; run the full suite and commit.
+- [x] Add failing tests for CLI/service channel agreement and hot switching without stale overrides.
+- [x] Centralize runtime channel assembly, remove import-time environment mutation, and default to the standalone direct channel.
+- [x] Apply runtime changes only after successful construction; run the full suite and commit.
 
 ## Stage 4: Bounded Callback Acceptance
 
@@ -75,3 +75,5 @@ Ruling: Keep JSONL compatibility rather than introduce a SQLite migration in a b
 Stage 1 verification: 361 offline tests passed. Doctor projected 187/200 elements for 13 items. Unfinished delivery identities survive across dates; unknown send results beyond the one-hour message idempotency window stop automatic re-sending for reconciliation.
 
 Stage 2 verification: 365 offline tests passed. Queue reads and acknowledgements cover retained history; pruning protects all unconsumed event day files. Generic event ack cannot consume favorites and invalid bulk requests write nothing.
+
+Stage 3 verification: 370 offline tests passed. Runtime channel scopes are thread-local and shared across CLI/pipeline entrypoints. Hot switching clears the prior service channel, and optimistic configuration edits serialize hash checks with writes.

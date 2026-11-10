@@ -25,10 +25,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
-from newspipe import (backends, config, credentials, hostenv, inbound as inbound_mod, pipeline,
+from newspipe import (backends, config, credentials, hostenv, inbound as inbound_mod, pipeline, runtime,
                       state)
 from newspipe._atomic import write_json_atomic
-from newspipe.errors import ConfigError, InboundError, NewsError
+from newspipe.errors import ConfigError, DeliveryError, InboundError, NewsError
 
 # 槽位到点后多久内仍算「该跑」：进程在 08:15 没起、08:20 起了 → 补跑；
 # 09:30 才起 → 不补（补发一份早间简报比不发更烦人，只在日志里说明错过）。
@@ -159,10 +159,9 @@ def report(runs: list[pipeline.SourceRun], logger: Callable[[str], None]) -> Non
 # ------------------------------------------------------------------ 主循环
 def prepare_channel(cfg: config.Config, *, news_dir: Path) -> None:
     """把 `service.yaml: channel` 装到后端注册表上（默认仍是 lark-cli）。"""
+    channel = runtime.channel_for(cfg, news_dir)
     backends.set_default_channel_name(cfg.service.channel)
-    if cfg.service.channel == "feishu_direct":
-        backends.set_channel(backends.make_channel(
-            "feishu_direct", service_cfg=cfg.service.feishu, news_dir=news_dir))
+    backends.set_channel(channel)
 
 
 def make_logger(cfg: config.Config) -> Callable[[str], None]:
@@ -295,16 +294,17 @@ def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None
             logger(f"⚠️ 配置重载失败，沿用上一份：{exc}")
         else:
             if fresh is not None and fresh is not cfg:
-                cfg = fresh
-                live["cfg"] = cfg
-                if _channel_sig(cfg) != channel_sig:
+                if _channel_sig(fresh) != channel_sig:
                     # 通道/凭据变了才重建（重建会丢掉 tenant_access_token 缓存，所以别每轮都建）
                     try:
-                        prepare_channel(cfg, news_dir=news_dir)
-                        channel_sig = _channel_sig(cfg)
-                        logger(f"通道已按新配置重建：{cfg.service.channel}")
+                        prepare_channel(fresh, news_dir=news_dir)
+                        channel_sig = _channel_sig(fresh)
+                        logger(f"通道已按新配置重建：{fresh.service.channel}")
                     except (ConfigError, DeliveryError) as exc:
                         logger(f"⚠️ 新通道配置不可用，沿用上一份：{type(exc).__name__}: {exc}")
+                        fresh = cfg
+                cfg = fresh
+                live["cfg"] = cfg
         try:
             runs = run_once(cfg, store, now=now, news_dir=news_dir, dry=dry, logger=logger)
             report(runs, logger)

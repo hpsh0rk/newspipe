@@ -279,7 +279,7 @@ class ServiceCfg:
     默认 `channel=feishu_direct`、`inbound.mode=none`，所以只跑单次命令的用法一行配置都不用改。
     """
 
-    channel: str = "feishu_lark_cli"
+    channel: str = "feishu_direct"
     feishu: dict[str, Any] = field(default_factory=dict)
     inbound: dict[str, Any] = field(default_factory=dict)
     schedule: dict[str, Any] = field(default_factory=dict)
@@ -461,7 +461,7 @@ def load_service(news_dir: Path) -> ServiceCfg:
         raise ConfigError(f"{path} 解析失败：{exc}") from exc
     if not isinstance(raw, dict):
         raise ConfigError(f"{path}: 顶层需要映射")
-    channel = str(raw.get("channel") or "feishu_lark_cli")
+    channel = str(raw.get("channel") or "feishu_direct")
     if channel not in CHANNELS:
         raise ConfigError(f"{path}: channel={channel!r} 未知，可用：{', '.join(CHANNELS)}")
     inbound = raw.get("inbound") or {}

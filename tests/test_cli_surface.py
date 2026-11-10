@@ -14,6 +14,7 @@ import io
 import json
 import sys
 import unittest
+from unittest.mock import patch
 from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -101,7 +102,9 @@ class SubcommandSurfaceTests(unittest.TestCase):
         self.assertIn("newspipe", payload["error"]["hint"])
 
     def test_doctor_is_green_on_a_healthy_registry(self) -> None:
-        code, payload = self._cli("doctor")
+        with patch.dict("os.environ", {"NEWSPIPE_FEISHU_APP_ID": "cli_test",
+                                       "NEWSPIPE_FEISHU_APP_SECRET": "test-only"}):
+            code, payload = self._cli("doctor")
         self.assertEqual(code, 0, payload)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["data"]["sources"]["total"], 2)

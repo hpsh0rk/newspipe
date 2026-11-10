@@ -678,10 +678,11 @@ def _sub_migrate(args: argparse.Namespace, news_dir: Path) -> result.Result:
 
 def _sub_card(args: argparse.Namespace, news_dir: Path) -> result.Result:
     """插件薄壳走的入口（旧 flag `--card` 的等价子命令）。"""
-    from newspipe import interaction
+    from newspipe import interaction, runtime
 
     cfg, _store = _load(news_dir)
-    message = interaction.handle_json(args.payload, news_dir=news_dir, hook_set=cfg.hooks)
+    with runtime.activate(cfg, news_dir):
+        message = interaction.handle_json(args.payload, news_dir=news_dir, hook_set=cfg.hooks)
     return result.ok("card", {"message": message}, changed=bool(message))
 
 
