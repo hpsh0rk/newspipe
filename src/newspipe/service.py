@@ -22,18 +22,24 @@ from __future__ import annotations
 import json
 import os
 import threading
+import hashlib
+from contextlib import nullcontext
+from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
 from newspipe import (backends, callback_jobs, config, credentials, hostenv, inbound as inbound_mod, pipeline, runtime,
                       state)
-from newspipe._atomic import write_json_atomic
+from newspipe._atomic import file_lock, write_json_atomic
 from newspipe.errors import ConfigError, DeliveryError, InboundError, NewsError
 
 # 槽位到点后多久内仍算「该跑」：进程在 08:15 没起、08:20 起了 → 补跑；
 # 09:30 才起 → 不补（补发一份早间简报比不发更烦人，只在日志里说明错过）。
 SLOT_TOLERANCE = timedelta(minutes=15)
+SLOT_MAX_ATTEMPTS = 3
+SLOT_RETRY_SECONDS = 60
+SLOT_FAILURES = {"error", "config_missing", "send_failed", "overflow"}
 
 
 def parse_slot_time(text: str) -> tuple[int, int]:
@@ -106,17 +112,27 @@ def load_runs(news_dir: Path) -> dict[str, Any]:
 
 
 def mark_slot(news_dir: Path, slot: str, now: datetime) -> dict[str, Any]:
+    with file_lock(runs_path(news_dir).with_suffix(".lock")):
+        return _mark_slot(news_dir, slot, now)
+
+
+def _save_runs(news_dir: Path, data: dict[str, Any]) -> None:
+    for field in ("slots", "slot_progress"):
+        days = data.get(field) or {}
+        for key in sorted(days)[:-14]:
+            days.pop(key, None)
+    write_json_atomic(runs_path(news_dir), data)
+
+
+def _mark_slot(news_dir: Path, slot: str, now: datetime) -> dict[str, Any]:
     data = load_runs(news_dir)
     slots = data.setdefault("slots", {})
     today = now.date().isoformat()
     entries = slots.setdefault(today, [])
     if slot not in entries:
         entries.append(slot)
-    # 只留最近 14 天，别让这个文件无限长
-    for key in sorted(slots)[:-14]:
-        slots.pop(key, None)
     data["last_run_at"] = now.isoformat(timespec="seconds")
-    write_json_atomic(runs_path(news_dir), data)
+    _save_runs(news_dir, data)
     return data
 
 
@@ -126,18 +142,56 @@ def run_once(cfg: config.Config, store: state.Store, *, now: datetime,
              logger: Callable[[str], None] = print) -> list[pipeline.SourceRun]:
     """跑一轮：所有到期的槽位 + 一次轮询检查。返回所有 SourceRun。"""
     news_dir = Path(news_dir or store.news_dir)
+    # Serialize the scheduling decision as well as its per-source receipts.
+    with nullcontext() if dry else file_lock(runs_path(news_dir).with_suffix(".lock")):
+        return _run_once(cfg, store, now=now, news_dir=news_dir, dry=dry, logger=logger)
+
+
+def _run_once(cfg: config.Config, store: state.Store, *, now: datetime,
+              news_dir: Path, dry: bool, logger: Callable[[str], None]) -> list[pipeline.SourceRun]:
     last_runs = load_runs(news_dir)
     runs: list[pipeline.SourceRun] = []
 
     for slot in due_slots(cfg, now, last_runs):
         logger(f"调度：槽位 {slot}（{cfg.slots[slot]}）到期，开始")
-        try:
-            runs.extend(pipeline.run_slot(cfg, store, slot, dry=dry, now=now))
-        except NewsError as exc:
-            logger(f"调度：槽位 {slot} 失败（{type(exc).__name__}: {exc}）")
-        finally:
+        progress = last_runs.setdefault("slot_progress", {}).setdefault(now.date().isoformat(), {}).setdefault(slot, {})
+        sources = cfg.slot_sources(slot)
+        # Empty slots still go through the pipeline's normal empty-run contract.
+        targets = [(s.name, s) for s in sources] or [("__slot__", None)]
+        for name, source in targets:
+            signature = hashlib.sha256(json.dumps(
+                {"source": asdict(source) if source is not None else None,
+                 "chat": cfg.chat, "channel": _channel_sig(cfg)}, sort_keys=True).encode()).hexdigest()
+            entry = progress.get(name) or {}
+            if entry.get("complete"):
+                continue
+            if entry.get("signature") != signature:
+                entry = progress[name] = {"attempts": 0, "signature": signature}
+            if not dry and (entry.get("status") == "config_missing" or
+                            int(entry.get("attempts") or 0) >= SLOT_MAX_ATTEMPTS or
+                            float(entry.get("retry_after") or 0) > now.timestamp()):
+                continue
             if not dry:
-                mark_slot(news_dir, slot, now)
+                entry.update(attempts=int(entry.get("attempts") or 0) + 1, status="running",
+                             retry_after=now.timestamp() + SLOT_RETRY_SECONDS,
+                             attempted_at=now.isoformat(timespec="seconds"))
+                _save_runs(news_dir, last_runs)
+            try:
+                output = pipeline.run_slot(cfg, store, slot, only=source.name if source else None,
+                                           dry=dry, now=now)
+            except NewsError as exc:
+                logger(f"调度：槽位 {slot} 信源 {name} 失败（{type(exc).__name__}: {exc}）")
+                output = [pipeline.SourceRun(source=name, status="error", note=str(exc)[:200])]
+            runs.extend(output)
+            if not dry:
+                statuses = [run.status for run in output]
+                complete = bool(output or source is None) and not any(s in SLOT_FAILURES for s in statuses)
+                entry.update(complete=complete, status=next((s for s in statuses if s in SLOT_FAILURES),
+                                                           "ok" if complete else "error"))
+                last_runs["last_run_at"] = now.isoformat(timespec="seconds")
+                _save_runs(news_dir, last_runs)
+        if not dry and all(progress.get(name, {}).get("complete") for name, _ in targets):
+            last_runs = mark_slot(news_dir, slot, now)
 
     for slot in missed_slots(cfg, now, last_runs):
         logger(f"调度：槽位 {slot}（{cfg.slots[slot]}）已错过容差窗口，跳过（不补发）")

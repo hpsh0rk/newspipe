@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import sys
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -203,7 +204,71 @@ class RunOnceTests(unittest.TestCase):
             service.run_once(cfg, self.store, now=datetime(2026, 10, 3, 8, 16),
                              news_dir=self.news_dir, logger=self._log)
         self.assertTrue(any("失败" in line for line in self.logs))
-        # 失败也要标记，否则下一轮会反复重试同一个坏槽位
+        self.assertNotIn("am", service.load_runs(self.news_dir).get("slots", {}).get("2026-10-03", []))
+
+    def test_failed_slot_retries_with_a_limit_and_no_success_marker(self) -> None:
+        with mock.patch.object(pipeline, "run_slot", side_effect=NewsError("temporary")) as run, \
+             mock.patch.object(config.Config, "poll_sources", return_value=[]):
+            for minute in (16, 16, 17, 18, 19, 31):
+                service.run_once(_cfg(), self.store, now=datetime(2026, 10, 3, 8, minute),
+                                 logger=self._log)
+        self.assertEqual(run.call_count, 3)
+        self.assertNotIn("am", service.load_runs(self.news_dir).get("slots", {}).get("2026-10-03", []))
+
+    def test_partial_slot_retries_only_failed_source_after_restart(self) -> None:
+        cfg = _cfg(sources={name: config.SourceConfig(name=name, adapter="aihot", enabled=True,
+                   tier="T2", first_party=False, filter=config.FilterCfg(),
+                   enrich=config.EnrichCfg(), deliver=config.DeliverCfg(),
+                   fetch=config.FetchCfg(trigger="slot", slots=["am"])) for name in ("good", "bad")})
+        calls = []
+
+        def run(_cfg, _store, slot, *, only=None, **kw):
+            calls.append(only)
+            return [pipeline.SourceRun(source=only, status="send_failed" if calls.count(only) == 1
+                                       and only == "bad" else "ok")]
+
+        with mock.patch.object(pipeline, "run_slot", side_effect=run):
+            service.run_once(cfg, self.store, now=datetime(2026, 10, 3, 8, 16), logger=self._log)
+            self.assertNotIn("am", service.load_runs(self.news_dir).get("slots", {}).get("2026-10-03", []))
+            service.run_once(cfg, state.Store(self.news_dir), now=datetime(2026, 10, 3, 8, 21),
+                             logger=self._log)
+        self.assertEqual(calls, ["good", "bad", "bad"])
+        self.assertEqual(service.load_runs(self.news_dir)["slots"]["2026-10-03"], ["am"])
+
+    def test_one_source_exception_does_not_skip_the_other_sources(self) -> None:
+        cfg = _cfg(sources={name: config.SourceConfig(name=name, adapter="aihot", enabled=True,
+                   tier="T2", first_party=False, filter=config.FilterCfg(),
+                   enrich=config.EnrichCfg(), deliver=config.DeliverCfg(),
+                   fetch=config.FetchCfg(trigger="slot", slots=["am"])) for name in ("bad", "good")})
+
+        def run(_cfg, _store, slot, *, only=None, **kw):
+            if only == "bad":
+                raise NewsError("temporary")
+            return [pipeline.SourceRun(source="good")]
+
+        with mock.patch.object(pipeline, "run_slot", side_effect=run) as run_mock:
+            service.run_once(cfg, self.store, now=datetime(2026, 10, 3, 8, 16), logger=self._log)
+        self.assertEqual(run_mock.call_count, 2)
+
+    def test_expired_retry_window_does_not_rerun(self) -> None:
+        with mock.patch.object(pipeline, "run_slot", side_effect=NewsError("temporary")) as run:
+            service.run_once(_cfg(), self.store, now=datetime(2026, 10, 3, 8, 29), logger=self._log)
+            service.run_once(_cfg(), self.store, now=datetime(2026, 10, 3, 8, 31), logger=self._log)
+        self.assertEqual(run.call_count, 1)
+
+    def test_config_missing_waits_for_a_configuration_change(self) -> None:
+        source = config.SourceConfig(name="s", adapter="aihot", enabled=True, tier="T2",
+                   first_party=False, filter=config.FilterCfg(), enrich=config.EnrichCfg(),
+                   deliver=config.DeliverCfg(), fetch=config.FetchCfg(trigger="slot", slots=["am"]))
+        cfg = _cfg(sources={"s": source})
+        with mock.patch.object(pipeline, "run_slot", side_effect=[
+                [pipeline.SourceRun(source="s", status="config_missing")],
+                [pipeline.SourceRun(source="s")]]) as run:
+            service.run_once(cfg, self.store, now=datetime(2026, 10, 3, 8, 16), logger=self._log)
+            service.run_once(cfg, self.store, now=datetime(2026, 10, 3, 8, 21), logger=self._log)
+            cfg = replace(cfg, sources={"s": replace(source, extra={"feeds": ["https://example.test/rss"]})})
+            service.run_once(cfg, self.store, now=datetime(2026, 10, 3, 8, 26), logger=self._log)
+        self.assertEqual(run.call_count, 2)
         self.assertEqual(service.load_runs(self.news_dir)["slots"]["2026-10-03"], ["am"])
 
 
