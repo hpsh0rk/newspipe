@@ -623,7 +623,8 @@ def run_ws(creds: credentials.FeishuCreds, *, news_dir: Path | None = None,
            hook_set: Any = None, logger: Callable[[str], None] = print,
            sdk: _Sdk | None = None, client: Any | None = None,
            state: dict[str, Any] | None = None,
-           log_level: str | None = None, on_client: Callable[[Any], None] | None = None) -> Any:
+           log_level: str | None = None, on_client: Callable[[Any], None] | None = None,
+           stop_event: threading.Event | None = None) -> Any:
     """起长连接并**阻塞**（SDK 自带重连）。`sdk` / `client` 可注入以便测试。
 
     SDK 日志级别默认 INFO（能看到「connected to」）；排查入站问题时用
@@ -647,6 +648,8 @@ def run_ws(creds: credentials.FeishuCreds, *, news_dir: Path | None = None,
     if on_client is not None:
         on_client(client)
     logger(f"入站 ws：连接 {creds.base_url}（app_id={creds.app_id}）…")
+    if stop_event is not None and stop_event.is_set():
+        return client
     client.start()
     return client
 
@@ -664,6 +667,7 @@ class InboundHandle:
     view_path: str = ""
     state: dict[str, Any] = field(default_factory=dict)
     error: str = ""
+    stopped: threading.Event = field(default_factory=threading.Event, repr=False)
 
     def describe(self) -> dict[str, Any]:
         info: dict[str, Any] = {"mode": self.mode, "alive": bool(self.thread and self.thread.is_alive())}
@@ -680,6 +684,7 @@ class InboundHandle:
         return info
 
     def stop(self) -> None:
+        self.stopped.set()
         if self.server is not None:
             try:
                 self.server.shutdown()
@@ -687,12 +692,20 @@ class InboundHandle:
             except Exception:
                 pass
         client = self.client
-        stop = getattr(client, "stop", None) or getattr(client, "close", None)
-        if callable(stop):
-            try:
-                stop()
-            except Exception:
-                pass
+        _close_client(client)
+        if self.mode == "ws" and self.thread is not None and self.thread is not threading.current_thread():
+            self.thread.join(timeout=2)
+            if self.thread.is_alive():
+                self.error = "ws_shutdown_incomplete"
+
+
+def _close_client(client: Any) -> None:
+    stop = getattr(client, "stop", None) or getattr(client, "close", None)
+    if callable(stop):
+        try:
+            stop()
+        except Exception:
+            pass
 
 
 def start_inbound(*, mode: str, service_cfg: dict[str, Any], creds: credentials.FeishuCreds | None,
@@ -749,14 +762,21 @@ def start_inbound(*, mode: str, service_cfg: dict[str, Any], creds: credentials.
             raise InboundError("inbound.mode=ws 需要飞书应用凭据（app_id/app_secret）")
         handle = InboundHandle(mode="ws", client=client, state=state)
 
+        def _capture_client(value: Any) -> None:
+            handle.client = value
+            if handle.stopped.is_set():
+                _close_client(value)
+                raise InboundError("长连接启动已取消")
+
         def _run() -> None:
             try:
                 run_ws(creds, news_dir=news_dir, hook_set=hook_set,
                        logger=logger, sdk=sdk, client=client, state=state,
-                       on_client=lambda value: setattr(handle, "client", value))
+                       on_client=_capture_client, stop_event=handle.stopped)
             except Exception as exc:                       # 连接失败要留痕，不许静默
-                handle.error = type(exc).__name__
-                logger(f"入站 ws：连接失败（{type(exc).__name__}: {exc}）")
+                if not handle.stopped.is_set():
+                    handle.error = type(exc).__name__
+                    logger(f"入站 ws：连接失败（{type(exc).__name__}: {exc}）")
 
         thread = threading.Thread(target=_run, name="newspipe-inbound-ws", daemon=True)
         handle.thread = thread

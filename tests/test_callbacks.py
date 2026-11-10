@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from newspipe import callback_jobs, channel, config, events, inbound, interaction, state
+from newspipe import backends, callback_jobs, channel, config, events, inbound, interaction, runtime, state
 
 
 class CallbackAcceptanceTests(unittest.TestCase):
@@ -187,3 +187,26 @@ class CallbackAcceptanceTests(unittest.TestCase):
         from newspipe.errors import InboundError
         with self.assertRaises(InboundError):
             callback_jobs.enqueue(self.news, payload, event_id="failed-hook")
+
+    def test_worker_binds_the_same_transport_as_its_config_snapshot(self):
+        bound_channel = object()
+        cfg = config.Config(chat="oc_test", slots={}, sources={})
+        callback_jobs.enqueue(self.news, {"news_action": "open_detail"}, event_id="bound-worker")
+        observed = []
+        with patch.object(interaction, "handle_json", side_effect=lambda *a, **kw: observed.append(backends.get_channel()) or ""), \
+             patch.object(backends, "make_channel", side_effect=AssertionError("must not re-resolve credentials")):
+            callback_jobs.drain(self.news, runtime_provider=lambda: (cfg, bound_channel))
+        self.assertEqual(observed, [bound_channel])
+
+    def test_transport_binding_is_directory_scoped_and_none_preserves_outer_binding(self):
+        first, other = object(), object()
+        cfg = config.Config(chat="oc_test", slots={}, sources={})
+        with patch.object(backends, "make_channel", return_value=other), runtime.bind_channel(self.news, first):
+            with runtime.bind_channel(self.news, None), runtime.activate(cfg, self.news):
+                self.assertIs(backends.get_channel(), first)
+            with runtime.activate(cfg, self.news / "other"):
+                self.assertIs(backends.get_channel(), other)
+            with runtime.activate(cfg, self.news):
+                self.assertIs(backends.get_channel(), first)
+            with runtime.bind_channel(self.news / "other", other), runtime.activate(cfg, self.news):
+                self.assertIs(backends.get_channel(), first)

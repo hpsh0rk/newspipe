@@ -6,6 +6,8 @@ import json
 import os
 import threading
 from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import asdict
 from functools import wraps
 from pathlib import Path
 
@@ -14,9 +16,13 @@ from newspipe.errors import ConfigError
 
 _cache: dict[str, object] = {}
 _guard = threading.Lock()
+_bound_channels: ContextVar[dict[str, object]] = ContextVar("newspipe_bound_transports", default={})
 
 
-def channel_for(cfg, news_dir: Path):
+def channel_for(cfg, news_dir: Path, *, creds=None):
+    bound = _bound_channels.get().get(str(Path(news_dir).resolve()))
+    if bound is not None:
+        return bound
     service = cfg.service
     files = [Path(news_dir) / ".env", hostenv.host_env_path()]
     stamps = []
@@ -27,12 +33,15 @@ def channel_for(cfg, news_dir: Path):
             stamps.append((str(path), None))
     signature = json.dumps([str(Path(news_dir).resolve()), service.channel, service.feishu,
                             {k: v for k, v in os.environ.items() if k.startswith("NEWSPIPE_")
-                             or k.startswith("FEISHU_") or k == "HERMES_HOME"}, stamps], sort_keys=True)
+                             or k.startswith("FEISHU_") or k == "HERMES_HOME"}, stamps,
+                            asdict(creds) if creds is not None else None], sort_keys=True)
     key = hashlib.sha256(signature.encode()).hexdigest()
     with _guard:
         if key not in _cache:
             try:
                 kwargs = {"service_cfg": service.feishu, "news_dir": news_dir} if service.channel == "feishu_direct" else {}
+                if service.channel == "feishu_direct" and creds is not None:
+                    kwargs["creds"] = creds
                 channel = backends.make_channel(service.channel, **kwargs)
             except KeyError as exc:
                 raise ConfigError(str(exc)) from None
@@ -40,6 +49,19 @@ def channel_for(cfg, news_dir: Path):
                 _cache.pop(next(iter(_cache)))
             _cache[key] = channel
         return _cache[key]
+
+
+@contextmanager
+def bind_channel(news_dir: Path, channel):
+    """Pin a service-owned transport through nested scopes, without affecting other directories."""
+    if channel is None:
+        yield
+        return
+    token = _bound_channels.set({**_bound_channels.get(), str(Path(news_dir).resolve()): channel})
+    try:
+        yield
+    finally:
+        _bound_channels.reset(token)
 
 
 @contextmanager

@@ -246,6 +246,17 @@ class SubcommandSurfaceTests(unittest.TestCase):
         self.assertEqual(payload["data"]["service"]["runtime"]["effective"]["inbound_mode"], "http")
         self.assertTrue(any("service.inbound" in warning for warning in payload["warnings"]))
 
+    def test_delegated_channel_status_keeps_selected_directory_runtime(self) -> None:
+        from newspipe import state
+        (self.news / "service.yaml").write_text("channel: feishu_lark_cli\ninbound: {mode: none}\n")
+        state.write_json_atomic(self.news / "state" / "service.json", {"runtime": {
+            "restart_required": ["service.view"]}})
+        with patch.object(cli.config, "default_news_dir", return_value=self.news / "unused"):
+            code, payload = self._cli("status")
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["data"].get("service", {}).get("runtime", {}).get("restart_required"),
+                         ["service.view"])
+
     def test_json_flag_works_on_both_sides_of_the_subcommand(self) -> None:
         for argv in (["--news-dir", str(self.news), "status", "--json"],
                      ["--json", "--news-dir", str(self.news), "status"]):

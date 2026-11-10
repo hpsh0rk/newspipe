@@ -249,6 +249,16 @@ class CredentialTests(unittest.TestCase):
             env={"MY_TOKEN": "vt"})
         self.assertEqual(creds.verification_token, "vt")
 
+    def test_explicit_callback_security_values_win_over_environment(self) -> None:
+        for explicit in ("test-explicit", ""):
+            with self.subTest(explicit=explicit):
+                creds = credentials.resolve_feishu({"app_id": "test-app", "app_secret": "test-only",
+                    "verification_token": explicit, "encrypt_key": explicit,
+                    "verification_token_env": "TEST_TOKEN"}, dotenv_paths=[],
+                    env={"TEST_TOKEN": "test-env", "NEWSPIPE_FEISHU_ENCRYPT_KEY": "test-env"})
+                self.assertEqual(creds.verification_token, explicit)
+                self.assertEqual(creds.encrypt_key, explicit)
+
 
 if __name__ == "__main__":
     unittest.main()

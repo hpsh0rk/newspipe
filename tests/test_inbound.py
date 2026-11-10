@@ -353,6 +353,52 @@ class WsHandlerTests(unittest.TestCase):
 
 
 class InboundHandleTests(unittest.TestCase):
+    def test_stop_after_capture_cancels_start_after_logging(self) -> None:
+        captured, release = threading.Event(), threading.Event()
+        client = mock.Mock()
+
+        def logger(_message):
+            captured.set()
+            release.wait(timeout=2)
+
+        handle = inbound.start_inbound(mode="ws", service_cfg={}, creds=_creds(), client=client,
+                                       sdk=WsHandlerTests._Sdk(), logger=logger)
+        self.assertTrue(captured.wait(timeout=2))
+        # Stop on a separate thread so a bounded shutdown wait cannot prevent releasing the logger.
+        stopper = threading.Thread(target=handle.stop)
+        stopper.start()
+        self.assertTrue(handle.stopped.wait(timeout=2))
+        release.set()
+        stopper.join(timeout=3)
+        handle.thread.join(timeout=2)
+        client.start.assert_not_called()
+
+    def test_shutdown_timeout_is_not_reported_as_complete(self) -> None:
+        thread = mock.Mock()
+        thread.is_alive.return_value = True
+        handle = inbound.InboundHandle(mode="ws", thread=thread, client=mock.Mock())
+        handle.stop()
+        self.assertEqual(handle.error, "ws_shutdown_incomplete")
+
+    def test_stop_cancels_delayed_client_construction(self) -> None:
+        entered, release = threading.Event(), threading.Event()
+        client = mock.Mock()
+
+        def delayed(_creds, **kw):
+            entered.set()
+            release.wait(timeout=2)
+            kw["on_client"](client)
+            client.start()
+
+        with mock.patch.object(inbound, "run_ws", side_effect=delayed):
+            handle = inbound.start_inbound(mode="ws", service_cfg={}, creds=_creds(), logger=lambda _: None)
+            self.assertTrue(entered.wait(timeout=2))
+            handle.stop()
+            release.set()
+            handle.thread.join(timeout=2)
+        client.start.assert_not_called()
+        client.stop.assert_called_once()
+
     def test_none_mode_is_noop(self) -> None:
         handle = inbound.start_inbound(mode="none", service_cfg={}, creds=_creds())
         self.assertEqual(handle.mode, "none")

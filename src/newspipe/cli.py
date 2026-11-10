@@ -170,17 +170,17 @@ def _failed(runs: list[pipeline.SourceRun]) -> list[pipeline.SourceRun]:
     return [r for r in runs if r.status in ("error", "config_missing", "send_failed", "overflow")]
 
 
-def _service_is_custom(cfg: config.Config) -> bool:
+def _service_is_custom(cfg: config.Config, news_dir: Path | None = None) -> bool:
     """服务配置是否偏离默认（默认 = 与阶段 1 完全一致）。"""
     return (cfg.service.channel != "feishu_lark_cli"
             or cfg.service.inbound_mode != "none"
-            or (config.default_news_dir() / "service.yaml").is_file())
+            or (Path(news_dir) if news_dir is not None else config.default_news_dir()).joinpath("service.yaml").is_file())
 
 
 def _status_rows(store: state.Store, cfg: config.Config) -> tuple[list[dict], dict, dict | None]:
     rows = pipeline.stats(store, cfg)
     usage = store.usage(state.today())
-    svc = service.describe_service(cfg, news_dir=store.news_dir) if _service_is_custom(cfg) else None
+    svc = service.describe_service(cfg, news_dir=store.news_dir) if _service_is_custom(cfg, store.news_dir) else None
     return rows, usage, svc
 
 

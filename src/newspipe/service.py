@@ -212,11 +212,12 @@ def report(runs: list[pipeline.SourceRun], logger: Callable[[str], None]) -> Non
 
 
 # ------------------------------------------------------------------ 主循环
-def prepare_channel(cfg: config.Config, *, news_dir: Path) -> None:
+def prepare_channel(cfg: config.Config, *, news_dir: Path, creds=None) -> Any:
     """把 `service.yaml: channel` 装到后端注册表上（默认是独立直连）。"""
-    channel = runtime.channel_for(cfg, news_dir)
+    channel = runtime.channel_for(cfg, news_dir, creds=creds)
     backends.set_default_channel_name(cfg.service.channel)
     backends.set_channel(channel)
+    return channel
 
 
 def make_logger(cfg: config.Config) -> Callable[[str], None]:
@@ -240,7 +241,7 @@ def make_logger(cfg: config.Config) -> Callable[[str], None]:
 
 
 def start_inbound_for(cfg: config.Config, *, news_dir: Path, hook_set: Any,
-                      logger: Callable[[str], None]) -> inbound_mod.InboundHandle:
+                      logger: Callable[[str], None], creds=None) -> inbound_mod.InboundHandle:
     """按 `service.yaml: inbound.mode` 起入站。缺凭据/缺依赖都抛错（不静默降级）。
 
     只读视图是**独立开关**（`view.enabled`）：`mode=none` 时也要能出视图，否则面板
@@ -253,7 +254,7 @@ def start_inbound_for(cfg: config.Config, *, news_dir: Path, hook_set: Any,
         return inbound_mod.InboundHandle(mode="none")
     from newspipe import credentials
 
-    creds = (credentials.resolve_feishu(cfg.service.feishu, news_dir=news_dir)
+    creds = creds or (credentials.resolve_feishu(cfg.service.feishu, news_dir=news_dir)
              if mode != "none" else None)
     return inbound_mod.start_inbound(mode=mode, service_cfg=cfg.service.inbound, creds=creds,
                                      news_dir=news_dir, hook_set=hook_set, logger=logger,
@@ -268,7 +269,8 @@ def host_dotenv_path() -> Path:
 def shared_app_ws_conflict(cfg: config.Config, *, news_dir: Path | None = None,
                            host_env: Path | None = None,
                            dotenv_paths: list[Path] | None = None,
-                           env: dict[str, str] | None = None) -> str | None:
+                           env: dict[str, str] | None = None,
+                           creds: credentials.FeishuCreds | None = None) -> str | None:
     """`inbound.mode: ws` 且与宿主用**同一个飞书应用** ⇒ 硬冲突，必须报出来。
 
     飞书长连接是**集群模式、不支持广播**：同一应用部署多个 client 时，事件只会随机落到其中
@@ -283,8 +285,8 @@ def shared_app_ws_conflict(cfg: config.Config, *, news_dir: Path | None = None,
     if cfg.service.inbound_mode != "ws":
         return None
     try:
-        creds = credentials.resolve_feishu(cfg.service.feishu, news_dir=news_dir,
-                                          dotenv_paths=dotenv_paths, env=env)
+        creds = creds or credentials.resolve_feishu(cfg.service.feishu, news_dir=news_dir,
+                                                    dotenv_paths=dotenv_paths, env=env)
     except ConfigError:
         return None
     host_app = credentials.read_dotenv(host_env or host_dotenv_path()).get("FEISHU_APP_ID", "")
@@ -317,28 +319,39 @@ def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None
     waiter = wait_fn or stop_event.wait
     reloader = reload_fn or (lambda: config.load(news_dir))
     # 入站线程按需读 hooks（lambda 而不是快照）⇒ 热加载的 hooks 立刻对点击生效
-    live: dict[str, config.Config] = {"cfg": cfg}
+    live: dict[str, tuple[config.Config, Any]] = {}
     started_cfg = cfg
     desired_cfg = cfg
     restart_required: list[str] = []
     resource_error = ""
 
-    conflict = shared_app_ws_conflict(cfg, news_dir=news_dir) if with_inbound and not dry else None
-    if conflict:
-        logger(f"⚠️ 拒绝启动：{conflict}")
-        return 2
-
-    prepare_channel(cfg, news_dir=news_dir)
     channel_sig = _channel_sig(cfg)
     handle = inbound_mod.InboundHandle(mode="none")
     worker = None
+    startup_creds = None
     try:
+        if with_inbound and not dry and cfg.service.inbound_mode != "none":
+            try:
+                startup_creds = credentials.resolve_feishu(cfg.service.feishu, news_dir=news_dir)
+            except ConfigError as exc:
+                logger(f"⚠️ 入站未启动：ConfigError: {exc}")
+                resource_error = "ConfigError"
+                return 2
+        conflict = (shared_app_ws_conflict(cfg, news_dir=news_dir, creds=startup_creds)
+                    if with_inbound and not dry else None)
+        if conflict:
+            logger(f"⚠️ 拒绝启动：{conflict}")
+            resource_error = "inbound_conflict"
+            return 2
+        channel = prepare_channel(cfg, news_dir=news_dir, creds=startup_creds)
+        live["runtime"] = (cfg, channel)
         if with_inbound and not dry:
-            worker = callback_jobs.Worker(news_dir, config_provider=lambda: live["cfg"], logger=logger)
+            worker = callback_jobs.Worker(news_dir, runtime_provider=lambda: live["runtime"], logger=logger)
             worker.start()
             try:
                 handle = start_inbound_for(cfg, news_dir=news_dir,
-                                           hook_set=lambda: live["cfg"].hooks, logger=logger)
+                                           hook_set=lambda: live["runtime"][0].hooks,
+                                           logger=logger, creds=startup_creds)
             except (ConfigError, InboundError) as exc:
                 logger(f"⚠️ 入站未启动：{type(exc).__name__}: {exc}")
                 resource_error = type(exc).__name__
@@ -367,6 +380,14 @@ def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None
                         fields += ["inbound", "view", "feishu"]
                     pending = [f"service.{field}" for field in fields
                                if getattr(fresh.service, field) != getattr(started_cfg.service, field)]
+                    if startup_creds is not None:
+                        try:
+                            wanted_creds = credentials.resolve_feishu(fresh.service.feishu, news_dir=news_dir)
+                            credential_change = _credential_sig(wanted_creds) != _credential_sig(startup_creds)
+                        except ConfigError:
+                            credential_change = True
+                        if credential_change and "service.feishu" not in pending:
+                            pending.append("service.feishu")
                     if pending != restart_required:
                         if pending:
                             logger(f"配置已保存但需重启服务：{', '.join(pending)}；当前资源保持不变")
@@ -378,14 +399,14 @@ def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None
                     if _channel_sig(fresh) != channel_sig:
                         # Rebuild only after configuration changes, preserving token caches otherwise.
                         try:
-                            prepare_channel(fresh, news_dir=news_dir)
+                            channel = prepare_channel(fresh, news_dir=news_dir, creds=startup_creds)
                             channel_sig = _channel_sig(fresh)
                             logger(f"通道已按新配置重建：{fresh.service.channel}")
                         except (ConfigError, DeliveryError) as exc:
                             logger(f"⚠️ 新通道配置不可用，沿用上一份：{type(exc).__name__}: {exc}")
                             fresh = cfg
                     cfg = fresh
-                    live["cfg"] = cfg
+                    live["runtime"] = (cfg, channel)
             if not dry:
                 if handle.error:
                     resource_error = handle.error
@@ -393,8 +414,11 @@ def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None
                 _record_runtime(news_dir, cfg, desired_cfg, handle, restart_required,
                                 running=True, error=resource_error)
             try:
-                runs = run_once(cfg, store, now=now, news_dir=news_dir, dry=dry, logger=logger)
+                with runtime.bind_channel(news_dir, channel):
+                    runs = run_once(cfg, store, now=now, news_dir=news_dir, dry=dry, logger=logger)
                 report(runs, logger)
+                if any(run.status in SLOT_FAILURES for run in runs):
+                    exit_code = 1
             except NewsError as exc:
                 exit_code = 1
                 logger(f"⚠️ 本轮失败：{type(exc).__name__}: {exc}")
@@ -405,9 +429,15 @@ def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None
             if waiter(wait):
                 break
     finally:
+        if handle.error:
+            resource_error = handle.error
+            exit_code = 1
         try:
             handle.stop()
         finally:
+            if handle.error:
+                resource_error = handle.error
+                exit_code = 1
             if worker is not None:
                 worker.stop()
             if not dry:
@@ -421,6 +451,10 @@ def _channel_sig(cfg: config.Config) -> tuple[str, tuple[tuple[str, str], ...]]:
     """通道签名：通道名 + 凭据配置。变了才重建通道实例（保住 token 缓存）。"""
     return (cfg.service.channel,
             tuple(sorted((str(k), str(v)) for k, v in (cfg.service.feishu or {}).items())))
+
+
+def _credential_sig(creds: credentials.FeishuCreds) -> tuple[str, ...]:
+    return (creds.app_id, creds.app_secret, creds.domain, creds.verification_token, creds.encrypt_key)
 
 
 def _resource_values(cfg: config.Config) -> dict[str, Any]:
@@ -438,8 +472,11 @@ def _record_runtime(news_dir: Path, effective: config.Config, desired: config.Co
                     running: bool, error: str = "") -> None:
     with file_lock(runs_path(news_dir).with_suffix(".lock")):
         data = load_runs(news_dir)
+        effective_values = _resource_values(effective)
+        if handle.server is not None:
+            effective_values["http_host"], effective_values["http_port"] = handle.server.server_address
         data["runtime"] = {"pid": os.getpid(), "running": running, "updated_at": state.now_iso(),
-                           "effective": _resource_values(effective), "desired": _resource_values(desired),
+                           "effective": effective_values, "desired": _resource_values(desired),
                            "restart_required": list(pending), "inbound": handle.describe(), "error": error}
         _save_runs(news_dir, data)
 

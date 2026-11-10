@@ -145,6 +145,8 @@ def resolve_feishu(service_cfg: dict | None = None, *, news_dir: Path | None = N
         src_secret = f"env:{cfg['app_secret_env']}"
 
     def named(field_name: str, default_keys: tuple[str, ...]) -> str:
+        if field_name in cfg:
+            return str(cfg[field_name] or "")
         named_env = str(cfg.get(f"{field_name}_env") or "")
         if named_env:
             if environ.get(named_env):

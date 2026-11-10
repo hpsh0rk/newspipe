@@ -24,7 +24,7 @@ for _p in (str(SRC_ROOT), str(REPO_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from newspipe import backends, config, pipeline, service, state  # noqa: E402
+from newspipe import backends, config, credentials, pipeline, runtime, service, state  # noqa: E402
 from newspipe.errors import ConfigError, InboundError, NewsError  # noqa: E402
 
 SLOTS = {"am": "08:15", "noon": "12:35", "pm": "18:35"}
@@ -273,6 +273,94 @@ class RunOnceTests(unittest.TestCase):
 
 
 class RunForeverTests(unittest.TestCase):
+    def test_ws_ownership_check_uses_the_exact_startup_credential_snapshot(self) -> None:
+        with TemporaryDirectory() as tmp:
+            news = Path(tmp)
+            host_env = news / "host-test.env"
+            host_env.write_text("FEISHU_APP_ID=test-host\n")
+            cfg = _cfg(service=config.ServiceCfg(inbound={"mode": "ws"}))
+            first = credentials.FeishuCreds("test-other", "test-only")
+            second = credentials.FeishuCreds("test-host", "test-only")
+            with mock.patch.object(credentials, "resolve_feishu", side_effect=[first, second]) as resolve, \
+                 mock.patch.object(service, "host_dotenv_path", return_value=host_env), \
+                 mock.patch.object(service, "start_inbound_for", return_value=service.inbound_mod.InboundHandle(mode="ws")) as start, \
+                 mock.patch.object(service.callback_jobs, "Worker"), \
+                 mock.patch.object(service, "run_once", return_value=[]):
+                code = service.run_forever(cfg, state.Store(news), once=True, reload_fn=lambda: cfg,
+                                           logger=lambda _: None)
+            self.assertEqual(code, 0)
+            self.assertIs(start.call_args.kwargs["creds"], first)
+            resolve.assert_called_once()
+
+    def test_credential_environment_changes_do_not_replace_active_transport(self) -> None:
+        with TemporaryDirectory() as tmp:
+            news = Path(tmp)
+            cfg = _cfg(service=config.ServiceCfg(inbound={"mode": "http"}))
+            initial = credentials.FeishuCreds(app_id="test-original", app_secret="test-only",
+                                             verification_token="test-verification")
+            newer = credentials.FeishuCreds(app_id="test-new", app_secret="test-only-new")
+            changed = False
+
+            def reload_cfg():
+                nonlocal changed
+                changed = True
+                (news / ".env").touch()
+                return replace(cfg)
+
+            channels = []
+
+            def run(current, store, **kw):
+                with runtime.activate(current, news):
+                    channels.append(backends.get_channel().creds)
+                return []
+
+            with mock.patch.object(credentials, "resolve_feishu", side_effect=lambda *a, **k: newer if changed else initial), \
+                 mock.patch.object(service, "start_inbound_for", return_value=service.inbound_mod.InboundHandle(mode="http")) as start, \
+                 mock.patch.object(service.callback_jobs, "Worker") as worker, \
+                 mock.patch.object(service, "run_once", side_effect=run):
+                code = service.run_forever(cfg, state.Store(news), once=True, reload_fn=reload_cfg,
+                                           logger=lambda _: None)
+            self.assertEqual(code, 0)
+            self.assertEqual(channels, [initial])
+            self.assertEqual(start.call_args.kwargs.get("creds"), initial)
+            self.assertEqual(service.runtime_status(news)["restart_required"], ["service.feishu"])
+
+    def test_last_tick_inbound_failure_is_not_reported_as_success(self) -> None:
+        with TemporaryDirectory() as tmp:
+            news = Path(tmp)
+            handle = service.inbound_mod.InboundHandle(mode="ws")
+
+            def tick(*a, **kw):
+                handle.error = "ConnectionError"
+                return []
+
+            with mock.patch.object(service, "prepare_channel"), \
+                 mock.patch.object(service, "start_inbound_for", return_value=handle), \
+                 mock.patch.object(service.callback_jobs, "Worker"), \
+                 mock.patch.object(service, "run_once", side_effect=tick):
+                code = service.run_forever(_cfg(), state.Store(news), once=True, logger=lambda _: None)
+            self.assertEqual(code, 1)
+            self.assertEqual(service.runtime_status(news)["error"], "ConnectionError")
+
+    def test_failed_source_results_fail_one_shot_service(self) -> None:
+        for status in ("error", "config_missing", "send_failed", "overflow"):
+            with self.subTest(status=status), TemporaryDirectory() as tmp, \
+                 mock.patch.object(service, "run_once", return_value=[pipeline.SourceRun(source="test", status=status)]):
+                code = service.run_forever(_cfg(), state.Store(Path(tmp)), once=True,
+                                           with_inbound=False, logger=lambda _: None)
+            self.assertEqual(code, 1)
+
+    def test_effective_http_address_uses_actual_listener_binding(self) -> None:
+        with TemporaryDirectory() as tmp:
+            news = Path(tmp)
+            cfg = _cfg(service=config.ServiceCfg(inbound={"mode": "http", "http": {"port": 0}},
+                                               view={"enabled": True}))
+            handle = service.inbound_mod.InboundHandle(mode="http", server=mock.Mock(server_address=("0.0.0.0", 43210)))
+            service._record_runtime(news, cfg, cfg, handle, [], running=True)
+            info = service.runtime_status(news)
+            self.assertEqual(info["effective"]["http_host"], "0.0.0.0")
+            self.assertEqual(info["effective"]["http_port"], 43210)
+
     def test_resource_changes_require_restart_but_business_changes_reload(self) -> None:
         with TemporaryDirectory() as tmp:
             news_dir = Path(tmp)
@@ -284,6 +372,7 @@ class RunForeverTests(unittest.TestCase):
                 schedule={"tick_seconds": 120}))
             logs = []
             with mock.patch.object(service, "prepare_channel"), \
+                 mock.patch.object(credentials, "resolve_feishu", return_value=credentials.FeishuCreds("test-app", "test-only")), \
                  mock.patch.object(service, "shared_app_ws_conflict", return_value=None), \
                  mock.patch.object(service, "start_inbound_for", return_value=service.inbound_mod.InboundHandle(mode="http")) as start, \
                  mock.patch.object(service.callback_jobs, "Worker"), \
@@ -324,6 +413,7 @@ class RunForeverTests(unittest.TestCase):
             news_dir = Path(tmp)
             cfg = _cfg(service=config.ServiceCfg(inbound={"mode": "ws"}))
             with mock.patch.object(service, "shared_app_ws_conflict", return_value="shared application conflict"), \
+                 mock.patch.object(credentials, "resolve_feishu", return_value=credentials.FeishuCreds("test-host", "test-only")), \
                  mock.patch.object(service, "prepare_channel"), \
                  mock.patch.object(service, "start_inbound_for") as start, \
                  mock.patch.object(service, "run_once", return_value=[]):
@@ -341,6 +431,7 @@ class RunForeverTests(unittest.TestCase):
                  mock.patch.object(service, "shared_app_ws_conflict", return_value=None):
                 start.return_value.describe.return_value = {"mode": "none"}
                 start.return_value.error = ""
+                start.return_value.server = None
                 with self.assertRaisesRegex(RuntimeError, "clock failed"):
                     service.run_forever(_cfg(), state.Store(news_dir), news_dir=news_dir,
                                         logger=lambda _m: None,
