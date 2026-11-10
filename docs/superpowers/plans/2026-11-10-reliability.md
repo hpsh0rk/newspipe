@@ -64,9 +64,9 @@ Files: callback_jobs.py, inbound.py, interaction.py, service.py, host-integratio
 
 Files: llm.py, state.py, scripts/scan_secrets.py, docs and regression tests.
 
-- [ ] Add failing tests for actual hourly usage, budget/cached-result ordering, retry budgets, and scanner behavior.
-- [ ] Reserve/account every model attempt using the injected clock and enforce input limits; restore a redacting repository secret scanner.
-- [ ] Run the full suite, scanner, doctor and complete diff review; commit.
+- [x] Add failing tests for actual hourly usage, budget/cached-result ordering, retry budgets, and scanner behavior.
+- [x] Reserve/account every model attempt using the injected clock and enforce input limits; restore a redacting repository secret scanner.
+- [x] Run the full suite, scanner, doctor and complete diff review; commit.
 
 ## Execution Notes
 
@@ -79,3 +79,7 @@ Stage 2 verification: 365 offline tests passed. Queue reads and acknowledgements
 Stage 3 verification: 370 offline tests passed. Runtime channel scopes are thread-local and shared across CLI/pipeline entrypoints. Hot switching clears the prior service channel, and optimistic configuration edits serialize hash checks with writes.
 
 Stage 4 verification: 378 offline tests passed. Callback acceptance does not call slow handlers. Queued jobs survive restarts, execute in acceptance order, and reuse business event identities. Core retries refresh current state rather than undo later actions; interrupted third-party hooks fail closed for manual reconciliation. Service resources close in finally, including unexpected failures.
+
+Stage 5 verification: 395 offline tests passed. Every HTTP attempt is durably reserved before transport, including reasoning retries and interruptions. Cached receipts remain free at limits; concurrent calls share reservations and identical prompts share receipts. Hourly usage rolls across midnight. Input overflow degrades without truncating prompts. Restored scanner passed with zero findings and only emits locations/rules.
+
+Ruling: The scanner covers tracked and non-ignored working-tree files, not Git history or ignored local credentials. This restores the missing CI publication gate without reading the user's real credentials; historical exposures still require credential rotation.

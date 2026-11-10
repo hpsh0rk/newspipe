@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -53,6 +53,17 @@ def read_json(path: Path) -> Any:
         return json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def _usage_recent(data: dict) -> list:
+    if "recent" in data:
+        return data.get("recent") or []
+    if data.get("updated"):
+        try:
+            return [datetime.fromisoformat(data["updated"]).timestamp()] * int(data.get("calls") or 0)
+        except (ValueError, TypeError):
+            pass
+    return []
 
 
 class Store:
@@ -304,18 +315,43 @@ class Store:
         p.parent.mkdir(parents=True, exist_ok=True)
         write_json_atomic(p, payload, sort_keys=False)
 
+    def receipt_transaction(self, key: str):
+        return file_lock(self.llm_root / "receipts" / f".{key}.lock")
+
+    def usage_transaction(self):
+        return file_lock(self.llm_root / ".usage.lock")
+
     def usage(self, date: str) -> dict:
         data = read_json(self.llm_root / "usage" / f"{date}.json")
         return data if isinstance(data, dict) else {"calls": 0, "chars": 0, "degraded": 0}
 
+    def usage_for_budget(self, date: str, now: datetime) -> dict:
+        usage = dict(self.usage(date))
+        dates = {date, now.date().isoformat(), (now - timedelta(hours=1)).date().isoformat()}
+        recent = []
+        for day in dates:
+            # Old counters lack timestamps: conservatively count at their last update.
+            recent.extend(_usage_recent(self.usage(day)))
+        usage["recent"] = recent
+        return usage
+
     def add_usage(self, date: str, *, calls: int = 0, chars: int = 0, degraded: int = 0,
-                  reason: str = "") -> dict:
+                  reason: str = "", now: datetime | None = None) -> dict:
+        with self.usage_transaction():
+            return self._add_usage(date, calls=calls, chars=chars, degraded=degraded, reason=reason,
+                                   now=now or datetime.now(TZ))
+
+    def _add_usage(self, date: str, *, calls: int, chars: int, degraded: int,
+                   reason: str, now: datetime) -> dict:
         """累计当日用量。`reason` 是失败原因的短码（length_empty / http_429 / not_json …）。
 
         必须记原因：加工层降级是"静默回退原文"，只有 degraded 计数时没人知道是模型、
         网络还是预算的问题（实测 12 次调用 10 次降级，原因全靠复现才查出来）。
         """
         state = self.usage(date)
+        recent = _usage_recent(state)
+        state["recent"] = [ts for ts in recent if isinstance(ts, (int, float)) and ts > now.timestamp() - 3600]
+        state["recent"].extend([now.timestamp()] * calls)
         state["calls"] = int(state.get("calls") or 0) + calls
         state["chars"] = int(state.get("chars") or 0) + chars
         state["degraded"] = int(state.get("degraded") or 0) + degraded
@@ -323,7 +359,7 @@ class Store:
             reasons = state.setdefault("reasons", {})
             key = reason[:60]
             reasons[key] = int(reasons.get(key) or 0) + 1
-        state["updated"] = now_iso()
+        state["updated"] = now.isoformat(timespec="seconds")
         p = self.llm_root / "usage" / f"{date}.json"
         p.parent.mkdir(parents=True, exist_ok=True)
         write_json_atomic(p, state, sort_keys=False)

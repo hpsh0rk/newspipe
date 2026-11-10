@@ -19,18 +19,17 @@ from __future__ import annotations
 
 import json
 import re
-import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from newspipe.backends import get_model_resolver
 from newspipe.backends.model_ref import ModelRef
-from newspipe.errors import ConfigError, ModelError
-from newspipe.state import now_iso, today
+from newspipe.errors import ConfigError
+from newspipe.state import TZ
 
 _FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.MULTILINE)
 def resolve_model(capability: str, models_cfg: dict, *,
@@ -81,7 +80,7 @@ def parse_json_object(text: str) -> dict | None:
 def _hourly_calls(usage: dict, now: datetime) -> int:
     recent = usage.get("recent") or []
     cutoff = now.timestamp() - 3600
-    return sum(1 for ts in recent if isinstance(ts, (int, float)) and ts >= cutoff)
+    return sum(1 for ts in recent if isinstance(ts, (int, float)) and ts > cutoff)
 
 
 def over_budget(budget: dict, usage: dict, now: datetime) -> str | None:
@@ -96,7 +95,8 @@ def over_budget(budget: dict, usage: dict, now: datetime) -> str | None:
 def chat_json(capability: str, *, system: str, user: str, prompt_version: str,
               store: Any, models_cfg: dict, budget: dict, date: str | None = None,
               now: datetime | None = None, max_tokens: int | None = None,
-              timeout: float | None = None) -> ChatResult:
+              timeout: float | None = None,
+              now_fn: Callable[[], datetime] | None = None) -> ChatResult:
     """一次模型调用（带回执与预算）。任何失败都返回结果对象，不抛异常。
 
     调用方（enrich）据此降级：`data is None` → 用原文标题继续发卡。
@@ -105,25 +105,35 @@ def chat_json(capability: str, *, system: str, user: str, prompt_version: str,
     reasoning 与答案共用同一个 completion 预算，给小了会出现 `finish_reason=length`、
     `content` 为空、reasoning 却写满的响应（实测 1024 全被思考吃掉 ⇒ 整批降级）。
     """
-    date = date or today()
-    now = now or datetime.now()
-    usage = store.usage(date)
-    blocked = over_budget(budget, usage, now)
-    if blocked:
-        store.add_usage(date, degraded=1)
-        return ChatResult(None, "degraded", f"预算熔断（{blocked}）")
-
+    clock = now_fn or ((lambda: now) if now is not None else (lambda: datetime.now(TZ)))
+    stamp = clock()
     try:
         ref = resolve_model(capability, models_cfg)
     except ConfigError as exc:
-        store.add_usage(date, degraded=1)
+        store.add_usage(date or stamp.date().isoformat(), degraded=1, reason="config", now=stamp)
         return ChatResult(None, "degraded", str(exc)[:200])
 
     payload = f"{system}\x00{user}"
     key = store.receipt_key(prompt_version, ref.model, payload)
-    cached = store.receipt(key)
-    if cached and isinstance(cached.get("data"), dict):
-        return ChatResult(cached["data"], "reused", "")
+    with store.receipt_transaction(key):
+        cached = store.receipt(key)
+        if cached and isinstance(cached.get("data"), dict):
+            return ChatResult(cached["data"], "reused", "")
+        return _chat_json_locked(capability, ref=ref, key=key, system=system, user=user,
+                                 prompt_version=prompt_version, store=store, budget=budget,
+                                 date=date, clock=clock, max_tokens=max_tokens, timeout=timeout)
+
+
+def _chat_json_locked(capability: str, *, ref: ModelRef, key: str, system: str, user: str,
+                      prompt_version: str, store: Any, budget: dict, date: str | None,
+                      clock: Callable[[], datetime], max_tokens: int | None,
+                      timeout: float | None) -> ChatResult:
+    chars = len(system) + len(user)
+    input_limit = int(budget.get("max_chars_per_call", 8000))
+    if chars > input_limit:
+        stamp = clock()
+        store.add_usage(date or stamp.date().isoformat(), degraded=1, reason="max_chars_per_call", now=stamp)
+        return ChatResult(None, "degraded", f"输入超过 max_chars_per_call（{chars}/{input_limit}），保留原文")
 
     tmo = float(timeout or budget.get("timeout_seconds") or 90)
     limit = int(max_tokens or budget.get("max_tokens") or 1200)
@@ -131,9 +141,7 @@ def chat_json(capability: str, *, system: str, user: str, prompt_version: str,
     note = ""
     content = ""
     finish = ""
-    attempts = 0
     while True:
-        attempts += 1
         body = json.dumps({
             "model": ref.model,
             "messages": [{"role": "system", "content": system},
@@ -145,6 +153,15 @@ def chat_json(capability: str, *, system: str, user: str, prompt_version: str,
             f"{ref.base_url}/chat/completions", data=body, method="POST",
             headers={"Content-Type": "application/json",
                      "Authorization": f"Bearer {ref.api_key}"})
+        stamp = clock()
+        day = date or stamp.date().isoformat()
+        # Reserve before transport; a timeout or interrupted process may still have spent money.
+        with store.usage_transaction():
+            blocked = over_budget(budget, store.usage_for_budget(day, stamp), stamp)
+            if blocked:
+                store.add_usage(day, degraded=1, reason=blocked, now=stamp)
+                return ChatResult(None, "degraded", f"预算熔断（{blocked}）")
+            store.add_usage(day, calls=1, chars=chars, now=stamp)
         try:
             with urllib.request.urlopen(req, timeout=tmo) as resp:
                 raw = json.loads(resp.read().decode("utf-8"))
@@ -154,12 +171,10 @@ def chat_json(capability: str, *, system: str, user: str, prompt_version: str,
                 detail = exc.read().decode("utf-8", "replace")[:200]
             except Exception:
                 pass
-            store.add_usage(date, calls=attempts, chars=len(payload), degraded=1,
-                            reason=f"http_{exc.code}")
+            store.add_usage(day, degraded=1, reason=f"http_{exc.code}", now=stamp)
             return ChatResult(None, "failed", f"HTTP {exc.code} {detail}")
         except Exception as exc:
-            store.add_usage(date, calls=attempts, chars=len(payload), degraded=1,
-                            reason=type(exc).__name__)
+            store.add_usage(day, degraded=1, reason=type(exc).__name__, now=stamp)
             return ChatResult(None, "failed", f"{type(exc).__name__}: {exc}"[:200])
 
         choices = raw.get("choices") or []
@@ -177,14 +192,14 @@ def chat_json(capability: str, *, system: str, user: str, prompt_version: str,
         break
 
     data = parse_json_object(content)
-    store.add_usage(date, calls=attempts, chars=len(payload))
     if data is None:
-        store.add_usage(date, degraded=1, reason=note or "not_json")
+        store.add_usage(day, degraded=1, reason=note or "not_json", now=stamp)
         return ChatResult(None, "failed",
                           f"空响应（finish_reason={finish!r}，思考吃满 {limit} tokens）"
                           if not content.strip() else f"响应不是 JSON：{content[:120]!r}")
     store.save_receipt(key, {"prompt_version": prompt_version, "model": ref.model,
-                             "capability": capability, "data": data, "ts": now_iso()})
+                             "capability": capability, "data": data,
+                             "ts": clock().isoformat(timespec="seconds")})
     return ChatResult(data, "ok", "")
 
 

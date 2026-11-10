@@ -851,7 +851,7 @@ class LlmTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.data, {"title_zh": "标题", "summary_zh": "摘要"})
         self.assertEqual([r["max_tokens"] for r in self.requested], [1024, 2048])  # 翻倍重试
-        self.assertEqual(store.usage(state.today())["calls"], 2)
+        self.assertEqual(store.usage(NOW.date().isoformat())["calls"], 2)
 
     def test_persistent_empty_content_records_reason_code(self) -> None:
         """反复空响应 ⇒ 降级且**记下原因短码**，不再是一个没有线索的 degraded 计数。"""
@@ -867,7 +867,7 @@ class LlmTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("空响应", result.note)
         self.assertEqual(len(self.requested), 1)  # 已到上限，不再重试
-        usage = store.usage(state.today())
+        usage = store.usage(NOW.date().isoformat())
         self.assertEqual(usage["degraded"], 1)
         self.assertEqual(usage["reasons"], {"length_empty": 1})
 
