@@ -14,7 +14,7 @@ import io
 import json
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -211,6 +211,31 @@ class SubcommandSurfaceTests(unittest.TestCase):
         self.assertEqual(code, result.EXIT_USAGE)
         self.assertEqual(payload["error"]["code"], "E_USAGE")
         self.assertIn("--slot", payload["error"]["message"])
+
+    def test_probe_executes_once_in_selected_directory_in_every_format(self) -> None:
+        for flags in (["probe-channel"], ["probe-channel", "--json"],
+                      ["--probe-channel"], ["--probe-channel", "--json"]):
+            with self.subTest(flags=flags):
+                channel = Mock()
+                channel.probe.return_value = {"channel": "feishu_direct", "steps": [],
+                                              "message_id": "mock-message"}
+                with patch("newspipe.backends.make_channel", return_value=channel) as make:
+                    code, out = _run(["--news-dir", str(self.news), *flags])
+                self.assertEqual(code, 0, out)
+                channel.probe.assert_called_once()
+                make.assert_called_once()
+                self.assertEqual(make.call_args.kwargs["news_dir"], self.news)
+
+    def test_serve_propagates_nonzero_exit_as_failed_envelope(self) -> None:
+        for exit_code, error_code in ((1, "E_RUNTIME"), (2, "E_CONFIG"), (3, "E_DELIVERY")):
+            with self.subTest(exit_code=exit_code), \
+                 patch.object(cli.service, "run_forever", return_value=exit_code):
+                code, payload = self._cli("serve", "--once")
+                self.assertEqual(code, exit_code)
+                self.assertFalse(payload["ok"])
+                self.assertIsNone(payload["data"])
+                self.assertEqual(payload["error"]["code"], error_code)
+                self.assertEqual(payload["error"]["details"]["exit_code"], exit_code)
 
     def test_json_flag_works_on_both_sides_of_the_subcommand(self) -> None:
         for argv in (["--news-dir", str(self.news), "status", "--json"],

@@ -313,11 +313,12 @@ def _enrich_only_locked(store: state.Store, cfg: config.Config, *, date: str, dr
     return 0
 
 
-def cmd_probe_channel(cfg: config.Config, *, chat: str, json_out: bool) -> int:
+def cmd_probe_channel(cfg: config.Config, *, chat: str, json_out: bool,
+                      news_dir: Path | None = None) -> int:
     """直连通道自检：token → 建实体 → 发卡 → 更新实体。输出里**不含任何密钥**。"""
     from newspipe import backends
 
-    news_dir = config.default_news_dir()
+    news_dir = news_dir if news_dir is not None else config.default_news_dir()
     if cfg.service.channel != "feishu_direct":
         _emit(f"⚠️ service.yaml 的 channel 是 {cfg.service.channel!r}，"
               "但本命令始终用 feishu_direct 自检（这正是要验证的路径）")
@@ -331,6 +332,12 @@ def cmd_probe_channel(cfg: config.Config, *, chat: str, json_out: bool) -> int:
     if json_out:
         print(json.dumps(probe, ensure_ascii=False, indent=2))
         return 0
+    _print_channel_probe(probe, chat=chat)
+    return 0
+
+
+def _print_channel_probe(probe: dict, *, chat: str) -> None:
+    """Format an already executed probe; presentation must not send another card."""
     creds = probe.get("creds") or {}
     print(f"通道 {probe['channel']} 自检（目标 {chat}）")
     print(f"  凭据：app_id={creds.get('app_id') or '-'} "
@@ -341,7 +348,6 @@ def cmd_probe_channel(cfg: config.Config, *, chat: str, json_out: bool) -> int:
         print(f"  {mark} {step['step']:<20} {step.get('ms', 0):>5}ms  {detail}")
     if probe.get("message_id"):
         print(f"  卡片已发出：card_id={probe.get('card_id')} message_id={probe['message_id']}")
-    return 0
 
 
 # ------------------------------------------------------- 子命令（结果信封）
@@ -666,6 +672,11 @@ def _sub_serve(args: argparse.Namespace, news_dir: Path) -> result.Result:
     cfg, store = _load(news_dir)
     code = service.run_forever(cfg, store, news_dir=news_dir, dry=args.dry, once=args.once,
                                with_inbound=not args.no_inbound)
+    if code:
+        error_code = {2: "E_CONFIG", 3: "E_DELIVERY", 4: "E_VALIDATION"}.get(code, "E_RUNTIME")
+        return result.fail("serve", error_code, "服务启动或运行失败",
+                           hint="运行 `newspipe doctor --json` 并检查服务日志中的失败原因",
+                           details={"exit_code": code}, exit_code=code)
     return result.ok("serve", {"exit_code": code, "once": bool(args.once), "dry": bool(args.dry)})
 
 
@@ -682,7 +693,7 @@ def _sub_probe_channel(args: argparse.Namespace, news_dir: Path) -> result.Resul
         return result.fail("probe-channel", "E_DELIVERY", f"{type(exc).__name__}: {exc}",
                            hint="检查凭据（NEWSPIPE_FEISHU_APP_ID/_APP_SECRET 或钥匙串）与群 id")
     if not args.json:
-        cmd_probe_channel(cfg, chat=chat, json_out=False)
+        _print_channel_probe(probe, chat=chat)
     return result.ok("probe-channel", probe, changed=bool(probe.get("message_id")),
                      printed=not args.json)
 
@@ -924,7 +935,8 @@ def _main_legacy(argv: list[str]) -> int:
             print(message)
         return 0
     if args.probe_channel:
-        return cmd_probe_channel(cfg, chat=args.chat or cfg.chat, json_out=args.json)
+        return cmd_probe_channel(cfg, chat=args.chat or cfg.chat, json_out=args.json,
+                                 news_dir=news_dir)
     if args.serve:
         return service.run_forever(cfg, store, news_dir=news_dir, dry=args.dry, once=args.once)
     if args.enrich_only:
