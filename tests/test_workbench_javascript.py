@@ -24,13 +24,14 @@ const hash = {value: 'old-hash'};
 const button = {disabled: false};
 const form = {
   action: 'http://localhost/api/actions/source-patch', dataset: {},
+  hasAttribute: () => false,
   reportValidity: () => true, setAttribute: () => {}, removeAttribute: () => {},
   querySelectorAll: selector => selector.startsWith('button') ? [button] : [],
   elements: {namedItem: name => name === 'base_hash' ? hash : null}
 };
 global.location = {origin: 'http://localhost', pathname: '/config', search: ''};
 global.document = {
-  getElementById: () => result, createElement: () => new Element(), querySelectorAll: () => [],
+  getElementById: id => id === 'action-result' ? result : null, createElement: () => new Element(), querySelectorAll: () => [],
   addEventListener: (name, fn) => { listeners[name] = fn; }, body: {dataset: {viewPath: '/view'}}
 };
 global.window = {

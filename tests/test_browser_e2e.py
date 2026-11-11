@@ -412,12 +412,65 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 self.expect(page.locator(".banner.err")).to_contain_text("filter")
                 self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
                 page.goto(fixture.url + "/config")
-                remove = page.locator('form[action="/api/actions/source-remove"]').first
                 attempts = []
                 page.on("request", lambda request: attempts.append(request.url) if request.method == "POST" else None)
-                remove.get_by_role("button").click()
-                self.assertEqual(attempts, [], "Dangerous confirmation must still use native validation")
+                page.locator('[data-source]').first.get_by_role("link", name="删除", exact=True).click()
+                self.assertEqual(attempts, [], "Confirmation GET must not delete")
                 self.assertIn("research", config.load(fixture.news_dir).sources)
+
+    def test_action_geometry_is_consistent_on_desktop_and_mobile(self):
+        for engine in self.browsers:
+            for width in (360, 768, 1440):
+                with self.subTest(engine=engine, width=width), self.scenario(engine, width=width) as (fixture, page):
+                    for route in ("/config", "/notifications", "/ops"):
+                        page.goto(fixture.url + route)
+                        heights = page.locator('.btn:visible').evaluate_all('els => els.map(el => el.getBoundingClientRect().height)')
+                        self.assertTrue(all(h >= (44 if width == 360 else 36) for h in heights), (route, heights))
+                        self.assertLess(max(heights) - min(heights), 1, (route, heights))
+
+    def test_delete_dialog_cancel_escape_blocked_and_stale_confirmation(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                page.goto(fixture.url + "/config")
+                row = page.locator('[data-source="reading"]')
+                self.assertEqual(row.locator('[name="confirm_delete"]').count(), 0)
+                trigger = row.get_by_role("link", name="删除", exact=True)
+                posts = []
+                page.on("request", lambda request: posts.append(request.url) if request.method == "POST" else None)
+                trigger.click()
+                dialog = page.get_by_role("dialog")
+                self.expect(dialog).to_be_visible()
+                self.expect(dialog).to_contain_text("个人阅读清单")
+                self.expect(dialog).to_contain_text("待处理内容和历史会保留")
+                self.expect(dialog.get_by_role("button", name="取消", exact=True)).to_be_focused()
+                page.keyboard.press("Escape")
+                self.expect(dialog).not_to_be_visible()
+                self.expect(trigger).to_be_focused()
+                trigger.click()
+                dialog.get_by_role("button", name="取消", exact=True).click()
+                self.assertEqual(posts, [])
+                trigger.click()
+                out = cli.run_subcommand(["source", "enable", "reading", "--json"], fixture.news_dir)
+                self.assertTrue(out.ok, out.as_dict())
+                with page.expect_response(lambda r: "/api/actions/source-remove" in r.url) as response:
+                    dialog.get_by_role("button", name="确认删除", exact=True).click()
+                self.assertEqual(response.value.json()["error"]["code"], "E_CONFLICT")
+                self.expect(dialog).to_be_visible()
+                self.expect(dialog.locator('[data-delete-feedback]')).to_contain_text("E_CONFLICT")
+                dialog.get_by_role("button", name="取消", exact=True).click()
+                page.goto(fixture.url + "/notifications")
+                page.locator('[data-policy="digest"]').get_by_role("link", name="删除", exact=True).click()
+                self.expect(dialog).to_contain_text("research")
+                self.expect(dialog.get_by_role("button", name="确认删除", exact=True)).to_be_disabled()
+
+    def test_actual_source_edit_and_copy_links_land_at_the_editor(self):
+        for engine in self.browsers:
+            for javascript in (True, False):
+                with self.subTest(engine=engine, javascript=javascript), self.scenario(engine, javascript=javascript) as (fixture, page):
+                    for label, selector in (("编辑", "#new > summary"), ("复制", "#source-copy")):
+                        page.goto(fixture.url + "/config")
+                        page.locator('[data-source="research"]').get_by_role("link", name=label, exact=True).click()
+                        self.expect(page.locator(selector)).to_be_in_viewport()
 
     def test_confirmed_source_and_policy_deletion_work_with_and_without_javascript(self):
         for engine in self.browsers:
@@ -430,17 +483,16 @@ class WorkbenchBrowserTests(unittest.TestCase):
                     for action, name, route in (("source-remove", "reading", "/config"),
                                                 ("policy-remove", "archive", "/notifications")):
                         page.goto(fixture.url + route)
-                        form = page.locator(f'form[action="/api/actions/{action}"]').filter(
-                            has=page.locator(f'[name="name"][value="{name}"]'))
                         before = len(attempts)
-                        form.get_by_role("button", name="删除", exact=True).click()
-                        self.assertEqual(len(attempts), before, "Unchecked confirmation must not submit")
-                        form.locator('[name="confirm_delete"]').check()
+                        card = page.locator(f'[data-{"source" if action == "source-remove" else "policy"}="{name}"]')
+                        card.get_by_role("link", name="删除", exact=True).click()
+                        self.assertEqual(len(attempts), before, "Opening confirmation must not submit")
+                        form = page.locator(f'form[action="/api/actions/{action}"]')
                         if javascript:
-                            self.assertTrue(self.submit(page, form, "删除")["ok"])
+                            self.assertTrue(self.submit(page, form, "确认删除")["ok"])
                         else:
                             with page.expect_navigation():
-                                form.get_by_role("button", name="删除", exact=True).click()
+                                form.get_by_role("button", name="确认删除", exact=True).click()
                             self.assertIn(route + "?draft=", page.url)
                         self.assertEqual(len(attempts), before + 1)
                         cfg = config.load(fixture.news_dir)

@@ -5,6 +5,7 @@ import html
 from urllib.parse import quote
 from newspipe.notification_view import REASONS
 from newspipe.policy import human_summary as rule_summary
+from newspipe.webconfirmation import delete_link, delete_dialog
 
 E = lambda value: html.escape(str(value), quote=True)
 
@@ -174,13 +175,12 @@ def sources_body(payload, schema, actions, page):
                    "采集 " + " / ".join(f"{s} {payload['slots'].get(s, '')}" for s in src["slots"]))
         links = ''
         if token:
-            links = (f'<a class="btn" href="/config?edit={quote(src["name"])}">编辑</a>'
-                     f'<a class="btn" href="/config?copy={quote(src["name"])}">复制</a>')
+            links = (f'<a class="btn" href="/config?edit={quote(src["name"])}#new">编辑</a>'
+                     f'<a class="btn" href="/config?copy={quote(src["name"])}#source-copy">复制</a>')
             links += _start("source-toggle", token, payload["sources_hash"], "/config", cls="inline")
             links += _hidden("name", src["name"]) + _hidden("state", "disable" if src["enabled"] else "enable")
             links += f'<button class="btn">{"停用" if src["enabled"] else "启用"}</button></form>'
-            links += _start("source-remove", token, payload["sources_hash"], "/config", cls="inline", confirm="删除源配置？待处理内容和历史会保留。")
-            links += _hidden("name", src["name"]) + '<button class="btn danger">删除</button></form>'
+            links += delete_link(payload, token, "source", src["name"])
         cards.append(f'<article class="source-row" data-source="{E(src["name"])}"><div><h3>{E(src["card_title"])}</h3>'
                      f'<p class="note"><code>{E(src["name"])}</code> · {E(src["adapter"])} · {E(cadence)}</p>'
                      f'<p data-effective="{E(src["name"])}">{E(rule_summary(row["after"], payload["slots"]))}</p></div>'
@@ -198,7 +198,7 @@ def sources_body(payload, schema, actions, page):
             '<a class="btn primary" href="/config?new=1#new">添加消息源</a></div>' + filter_form
             + '<h2>信源清单</h2><div class="source-list">' + ("".join(cards) or '<p class="empty">还没有匹配的消息源。先创建通知策略，再添加消息源。</p>') + '</div>')
     if page.get("copy") and token:
-        body += '<h2>复制消息源 · 新源默认停用</h2>' + _start("source-copy", token, payload["sources_hash"], "/config")
+        body += '<h2 id="source-copy">复制消息源 · 新源默认停用</h2>' + _start("source-copy", token, payload["sources_hash"], "/config")
         body += _hidden("name", page["copy"]) + '<label class="field">新的稳定 ID<input name="new_name" required pattern="[A-Za-z0-9_][A-Za-z0-9_-]*"></label>' + _buttons(preview=False) + '</form>'
     if token:
         edit_name = str(page.get("edit") or "")
@@ -206,7 +206,7 @@ def sources_body(payload, schema, actions, page):
         body += (f'编辑 <code>{E(edit_name)}</code>' if edit_name else "添加消息源 · 直接手填") + '</summary>' + _source_editor(payload, schema, token, page) + '</details>'
     else:
         body += '<p class="notice">写操作未开启，表单不渲染。需要 service.yaml 的 view.actions。</p>'
-    return body + _rss(page)
+    return body + _rss(page) + (delete_dialog() if token else "")
 
 
 def notifications_body(payload, schema, actions, page):
@@ -234,11 +234,11 @@ def notifications_body(payload, schema, actions, page):
     for ident, template in snap["policies"].items():
         values = template["values"]
         rule = {"policy_id": ident, "values": values}
-        body += f'<article class="policy-card"><h3>{E(values.get("label") or ident)}</h3><code>{E(ident)}</code><p data-policy-summary="{E(ident)}">{E(rule_summary(rule, payload["slots"]))}</p>'
+        body += f'<article class="policy-card" data-policy="{E(ident)}"><h3>{E(values.get("label") or ident)}</h3><code>{E(ident)}</code><p data-policy-summary="{E(ident)}">{E(rule_summary(rule, payload["slots"]))}</p>'
         body += f'<p class="note">绑定 {len(template["bound_sources"])} 个源，含停用源；额度不共享。</p>'
         if token:
             body += f'<a class="btn" href="/notifications?edit={quote(ident)}#policy-editor">编辑</a> <a class="btn" href="/notifications?copy={quote(ident)}#policy-editor">复制</a>'
-            body += _start("policy-remove", token, payload["sources_hash"], "/notifications", cls="inline", confirm="删除策略？仍有信源引用时会被拒绝。") + _hidden("name", ident) + '<button class="btn danger">删除</button></form>'
+            body += " " + delete_link(payload, token, "policy", ident)
         body += '</article>'
     body += '</div>'
     if not snap["policies"]:
@@ -267,7 +267,7 @@ def notifications_body(payload, schema, actions, page):
         if ident:
             body += '<h3>受影响的信源</h3><ul>' + "".join(f'<li>{E(name)} · {"已启用" if payload["source_values"][name]["enabled"] else "已停用"}</li>' for name in snap["policies"].get(ident, {}).get("bound_sources", [])) + '</ul>'
         body += _buttons() + '</form></details>'
-    return body
+    return body + (delete_dialog() if token else "")
 
 
 def preview_result(data):

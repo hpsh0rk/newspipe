@@ -379,7 +379,7 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                 return
             query = parse_qs(urlparse(self.path).query)
             is_batch = route.startswith("/batch/")
-            if route in ("/", "/ops", "/config", "/notifications", "/items", view_path) or is_batch:
+            if route in ("/", "/ops", "/config", "/notifications", "/items", "/confirm-delete", view_path) or is_batch:
                 try:
                     payload = self._view()
                 except Exception as exc:                   # 配置坏了要说清楚，别回空壳
@@ -417,7 +417,17 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                         status, page = 404, view_mod.batch_html(payload, page={})
                     self._send_html(status, page)
                     return
-                if route == "/ops":
+                if route == "/confirm-delete":
+                    from newspipe.webconfirmation import confirmation_body
+                    kind, name = (query.get("kind") or [""])[0], (query.get("name") or [""])[0]
+                    try:
+                        body = confirmation_body(payload, act, kind, name)
+                    except ValueError:
+                        self._send(404, {"ok": False, "error": "删除目标不存在"})
+                        return
+                    page = view_mod._page(tab="config" if kind == "source" else "notifications",
+                                          sub_meta=payload, svc=payload["service"], body=body)
+                elif route == "/ops":
                     page = view_mod.ops_html(payload, actions=act, flash=flash)
                 elif route == "/config":
                     page = self._config_page(payload, act, flash, query)

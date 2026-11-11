@@ -10,19 +10,20 @@ JAVASCRIPT = r"""'use strict';
     revisions.set(form, (revisions.get(form) || 0) + 1);
   };
   const result = document.getElementById('action-result');
-  const addText = (tag, content, parent = result) => {
+  let feedback = result;
+  const addText = (tag, content, parent = feedback) => {
     const node = document.createElement(tag);
     node.textContent = content;
     parent.append(node);
     return node;
   };
   const show = (ok, title, lines) => {
-    result.replaceChildren();
-    result.className = `banner ${ok ? 'ok' : 'err'}`;
-    result.hidden = false;
+    feedback.replaceChildren();
+    feedback.className = `banner ${ok ? 'ok' : 'err'}`;
+    feedback.hidden = false;
     addText('h3', title);
     lines.filter(Boolean).forEach(line => addText('p', line));
-    result.focus({preventScroll: true});
+    feedback.focus({preventScroll: true});
   };
   const override = node => {
     const select = node.querySelector('select[name^="inherit."]');
@@ -54,6 +55,18 @@ JAVASCRIPT = r"""'use strict';
     }
   }, true);
   document.querySelectorAll('form[data-server-validation]').forEach(form => { form.noValidate = false; });
+  const dialog = document.getElementById('delete-dialog');
+  let deleteTrigger = null;
+  const closeDelete = () => {
+    if (dialog && !busy.has(dialog.querySelector('form'))) dialog.close();
+  };
+  if (dialog) {
+    dialog.querySelector('[data-delete-cancel]').addEventListener('click', closeDelete);
+    dialog.addEventListener('cancel', event => {
+      if (busy.has(dialog.querySelector('form'))) event.preventDefault();
+    });
+    dialog.addEventListener('close', () => { if (deleteTrigger?.isConnected) deleteTrigger.focus({preventScroll: true}); });
+  }
   document.addEventListener('input', event => {
     const form = event.target.closest('form[method="post"]');
     if (form) markDirty(form);
@@ -68,6 +81,23 @@ JAVASCRIPT = r"""'use strict';
     if (dirty.size) { event.preventDefault(); event.returnValue = ''; }
   });
   document.addEventListener('click', event => {
+    const deletion = event.target.closest('a[data-delete]');
+    if (deletion && dialog && typeof dialog.showModal === 'function') {
+      event.preventDefault();
+      deleteTrigger = deletion;
+      const form = dialog.querySelector('form');
+      form.action = `/api/actions/${deletion.dataset.deleteAction}`;
+      for (const [field, key] of [['token', 'Token'], ['base_hash', 'Hash'], ['name', 'Name'], ['return_to', 'Route']]) {
+        form.elements.namedItem(field).value = deletion.dataset[`delete${key}`];
+      }
+      dialog.querySelector('#delete-title').textContent = `删除 ${deletion.dataset.deleteTitle}？（${deletion.dataset.deleteName}）`;
+      dialog.querySelector('#delete-message').textContent = deletion.dataset.deleteMessage;
+      dialog.querySelector('[data-delete-feedback]').hidden = true;
+      form.querySelector('[type="submit"]').disabled = deletion.dataset.deleteBlocked === '1';
+      dialog.showModal();
+      dialog.querySelector('[data-delete-cancel]').focus();
+      return;
+    }
     const link = event.target.closest('a[href]');
     const targetURL = link ? new URL(link.href) : null;
     if (link && dirty.size && targetURL.origin === location.origin &&
@@ -112,11 +142,13 @@ JAVASCRIPT = r"""'use strict';
     if (!form.action.includes('/api/actions/')) return;
     event.preventDefault();
     if (busy.has(form)) return;
+    if (form.hasAttribute('data-delete-form') && deleteTrigger?.dataset.deleteBlocked === '1') return;
     if (!form.reportValidity()) return;
     if (form.dataset.confirm && !window.confirm(form.dataset.confirm)) return;
     const target = event.submitter?.getAttribute('formaction') || form.action;
     const submittedRevision = revisions.get(form) || 0;
     const data = new URLSearchParams(new FormData(form));
+    feedback = form.hasAttribute('data-delete-form') ? dialog.querySelector('[data-delete-feedback]') : result;
     const scroll = window.scrollY;
     const buttons = [...form.querySelectorAll('button[type="submit"], button:not([type])')];
     busy.add(form);
@@ -159,12 +191,12 @@ JAVASCRIPT = r"""'use strict';
         const latest = document.createElement('a');
         latest.href = form.elements.namedItem('return_to')?.value || location.pathname;
         latest.textContent = '查看最新页面（其他未保存的编辑仍保留）';
-        result.append(latest);
+        feedback.append(latest);
         if (data.get('create_only') === '1' || target.endsWith('source-copy')) {
           const link = document.createElement('a');
           link.href = `${target.endsWith('policy-save') ? '/notifications' : '/config'}?edit=${encodeURIComponent(payload.policy || payload.source || data.get('new_name') || data.get('name'))}`;
           link.textContent = '打开已保存配置继续编辑';
-          result.append(link);
+          feedback.append(link);
           // A create form never becomes an implicit overwrite form.
           form.dataset.created = '1';
         }
@@ -172,6 +204,7 @@ JAVASCRIPT = r"""'use strict';
         const hash = form.elements.namedItem('base_hash');
         if (hash && payload.hash) hash.value = payload.hash;
         await refreshReads();
+        if (form.hasAttribute('data-delete-form')) dialog.close();
       }
     } catch (_) {
       show(false, '结果未确认', ['连接中断或服务响应不可用。输入已保留，不会自动重试写操作。',
