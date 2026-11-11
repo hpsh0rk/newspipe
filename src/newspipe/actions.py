@@ -115,7 +115,7 @@ def _argv_flush(form: dict[str, list[str]]) -> list[str]:
     return ["run", "--source", name]
 
 
-# --------------------------------------------------------- 配置页：表单 → 整段映射
+# --------------------------------------------------------- 配置页：表单 → 配置映射
 #: 表单字段前缀。页面上的输入名是 `f.<schema path>`（如 `f.fetch.trigger`），
 #: 这样加字段只改 `config.describe_schema()`，翻译层不用动。
 FORM_PREFIX = "f."
@@ -147,11 +147,12 @@ def _coerce(field: dict[str, Any], raw: list[str]) -> Any:
 
 
 def build_source_body(form: dict[str, list[str]],
-                      schema: dict[str, Any] | None = None) -> dict[str, Any]:
-    """把配置页的表单拼成**整段映射**（`source set --from-json` 要的就是这个）。
+                      schema: dict[str, Any] | None = None, *,
+                      patch: bool = False) -> dict[str, Any]:
+    """把表单拼成 `source set` 的整段映射或 `source patch` 的补丁。
 
-    为什么是整段而不是补丁：`source set` 是「新增或整体替换」。页面必须提交全部字段，
-    否则没提交的字段会退回默认值 —— 所以编辑表单预填当前值（`config.source_values`）。
+    未提交字段不进入映射。空数字在 set 中省略以使用默认值；在 patch 中保留 None，
+    明确删除旧键以恢复默认值，而不是把清空误当成未编辑。0 始终是显式值。
     """
     from newspipe import config as config_mod
 
@@ -163,7 +164,7 @@ def build_source_body(form: dict[str, list[str]],
         if raw is None:
             continue
         value = _coerce(field, raw)
-        if value is None:                      # 空数字 = 不写（让默认值生效），不静默变 0
+        if value is None and not patch:
             continue
         cursor = body
         parts = path.split(".")
@@ -244,7 +245,7 @@ def notification_binding(form: dict[str, list[str]]) -> dict | None:
 
 
 def _source_patch_body(form):
-    body = build_source_body(form)
+    body = build_source_body(form, patch=True)
     if "notify_policy" in form:
         body["notify"] = notification_binding(form)
     return body

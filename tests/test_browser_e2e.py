@@ -311,6 +311,33 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 self.assertIn("/config?edit=research", page.url)
                 self.assertEqual(len(attempts), 1)
 
+    def test_source_numeric_clear_preview_save_and_reload_restore_defaults(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                seed = cli.run_subcommand(["source", "patch", "research", "--from-json",
+                    '{"filter":{"max_items":5},"fetch":{"interval_min":30},"enrich":{"max_body_chars":900}}', "--json"], fixture.news_dir)
+                self.assertTrue(seed.ok, seed.as_dict())
+                form = self.editor(fixture, page)
+                field = form.locator('[name="f.filter.max_items"]')
+                field.locator("xpath=ancestor::details[1]").locator(":scope > summary").click()
+                field.fill("")
+                form.locator('[name="f.fetch.interval_min"]').fill("")
+                before = (fixture.news_dir / "sources.yaml").read_bytes()
+                self.assertTrue(self.submit(page, form, "预览变化")["ok"])
+                self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
+                self.assertTrue(self.submit(page, form)["ok"])
+                self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
+                form.locator('[name="dry"]').uncheck()
+                saved = self.submit(page, form)
+                self.assertTrue(saved["ok"], saved)
+                values = config.source_values(config.load(fixture.news_dir).sources["research"])
+                self.assertEqual(values["filter.max_items"], 13)
+                self.assertEqual(values["fetch.interval_min"], 0.0)
+                self.assertEqual(values["enrich.max_body_chars"], 900)
+                page.reload()
+                self.expect(form.locator('[name="f.filter.max_items"]')).to_have_value("13")
+                self.expect(form.locator('[name="f.fetch.interval_min"]')).to_have_value("0.0")
+
     def test_no_javascript_failed_drafts_and_core_writes(self):
         for engine in self.browsers:
             with self.subTest(engine=engine), self.scenario(engine, width=360, javascript=False) as (fixture, page):
@@ -344,10 +371,18 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 self.expect(form.locator('[name="notify_policy"]')).to_have_value("digest")
                 self.assertEqual(self.source_label(fixture), "研究与论文")
                 form.locator('[name="f.feeds"]').fill("https://example.invalid/repaired.xml")
+                form.locator('[name="f.fetch.interval_min"]').fill("")
+                maximum = form.locator('[name="f.filter.max_items"]')
+                if not maximum.is_visible():
+                    maximum.locator("xpath=ancestor::details[1]").locator(":scope > summary").click()
+                maximum.fill("")
                 form.locator('[name="dry"]').uncheck()
                 with page.expect_navigation():
                     form.get_by_role("button", name="验证 / 保存").click()
                 self.assertEqual(self.source_label(fixture), 'Source <draft> "value"')
+                values = config.source_values(config.load(fixture.news_dir).sources["research"])
+                self.assertEqual(values["fetch.interval_min"], 0.0)
+                self.assertEqual(values["filter.max_items"], 13)
                 page.goto(fixture.url + "/ops")
                 before = fixture.store.pending_count("research")
                 with page.expect_navigation():

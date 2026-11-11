@@ -246,6 +246,93 @@ class NotificationContractTests(unittest.TestCase):
         self.assertEqual(config.load(self.news).sources["src"].notify.overrides,
                          {"mode": "collect", "slots": (), "quiet_hours": ""})
 
+    def test_source_numeric_clearing_restores_defaults_but_omission_preserves(self):
+        seed = {"fetch": {"interval_min": 30}, "filter": {"min_items": 2, "max_items": 5},
+                "enrich": {"max_body_chars": 900, "fetch_body": True},
+                "deliver": {"budget": {"max_cards_per_day": 4, "min_gap_min": 10}}}
+        self.assertTrue(self.command("source", "patch", "src", "--from-json", json.dumps(seed))["ok"])
+        other = self.path.read_text().split("  other:", 1)[1]
+        form = {"name": ["src"], "f.feed_label": ["Only label"]}
+        self.assertTrue(actions.dispatch("source-patch", form, self.news)["ok"])
+        values = config.source_values(config.load(self.news).sources["src"])
+        old = {"fetch.interval_min": 30, "filter.min_items": 2, "filter.max_items": 5,
+               "enrich.max_body_chars": 900, "deliver.budget.max_cards_per_day": 4,
+               "deliver.budget.min_gap_min": 10}
+        for key, value in old.items():
+            self.assertEqual(values[key], value, key)
+        form = {"name": ["src"], **{f"f.{key}": [""] for key in old}}
+        out = actions.dispatch("source-patch", form, self.news)
+        self.assertTrue(out["ok"], out)
+        self.assertTrue(out["changed"], out)
+        values = config.source_values(config.load(self.news).sources["src"])
+        defaults = {"fetch.interval_min": 0.0, "filter.min_items": 1, "filter.max_items": 13,
+                    "enrich.max_body_chars": 6000, "deliver.budget.max_cards_per_day": 12,
+                    "deliver.budget.min_gap_min": 0.0}
+        raw = yaml.safe_load(self.path.read_text())["sources"]["src"]
+        for key, value in defaults.items():
+            self.assertEqual(values[key], value, key)
+            cursor = raw
+            parts = key.split(".")
+            for part in parts[:-1]:
+                cursor = cursor[part]
+            self.assertNotIn(parts[-1], cursor, key)
+        self.assertTrue(values["enrich.fetch_body"])
+        self.assertEqual(raw["custom_adapter_key"], {"nested": [1, 2]})
+        self.assertIn("custom_card_key", raw["card"])
+        self.assertEqual(self.path.read_text().split("  other:", 1)[1], other)
+
+    def test_numeric_clearing_dry_run_and_conflict_preserve_bytes(self):
+        form = {"name": ["src"], "f.fetch.interval_min": [""], "dry": ["1"],
+                "base_hash": [edit.file_hash(self.path)]}
+        before = self.path.read_bytes()
+        out = actions.dispatch("source-patch", form, self.news)
+        self.assertTrue(out["ok"], out)
+        self.assertFalse(out["changed"])
+        self.assertEqual(self.path.read_bytes(), before)
+        form.pop("dry")
+        form["base_hash"] = ["stale"]
+        out = actions.dispatch("source-patch", form, self.news)
+        self.assertEqual(out["error"]["code"], "E_CONFLICT")
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_numeric_clear_preview_and_save_predict_the_same_defaults(self):
+        self.assertTrue(self.command("source", "patch", "src", "--from-json",
+            '{"notify":null,"filter":{"max_items":5},"deliver":{"budget":{"max_cards_per_day":4}}}',
+            "--confirm-conversion")["ok"])
+        state.Store(self.news).append_pending("src", [_item(i) for i in range(14)])
+        form = {"name": ["src"], "f.filter.max_items": [""],
+                "f.deliver.budget.max_cards_per_day": [""]}
+        before = self.path.read_bytes()
+        preview = actions.dispatch("notification-preview", form, self.news)
+        self.assertTrue(preview["ok"], preview)
+        self.assertEqual(preview["data"]["sources"][0]["plan"]["planned"], 13)
+        self.assertEqual(preview["data"]["sources"][0]["after"]["values"]["max_cards_per_day"], 12)
+        self.assertEqual(self.path.read_bytes(), before)
+        saved = actions.dispatch("source-patch", form, self.news)
+        self.assertTrue(saved["ok"], saved)
+        actual = self.command("notification", "preview", "--source", "src")
+        self.assertEqual(actual["data"]["sources"][0]["plan"], preview["data"]["sources"][0]["plan"])
+        self.assertEqual(actual["data"]["sources"][0]["after"], preview["data"]["sources"][0]["after"])
+
+    def test_blank_create_uses_defaults_and_patch_zero_remains_explicit(self):
+        form = {"name": ["fresh"], "f.adapter": ["hn"], "f.fetch.trigger": ["manual"],
+                "f.fetch.interval_min": [""], "f.filter.max_items": [""]}
+        out = actions.dispatch("source-save", form, self.news)
+        self.assertTrue(out["ok"], out)
+        values = config.source_values(config.load(self.news).sources["fresh"])
+        self.assertEqual(values["fetch.interval_min"], 0.0)
+        self.assertEqual(values["filter.max_items"], 13)
+        raw = yaml.safe_load(self.path.read_text())["sources"]["fresh"]
+        self.assertNotIn("interval_min", raw["fetch"])
+        self.assertNotIn("filter", raw)
+        form = {"name": ["src"], "f.fetch.interval_min": ["0"], "f.filter.min_items": ["0"],
+                "f.deliver.budget.max_cards_per_day": ["0"], "f.deliver.budget.min_gap_min": ["0"]}
+        self.assertTrue(actions.dispatch("source-patch", form, self.news)["ok"])
+        raw = yaml.safe_load(self.path.read_text())["sources"]["src"]
+        self.assertEqual(raw["fetch"]["interval_min"], 0)
+        self.assertEqual(raw["filter"]["min_items"], 0)
+        self.assertEqual(raw["deliver"]["budget"], {"max_cards_per_day": 0, "min_gap_min": 0})
+
     def test_separate_collect_and_notify_commands_use_distinct_pipeline_entrypoints(self):
         run = pipeline.SourceRun(source="src", status="collected")
         with patch.object(pipeline, "collect_source", return_value=run) as collect, \

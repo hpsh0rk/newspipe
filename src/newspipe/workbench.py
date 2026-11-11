@@ -36,6 +36,8 @@ def _field(field, value, *, prefix, scope, slots):
     help_text = field.get("help", "")
     if prefix == "n." and kind in ("int", "float"):
         help_text += " 自定义时必须填写数值（可以为 0）；使用策略值请明确选择继承。"
+    if prefix == "f." and kind in ("int", "float"):
+        help_text += f' 主动清空会恢复默认值 {field["default"]}；0 是明确设置，不等于清空。'
     described = f'aria-describedby="{E(ident)}-help {E(ident)}-error" aria-errormessage="{E(ident)}-error"'
     attr = f'id="{E(ident)}" name="{E(name)}" {described}'
     if kind == "bool":
