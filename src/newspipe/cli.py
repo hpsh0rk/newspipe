@@ -125,6 +125,9 @@ CONTRACT: list[dict[str, Any]] = [
      "usage": "newspipe rsshub set --base-url URL [--dry-run] [--base-hash HASH] [--json]",
      "args": ["--base-url", "--dry-run", "--base-hash"], "writes": True,
      "examples": ["newspipe rsshub set --base-url https://rsshub.example.com --dry-run --json"]},
+    {"name": "rsshub probe", "summary": "只读测试 RSSHub 连接或 RSS 订阅；不采集、不发送",
+     "usage": "newspipe rsshub probe [--base-url URL] [--feed URL_OR_ROUTE] [--json]",
+     "args": ["--base-url", "--feed"], "writes": False, "examples": ["newspipe rsshub probe --feed /sspai/matrix --json"]},
     {"name": "migrate", "summary": "把 v1 状态迁到 v2 布局（幂等）",
      "usage": "newspipe migrate [--json]", "args": [], "writes": True,
      "examples": ["newspipe migrate --json"]},
@@ -473,6 +476,12 @@ def _sub_doctor(args: argparse.Namespace, news_dir: Path) -> result.Result:
     data["slots"] = cfg.slots
     data["channel"] = cfg.service.channel
     data["inbound"] = cfg.service.inbound_mode
+    from newspipe import rssconnect
+    data["rsshub"] = rssconnect.describe(cfg)
+    if data["rsshub"]["dependent_sources"]:
+        warnings.append("启用信源使用 RSSHub 相对路由；连接尚未检测。用 newspipe rsshub probe --json 显式测试")
+        if data["rsshub"]["error"]:
+            warnings.append("RSSHub 环境地址无效；仅影响相对路由。请在后台设置有效地址")
 
     # 同一应用第二个长连接 ⇒ 飞书随机投递（普通聊天消息可能被本项目静默丢弃）。
     # Positive detection is a configuration error, matching serve's pre-connection refusal.
@@ -612,6 +621,10 @@ def _sub_rsshub(args: argparse.Namespace, news_dir: Path) -> result.Result:
     if args.action == "show":
         cfg, _, base_hash = edit.sources_snapshot(news_dir)
         return result.ok(command, {**rssconnect.describe(cfg), "hash": base_hash})
+    if args.action == "probe":
+        cfg, _ = _load(news_dir)
+        configured = args.base_url if args.base_url is not None else cfg.rsshub.get("base_url", "")
+        return rssconnect.probe(configured, args.feed)
     if args.base_url is None:
         return result.fail(command, "E_USAGE", "需要 --base-url；传空字符串表示恢复继承")
     return _write_result(command, edit.set_rsshub(news_dir, args.base_url,
@@ -921,8 +934,9 @@ def _build_sub_parser() -> argparse.ArgumentParser:
     cfgp.add_argument("action", choices=["describe"])
 
     hub = add("rsshub")
-    hub.add_argument("action", choices=["show", "set"])
+    hub.add_argument("action", choices=["show", "set", "probe"])
     hub.add_argument("--base-url")
+    hub.add_argument("--feed")
     hub.add_argument("--dry-run", action="store_true")
     hub.add_argument("--base-hash")
 

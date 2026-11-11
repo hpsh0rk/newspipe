@@ -344,6 +344,11 @@ def _argv_retry(form):
                          "--operation-id", _one(form, "operation_id")], form)
 
 
+def _argv_rsshub_probe(form):
+    return ["rsshub", "probe", "--base-url", (form.get("r.base_url") or [""])[0],
+            *(["--feed", form["probe_feed"][0]] if (form.get("probe_feed") or [""])[0].strip() else [])]
+
+
 ACTIONS: dict[str, Action] = {
     a.name: a for a in (
         Action("run", "跑一轮", _argv_run),
@@ -355,6 +360,7 @@ ACTIONS: dict[str, Action] = {
         Action("policy-remove", "删除通知策略", _argv_policy_remove, danger=True),
         Action("global-save", "保存全局通知设置", _argv_globals, danger=True),
         Action("notification-preview", "预览有效通知规则", _argv_preview),
+        Action("rsshub-probe", "只读检测 RSSHub / RSS 订阅", _argv_rsshub_probe),
         Action("collect", "只采集一次", lambda f: ["collect", _one(f, "name"), *(["--dry"] if _flag(f, "dry") else [])]),
         Action("notify", "通知现有待处理", _argv_notify, danger=True),
         Action("notification-retry", "安全重试原操作", _argv_retry, danger=True),
@@ -382,8 +388,14 @@ def dispatch(name: str, form: dict[str, list[str]], news_dir: Path) -> dict[str,
     argv = [*argv, "--json"]
     res = cli.run_subcommand(argv, news_dir)
     data = res.as_dict()
+    displayed = list(argv)
+    if name.startswith("rsshub-"):
+        from newspipe import rssconnect
+        for index, arg in enumerate(displayed[:-1]):
+            if arg in ("--base-url", "--feed"):
+                displayed[index + 1] = rssconnect.safe_url(displayed[index + 1])
     # 把「这个信封是哪个 Web 动作、以及它实际跑了哪条 CLI」记进 payload：
     # 用户看到失败时，下一步就是去终端复现这条命令。
     data["action"] = {"name": spec.name, "label": spec.label, "danger": spec.danger,
-                      "cli": " ".join(a if " " not in a else f"'{a}'" for a in argv)}
+                      "cli": " ".join(a if " " not in a else f"'{a}'" for a in displayed)}
     return data

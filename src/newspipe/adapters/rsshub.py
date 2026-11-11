@@ -10,7 +10,6 @@ from __future__ import annotations
 import email.utils
 import re
 import time
-import xml.etree.ElementTree as ET
 
 from newspipe import net, rssconnect
 from newspipe.errors import ConfigError
@@ -36,15 +35,19 @@ def fetch(cfg: dict | None = None, since: float | None = None) -> list[dict]:
         last_err: Exception | None = None
         for _ in range(3):  # RSSHub 冷路由首发常见 503（内部重试后），退避再试
             try:
-                root = ET.fromstring(net.request(url, timeout=40, http2=h2))
+                root = rssconnect.parse_rss(net.request(url, timeout=40, http2=h2))
                 break
+            except rssconnect.ProbeError as exc:
+                raise ConfigError(rssconnect.MESSAGES[exc.reason][0]) from None
             except Exception as exc:
                 last_err = exc
                 time.sleep(3)
         if root is None:
-            msg = str(last_err or "")[:200]
-            if "not configured" in msg.lower() or "401" in msg or "cookie" in msg.lower():
-                raise ConfigError(f"{label}: RSSHub 路由缺凭据 — {msg}") from last_err
+            import urllib.error
+            code = last_err.code if isinstance(last_err, urllib.error.HTTPError) else None
+            msg = f"HTTP {code}" if code else "连接失败；请在后台测试订阅以检查地址和网络"
+            if code in (401, 403):
+                raise ConfigError(f"{label}: RSSHub 路由缺凭据") from None
             failed.append(f"{label}: {msg}")
             continue
         ok_feeds += 1

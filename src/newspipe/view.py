@@ -412,6 +412,7 @@ def build(news_dir: Path | None = None, *, now: datetime | None = None) -> dict[
     news_dir = Path(news_dir or config.default_news_dir())
     from newspipe import callback_jobs
     from newspipe.notification_view import snapshot as notification_snapshot
+    from newspipe import rssconnect
     cfg, _, sources_hash = edit.sources_snapshot(news_dir)
     store = state.Store(news_dir)
     moment = now or datetime.now()
@@ -441,6 +442,7 @@ def build(news_dir: Path | None = None, *, now: datetime | None = None) -> dict[
         },
         "sources": rows,
         "sources_hash": sources_hash,
+        "rsshub": rssconnect.describe(cfg),
         "source_values": {name: config.source_values(source) for name, source in cfg.sources.items()},
         "notification": notification_snapshot(news_dir, now=moment, cfg=cfg, base_hash=sources_hash),
         "today": today,
