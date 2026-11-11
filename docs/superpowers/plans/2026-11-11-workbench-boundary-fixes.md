@@ -46,12 +46,12 @@
 
 ### Task 3: Local Consumption Without Notification Silence
 
-**Files:** Modify `src/newspipe/delivery.py`; test `tests/test_notifications.py`, `tests/test_news_pipeline.py`.
+**Files:** Modify `src/newspipe/policy.py`; test `tests/test_notifications.py`, `tests/test_news_pipeline.py`.
 **Interfaces:** `plan()` keeps min-items/card-independent local capacity, but notification silence only constrains remote effects for collect-mode sources.
 
-- [ ] Add collect-mode tests retaining source/global quiet hours, pause and zero quotas; verify local batches consume pending without enrichment/send, and min-items still defers. Observe the quiet regression fail.
-- [ ] Exclude local collect consumption from notification silence; run full suite, expected PASS.
-- [ ] Run diff check; commit `fix: keep notification silence out of local collection`.
+- [x] Add collect-mode tests retaining source/global quiet hours, pause and zero quotas; verify local batches consume pending without enrichment/send, and min-items still defers. Observe the quiet regression fail.
+- [x] Exclude local collect consumption from notification silence; run full suite, expected PASS.
+- [x] Run diff check; commit `fix: keep notification silence out of local collection`.
 
 ### Task 4: Revision-Safe Save Feedback
 

@@ -173,7 +173,7 @@ def effective_source(cfg: "Config", source: "SourceConfig") -> "SourceConfig":
     values = rule.values
     deliver = DeliverCfg(form="state_only" if values["mode"] == "collect" else values["form"],
                          priority="high" if values["bypass_source_limits"] else "normal",
-                         quiet_hours=values["quiet_hours"],
+                         quiet_hours="" if values["mode"] == "collect" else values["quiet_hours"],
                          max_cards_per_day=values["max_cards_per_day"],
                          min_gap_min=values["min_gap_min"])
     return replace(source, deliver=deliver)

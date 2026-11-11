@@ -139,6 +139,29 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(self.notify().status, "nothing_new")
         self.send.assert_not_called()
 
+    def test_collect_mode_ignores_retained_notification_silence_and_hard_gates(self):
+        self.cfg = replace(self.cfg,
+            policies={"p": policy.NotificationPolicy(mode="collect", quiet_hours="08:00-09:00", max_cards_per_day=0, min_gap_min=10)},
+            notifications=policy.NotificationGlobals(paused=True, quiet_hours="08:00-09:00", max_cards_per_day=0, min_gap_min=10))
+        with patch.object(pipeline, "_enrich_new", side_effect=AssertionError("collect enriched")):
+            self.assertEqual(self.collect(force=True).status, "state_only")
+        self.assertEqual(self.store.pending_count("src"), 0)
+        self.assertEqual(self.store.pushed_ids("src"), {"e1"})
+        self.assertEqual(len(list((self.store.root / "batches" / DAY).glob("*.json"))), 1)
+        self.create.assert_not_called()
+        self.send.assert_not_called()
+        self.assertEqual(policy.resolve(self.cfg, self.source).values["quiet_hours"], "08:00-09:00")
+
+    def test_collect_mode_still_obeys_min_items_and_legacy_local_quiet_is_unchanged(self):
+        self.cfg = replace(self.cfg, sources={"src": replace(self.source, filter=replace(self.source.filter, min_items=2))},
+                           policies={"p": policy.NotificationPolicy(mode="collect", quiet_hours="08:00-09:00")})
+        self.assertEqual(self.collect(force=True).status, "below_min_items")
+        self.assertEqual(self.store.pending_count("src"), 1)
+        legacy = replace(_src(form="state_only", quiet_hours="08:00-09:00"), notify=None)
+        self.cfg = replace(self.cfg, sources={"src": legacy})
+        self.assertEqual(pipeline.run_source(self.cfg, self.store, "src", now=NOW)[0].status, "quiet_hours")
+        self.send.assert_not_called()
+
     def test_source_budget_read_is_side_effect_free_and_incomplete_history_fails_closed(self):
         path = self.store._path("budget", f"{DAY}.json")
         path.write_text(json.dumps({"cards": 2, "operations": ["lost-1", "lost-2"]}))
