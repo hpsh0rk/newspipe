@@ -346,7 +346,7 @@ def pending_items(store: state.Store, source: str, *, limit: int = 12) -> list[d
 
 
 def action_snapshot(news_dir: Path, *, now: datetime | None = None,
-                    event_days: int = 7, queue_days: int = 30) -> dict[str, Any]:
+                    event_days: int = 7, queue_days: int = 30, payload: dict | None = None) -> dict[str, Any]:
     """写操作页需要的**动作面数据**（不放进 `/view` 契约）。
 
     为什么分开：`/view` 是给宿主/面板的**只读**契约，形状要稳；这里是「我自己的页面要
@@ -355,10 +355,14 @@ def action_snapshot(news_dir: Path, *, now: datetime | None = None,
     from newspipe import events
 
     moment = now or datetime.now()
-    cfg = config.load(news_dir)
+    if payload is None:
+        cfg, _, base_hash = edit.sources_snapshot(news_dir)
+        names, slots = cfg.sources, cfg.slots
+    else:
+        names, slots, base_hash = payload["source_values"], payload["slots"], payload["sources_hash"]
     store = state.Store(news_dir)
     pending = {name: pending_items(store, name)
-               for name, src in cfg.sources.items() if store.pending_count(name)}
+               for name in names if store.pending_count(name)}
     return {
         "generated_at": moment.isoformat(timespec="seconds"),
         "queue": events.queue(news_dir, days=queue_days),
@@ -366,8 +370,8 @@ def action_snapshot(news_dir: Path, *, now: datetime | None = None,
                                                  limit=30)
                    if e.get("type") != "favorite"],
         "pending": pending,
-        "sources_hash": edit.file_hash(news_dir / "sources.yaml"),
-        "run_targets": ["am", "noon", "pm", "poll"],
+        "sources_hash": base_hash,
+        "run_targets": [*(f"slot:{slot}" for slot in slots), "poll"],
     }
 
 
@@ -402,11 +406,8 @@ def build(news_dir: Path | None = None, *, now: datetime | None = None) -> dict[
     from newspipe.service import runtime_status
     news_dir = Path(news_dir or config.default_news_dir())
     from newspipe import callback_jobs
-    import hashlib
     from newspipe.notification_view import snapshot as notification_snapshot
-    sources_text = (news_dir / "sources.yaml").read_text(encoding="utf-8")
-    sources_hash = hashlib.sha256(sources_text.encode("utf-8")).hexdigest()[:16]
-    cfg = config.load(news_dir, sources_text=sources_text)
+    cfg, _, sources_hash = edit.sources_snapshot(news_dir)
     store = state.Store(news_dir)
     moment = now or datetime.now()
     digest = moment.strftime("%Y-%m-%d")
@@ -482,7 +483,7 @@ def _form(action: str, token: str, fields: dict[str, Any], label: str, *,
         for k, v in fields.items())
     css = "btn" + (" danger" if danger else "") + (f" {cls}" if cls else "")
     return (f'<form method="post" action="/api/actions/{html.escape(action)}" class="inline">'
-            f'<input type="hidden" name="token" value="{html.escape(token)}">{hidden}{extra}'
+            f'<input type="hidden" name="token" value="{html.escape(token)}"><input type="hidden" name="return_to" value="/ops">{hidden}{extra}'
             f'<button class="{css}" type="submit">{html.escape(label)}</button></form>')
 
 
@@ -759,6 +760,7 @@ def ops_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
     toolbar = (
         '<form method="post" action="/api/actions/run" class="toolbar">'
         f'<input type="hidden" name="token" value="{html.escape(token)}">'
+        '<input type="hidden" name="return_to" value="/ops">'
         f'<label>目标 <select name="target">{opts}</select></label>'
         '<label><input type="checkbox" name="dry" value="1" checked> 试运行（不发卡）</label>'
         '<button class="btn primary" type="submit">跑一轮</button>'

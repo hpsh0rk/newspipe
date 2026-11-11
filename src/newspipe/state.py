@@ -292,7 +292,50 @@ class Store:
     # ── 打扰预算 ────────────────────────────────────────────────────────────
     def budget_state(self, date: str) -> dict:
         data = read_json(self.root / "budget" / f"{date}.json")
-        return data if isinstance(data, dict) else {"cards": 0, "last_card_ts": None}
+        data = data if isinstance(data, dict) else {"cards": 0, "last_card_ts": None}
+        confirmed = [batch for batch in self._confirmed_pending() if
+                     (batch.get("delivery_confirmation_date") or batch.get("delivery_date")) == date]
+        if not confirmed:
+            return data
+        # Remote receipts are authoritative even if any later local write failed.
+        # This is a pure overlay; note_card eventually persists the same operation IDs.
+        data = self._source_accounting(date, data)
+        for batch in confirmed:
+            operation, source = batch["delivery_id"], batch["source"]
+            stamp = batch.get("delivery_confirmed_at") or batch["delivery_at"]
+            already = operation in data.get("operations", [])
+            if operation not in data["source_operations"]:
+                self._attribute_operation(data, source, operation, stamp)
+                if already:
+                    data["unattributed"] = max(0, int(data.get("unattributed") or 0) - 1)
+            if not already:
+                data["cards"] = int(data.get("cards") or 0) + 1
+                data.setdefault("operations", []).append(operation)
+            previous = data.get("last_card_ts")
+            if not previous or datetime.fromisoformat(previous).timestamp() < datetime.fromisoformat(stamp).timestamp():
+                data["last_card_ts"] = stamp
+        return data
+
+    def _confirmed_pending(self) -> list[dict]:
+        return [batch for path in (self.root / "batches").glob("*/*.json")
+                if isinstance(batch := read_json(path), dict) and batch.get("delivery_pending")
+                and batch.get("delivery_effect_done") and batch.get("delivery_id")]
+
+    def latest_card_ts(self, source: str = "") -> str | None:
+        """Spacing is continuous across dates; daily quotas alone reset at midnight."""
+        dates = {p.stem for p in (self.root / "budget").glob("*.json")}
+        dates.update(b.get("delivery_confirmation_date") or b.get("delivery_date") for b in self._confirmed_pending())
+        latest = None
+        for date in dates:
+            if not date:
+                continue
+            data = self.budget_state(date)
+            if source:
+                data = self._source_accounting(date, data).get("sources", {}).get(source, {})
+            stamp = data.get("last_card_ts")
+            if stamp and (not latest or datetime.fromisoformat(stamp).timestamp() > datetime.fromisoformat(latest).timestamp()):
+                latest = stamp
+        return latest
 
     def _source_accounting(self, date: str, data: dict) -> dict:
         if data.get("source_accounting_version") == 1:
@@ -338,7 +381,8 @@ class Store:
     def ensure_source_accounting(self, date: str) -> dict:
         with self.transaction():
             data = self.budget_state(date)
-            if data.get("source_accounting_version") != 1:
+            raw = read_json(self.root / "budget" / f"{date}.json") or {}
+            if raw.get("source_accounting_version") != 1:
                 data = self._source_accounting(date, data)
                 write_json_atomic(self._path("budget", f"{date}.json"), data, sort_keys=False)
             return data

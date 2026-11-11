@@ -84,6 +84,8 @@ def _source_editor(payload, schema, token, page):
     existing = bool(name)
     values = page.get("values") or payload.get("source_values", {}).get(name) or page.get("prefill") or {}
     row = next((r for r in snap["sources"] if r["source"] == name), None)
+    if existing and row is None:
+        return '<p class="notice">消息源不存在，请返回清单重新选择；不会把编辑转换为新建。</p>'
     binding = row["after"] if row else None
     action = "source-patch" if existing else "source-save"
     route = "/config"
@@ -236,6 +238,8 @@ def notifications_body(payload, schema, actions, page):
         body += '<p class="empty">还没有模板。选择下面的起点，保存后才能绑定消息源。</p>'
     if token:
         ident = str(page.get("edit") or page.get("copy") or "")
+        if ident and ident not in snap["policies"]:
+            return body + '<p class="notice">策略不存在，请返回模板清单重新选择；不会把编辑转换为新建。</p>'
         values = dict(snap["policies"].get(ident, {}).get("values") or {})
         preset = page.get("preset", "")
         if preset == "continuous":

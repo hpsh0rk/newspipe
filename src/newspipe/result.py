@@ -106,14 +106,14 @@ def ok(command: str, data: Any = None, *, changed: bool = False,
 
 def fail(command: str, code: str, message: str, *, hint: str = "",
          details: Any = None, warnings: list[str] | None = None,
-         next: list[str] | None = None, exit_code: int | None = None) -> Result:
+         next: list[str] | None = None, exit_code: int | None = None, changed: bool = False) -> Result:
     """构造失败结果。`data` 恒为 None（契约 2）。"""
     error: dict[str, Any] = {"code": code, "message": message}
     if hint:
         error["hint"] = hint
     if details is not None:
         error["details"] = details
-    return Result(command=command, ok=False, data=None, error=error, changed=False,
+    return Result(command=command, ok=False, data=None, error=error, changed=changed,
                   warnings=list(warnings or []), next=list(next or []),
                   exit_code=ERROR_EXIT.get(code, EXIT_RUNTIME) if exit_code is None else exit_code)
 

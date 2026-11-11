@@ -134,9 +134,15 @@ def _coerce(field: dict[str, Any], raw: list[str]) -> Any:
             return [v for v in values if v.strip()]
         return [part.strip() for part in re.split(r"[,\n、]", first) if part.strip()]
     if kind == "int":
-        return int(first) if first.strip() else None
+        try:
+            return int(first) if first.strip() else None
+        except ValueError as exc:
+            raise ActionInputError(f"{field['path']} 需要整数") from exc
     if kind == "float":
-        return float(first) if first.strip() else None
+        try:
+            return float(first) if first.strip() else None
+        except ValueError as exc:
+            raise ActionInputError(f"{field['path']} 需要数值") from exc
     return first.strip()
 
 

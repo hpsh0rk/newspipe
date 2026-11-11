@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import importlib
 import json
+import time
 import uuid
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from newspipe import channel, dedup, delivery, enrich as enrich_mod, filter as filter_mod
@@ -155,7 +156,7 @@ def _prepare_batch(cfg: Any, store: state.Store, scfg: Any, digest: str, slot: s
     is_append = bool(existing and existing.get("message_id"))
     if existing:
         batch = dict(existing)
-        if existing.get("delivery_pending") and scfg.notify is not None:
+        if existing.get("delivery_pending"):
             # Freeze an unfinished operation's payload/form/target as well as its identity.
             return batch, is_append, []
     else:
@@ -232,6 +233,10 @@ def _process_locked(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slo
     run = SourceRun(source=scfg.name, adapter=scfg.adapter)
     since = store.cursor(scfg.name) if mode == "poll" else None
     unfinished = None if dry else store.unfinished_batch(scfg.name)
+    if unfinished and "notification_mode" in unfinished and not unfinished.get("delivery_effect_done"):
+        # Unbinding cannot turn a protected notification into an unbounded legacy send.
+        collect_source(cfg, store, scfg.name, dry=dry, force=force, now=now)
+        return notify_source(cfg, store, scfg.name, dry=dry, slot=slot if mode == "slot" else None, now=now)
     if unfinished and unfinished.get("delivery_effect_done"):
         # A confirmed remote success needs only local repair, even if fetching/budgets now fail.
         for key, value in (unfinished.get("delivery_run") or {}).items():
@@ -284,6 +289,7 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
                         kept: list[dict] | None = None, raw: list[dict] | None = None,
                         scheduled_slot: bool = False) -> SourceRun:
     kept, raw = kept or [], raw or []
+    operation_clock = time.monotonic()
     cap = delivery.card_cap(scfg)
     plan = delivery.plan(candidates, scfg, store, digest=digest, slot=slot, now=now, cfg=cfg)
     run.planned, run.queued = len(plan.items), len(plan.queued)
@@ -306,17 +312,24 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
     # Persist every candidate first, and enrich only the final display set after merging.
     _queue(store, scfg.name, candidates)
     batch, is_append, excess = _prepare_batch(cfg, store, scfg, digest, slot, plan.items, cap)
-    if scfg.notify is not None and scfg.sends_card:
+    if scfg.sends_card:
         if not batch.get("delivery_pending"):
-            batch["notification_mode"] = policy.resolve(cfg, scfg).values["mode"]
-            batch["notification_scheduled"] = scheduled_slot
+            if scfg.notify is not None:
+                batch["notification_mode"] = policy.resolve(cfg, scfg).values["mode"]
+                batch["notification_scheduled"] = scheduled_slot
+            else:
+                batch.pop("notification_mode", None)
+                batch.pop("notification_scheduled", None)
         _begin_delivery(batch, cfg, digest, now)
-        batch["notification_attempts"] = int(batch.get("notification_attempts") or 0) + 1
-        batch["notification_retry_after"] = now.timestamp() + 60
-        store.write_batch(batch)
-    if scfg.notify is None or scfg.sends_card:
+        if scfg.notify is not None or "notification_mode" in batch:
+            batch["notification_attempts"] = int(batch.get("notification_attempts") or 0) + 1
+            batch["notification_retry_after"] = now.timestamp() + 60
+            store.write_batch(batch)
+    pinned = batch.get("delivery_payload")
+    if not pinned and (scfg.notify is None or scfg.sends_card):
         batch["items"], run.enrich = _enrich_new(cfg, store, scfg, batch["items"], now)
-    batch["overflow"] = max(int(batch.get("overflow") or 0), plan.overflow, len(excess))
+    if not pinned:
+        batch["overflow"] = max(int(batch.get("overflow") or 0), plan.overflow, len(excess))
 
     if not scfg.sends_card:
         # 不发卡的源必须在元素预算**之前**返回：它根本不渲染卡片，拿 200 元素去卡它是纯误伤
@@ -334,7 +347,7 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
         return run
 
     try:
-        card = render.render(batch, getattr(cfg, "hooks", None))
+        card = pinned or render.render(batch, getattr(cfg, "hooks", None))
         render.assert_within_limit(card, what=f"{scfg.name}-{slot}")
     except ValueError as exc:
         # 元素超限（飞书 11310）：整批顺延，不记 pushed —— 这正是 v1 静默失败的那个坑
@@ -355,6 +368,9 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
             batch.pop("delivery_cursor", None)
         batch["delivery_pending"] = True
         batch["delivery_effect_done"] = False
+        batch["delivery_payload"] = card
+        if scfg.notify is not None or "notification_mode" in batch or batch.get("card_id"):
+            store.write_batch(batch)
         if is_append and batch.get("card_id"):
             seq = int(batch.get("seq") or 1) + 1
             # Reserve the sequence durably: a lost response cannot make us reuse it.
@@ -384,6 +400,9 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
                                                     idempotency_key=batch["send_uuid"])
             run.card = "sent"
         batch["delivery_effect_done"] = True
+        confirmed = now + timedelta(seconds=max(0, time.monotonic() - operation_clock))
+        batch["delivery_confirmed_at"] = confirmed.isoformat()
+        batch["delivery_confirmation_date"] = confirmed.date().isoformat()
         batch["delivery_card"] = run.card
         store.write_batch(batch)
     except Exception as exc:
@@ -405,6 +424,9 @@ def _begin_delivery(batch: dict, cfg: Any, digest: str, now: datetime) -> None:
             batch.pop("send_started_at", None)
             batch.pop("send_uuid", None)
         batch.pop("remote_attempt_started_at", None)
+        batch.pop("delivery_payload", None)
+        batch.pop("delivery_confirmed_at", None)
+        batch.pop("delivery_confirmation_date", None)
         batch.update(delivery_id=uuid.uuid4().hex, delivery_at=now.isoformat(),
                      delivery_date=digest, delivery_chat=cfg.chat, notification_attempts=0)
     batch.setdefault("delivery_id", uuid.uuid4().hex)
@@ -418,12 +440,12 @@ def _begin_delivery(batch: dict, cfg: Any, digest: str, now: datetime) -> None:
 def _complete_delivery(store: state.Store, batch: dict, run: SourceRun) -> SourceRun:
     source, digest, slot = batch["source"], batch["digest"], batch["slot"]
     operation_id = batch["delivery_id"]
-    delivered_at = datetime.fromisoformat(batch["delivery_at"])
+    delivered_at = datetime.fromisoformat(batch.get("delivery_confirmed_at") or batch["delivery_at"])
     run.card = batch["delivery_card"]
     store.record_pushed(source, batch["items"], digest)
     store.remove_pending(source, store.pushed_ids(source))
     run.queued = store.pending_count(source)
-    store.note_card(batch["delivery_date"], at=delivered_at, operation_id=operation_id, source=source)
+    store.note_card(batch.get("delivery_confirmation_date") or batch["delivery_date"], at=delivered_at, operation_id=operation_id, source=source)
     run.status = "ok"
     recorded = _record_event(store, "delivered",
                   payload={"card": run.card, "card_id": batch.get("card_id"),
@@ -620,13 +642,13 @@ def notify_source(cfg: Any, store: state.Store, name: str, *, now: datetime | No
                 return run
             slot = remaining[0] if remaining else eligible[0]
         if unfinished:
-            started = unfinished.get("send_started_at") or unfinished.get("remote_attempt_started_at")
+            started = unfinished.get("remote_attempt_started_at") or unfinished.get("send_started_at")
             if started and now.timestamp() - datetime.fromisoformat(started).timestamp() >= 3600:
                 run.status = "send_result_unknown"
                 run.note = (f"结果未确认且已超幂等窗口；核对平台回执：目标 {unfinished.get('delivery_chat')}, "
                             f"卡片 {unfinished.get('card_id')}, 操作 {unfinished.get('delivery_id')}, 时间 {started}；禁止自动重发")
                 return run
-            if not dry and scfg.notify is not None:
+            if not dry and (scfg.notify is not None or "notification_mode" in unfinished):
                 if int(unfinished.get("notification_attempts") or 0) >= 3:
                     run.status, run.note = "retry_exhausted", "已尝试三次；仅可在原身份安全窗口内显式重试，或核对平台回执"
                     return run

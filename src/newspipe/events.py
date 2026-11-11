@@ -36,7 +36,7 @@ from typing import Any, Iterable
 
 from newspipe import _atomic
 
-TYPES = ("delivered", "clicked", "favorite", "degraded", "failed", "service", "config")
+TYPES = ("delivered", "clicked", "favorite", "degraded", "failed", "service", "config", "notification_retry")
 
 #: 待入库的事件类型（`newspipe queue list` 读的就是它）
 QUEUE_TYPES = ("favorite",)

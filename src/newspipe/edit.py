@@ -40,6 +40,13 @@ def file_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
 
 
+def sources_snapshot(news_dir: Path):
+    """Config, text and optimistic hash from one byte read, including CRLF files."""
+    data = _sources_path(news_dir).read_bytes()
+    text = data.decode("utf-8")
+    return config_mod.load(news_dir, sources_text=text), text, hashlib.sha256(data).hexdigest()[:16]
+
+
 def _dump_block(value: Any) -> str:
     """把一段结构化数据序列化成 YAML 块（不带文档头）。"""
     return yaml.safe_dump(value, allow_unicode=True, sort_keys=False, default_flow_style=False)

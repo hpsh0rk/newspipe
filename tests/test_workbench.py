@@ -116,3 +116,31 @@ class WorkbenchTests(unittest.TestCase):
         from newspipe.webassets import JAVASCRIPT
         self.assertNotIn("fetch('/view'", JAVASCRIPT)
         self.assertIn("data-policy-summary", JAVASCRIPT)
+
+    def test_unknown_editor_ids_do_not_render_an_implicit_create_form(self):
+        page = view.notifications_html(self.payload, schema=config.describe_schema(), actions=self.actions, page={"edit": "missing"})
+        self.assertIn("不存在", page)
+        self.assertNotIn('action="/api/actions/policy-save"', page)
+        page = view.config_html(self.payload, schema=config.describe_schema(), actions=self.actions, page={"edit": "missing"})
+        self.assertIn("不存在", page)
+        self.assertNotIn('action="/api/actions/source-patch"', page)
+
+    def test_ops_forms_redirect_to_ops_without_javascript(self):
+        page = view.ops_html(self.payload, actions=self.actions)
+        from html.parser import HTMLParser
+        class Forms(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.forms, self.current = [], None
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                if tag == "form":
+                    self.current = attrs
+                    self.forms.append(attrs)
+                if tag == "input" and attrs.get("name") == "return_to":
+                    self.current["return_to"] = attrs.get("value")
+        parser = Forms()
+        parser.feed(page)
+        for form in parser.forms:
+            if form.get("method") == "post":
+                self.assertEqual(form.get("return_to"), "/ops", form)

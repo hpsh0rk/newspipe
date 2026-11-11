@@ -61,8 +61,8 @@ CONTRACT: list[dict[str, Any]] = [
      "examples": ["newspipe source show aihot --json"]},
     {"name": "source set", "summary": "新增或整体替换一个信源（先校验再落盘）",
      "usage": "newspipe source set <name> --from-json <json|-> [--dry-run] "
-              "[--base-hash H]",
-     "args": ["name", "--from-json", "--dry-run", "--base-hash"],
+              "[--base-hash H] [--create-only]",
+     "args": ["name", "--from-json", "--dry-run", "--base-hash", "--create-only"],
      "writes": True,
      "examples": ["echo '{\"adapter\":\"aihot\",\"fetch\":{\"trigger\":\"slot\",\"slots\":[\"am\"]}}'"
                   " | newspipe source set aihot --from-json - --dry-run --json"]},
@@ -130,12 +130,25 @@ SUBCOMMANDS = ("api", "config", "doctor", "status", "view", "list-sources", "sou
                "run", "serve", "migrate", "probe-channel", "probe-model", "card",
                "card-preview", "enrich-only", "policy", "global", "notification", "collect", "notify")
 
+_WORKBENCH_EXAMPLES = {
+    "source patch": 'newspipe source patch my_feed --from-json \'{"enabled":false}\' --dry-run --json',
+    "source copy": 'newspipe source copy my_feed --new-name copied_feed --dry-run --json',
+    "policy list": 'newspipe policy list --json',
+    "policy show": 'newspipe policy show reading --json',
+    "policy set": 'newspipe policy set reading --from-json \'{"mode":"immediate"}\' --create-only --dry-run --json',
+    "policy remove": 'newspipe policy remove unused_policy --dry-run --json',
+    "global set": 'newspipe global set --from-json \'{"notifications":{"paused":true}}\' --dry-run --json',
+    "notification preview": 'newspipe notification preview --source my_feed --json',
+    "notification retry": 'newspipe notification retry my_feed --operation-id op_example --dry-run --json',
+    "collect": 'newspipe collect my_feed --dry --json',
+    "notify": 'newspipe notify my_feed --dry --json',
+}
 for _name, _summary, _args, _writes in (
-    ("source patch", "合并修改信源；null 删除字段，未提交字段保持原样", ["name", "--from-json", "--dry-run", "--base-hash"], True),
+    ("source patch", "合并修改信源；null 删除字段，未提交字段保持原样", ["name", "--from-json", "--confirm-conversion", "--dry-run", "--base-hash"], True),
     ("source copy", "保留扩展配置复制信源，默认停用", ["name", "--new-name", "--dry-run", "--base-hash"], True),
     ("policy list", "列出可复用策略及绑定信源", [], False),
     ("policy show", "查看策略及有效绑定", ["name"], False),
-    ("policy set", "新增/整体替换策略并报告影响信源", ["name", "--from-json", "--dry-run", "--base-hash"], True),
+    ("policy set", "新增/整体替换策略并报告影响信源", ["name", "--from-json", "--create-only", "--dry-run", "--base-hash"], True),
     ("policy remove", "删除未被引用的策略", ["name", "--dry-run", "--base-hash"], True),
     ("global set", "编辑目标、槽位或全局硬限制", ["--from-json", "--dry-run", "--base-hash"], True),
     ("notification preview", "只读候选配置、待通知和预算预览；不采集不发卡", ["--source", "--from-json"], False),
@@ -144,7 +157,10 @@ for _name, _summary, _args, _writes in (
     ("notify", "只通知现有待处理；时钟越过须显式声明，所有限制仍生效", ["source", "--bypass-clock", "--dry"], True),
 ):
     CONTRACT.append({"name": _name, "summary": _summary, "args": _args, "writes": _writes,
-                     "usage": f"newspipe {_name} [--json]", "examples": [f"newspipe {_name} --json"]})
+                     "usage": "newspipe " + _name + " " + " ".join(
+                         "[" + arg + (" <value>" if arg in {"--from-json", "--source", "--base-hash", "--operation-id", "--new-name"} else "") + "]"
+                         if arg.startswith("--") else "<" + arg + ">" for arg in _args) + " [--json]",
+                     "examples": [_WORKBENCH_EXAMPLES[_name]]})
 
 
 # --------------------------------------------------------------------- 工具
@@ -536,28 +552,28 @@ def _sub_api_describe(args: argparse.Namespace, news_dir: Path) -> result.Result
 
 
 def _sub_source(args: argparse.Namespace, news_dir: Path) -> result.Result:
-    cfg, _store = _load(news_dir)
+    cfg, sources_text, base_hash = edit.sources_snapshot(news_dir)
     command = f"source.{args.action}"
     if args.action == "list":
         rows = config.summarize(cfg)
         return result.ok(command, {"sources": rows,
-                                   "hash": edit.file_hash(news_dir / "sources.yaml")})
+                                   "hash": base_hash})
     if args.action == "show":
         row = next((r for r in config.summarize(cfg) if r["source"] == args.name), None)
         if row is None:
             return result.fail(command, "E_NOT_FOUND", f"没有信源 {args.name!r}",
                                hint="newspipe source list --json")
         return result.ok(command, {"source": row,
-                                   "body": yaml.safe_load((news_dir / "sources.yaml").read_text(encoding="utf-8"))["sources"][args.name],
+                                   "body": yaml.safe_load(sources_text)["sources"][args.name],
                                    "values": config.source_values(cfg.sources[args.name]),
-                                   "hash": edit.file_hash(news_dir / "sources.yaml")})
+                                   "hash": base_hash})
     if args.action == "copy":
-        raw = yaml.safe_load((news_dir / "sources.yaml").read_text(encoding="utf-8"))["sources"]
+        raw = yaml.safe_load(sources_text)["sources"]
         if args.name not in raw or not args.new_name or args.new_name in raw:
             return result.fail(command, "E_VALIDATION", "原信源不存在，或新 ID 为空/已存在",
                                hint="用 source list 核对，复制必须创建新的稳定 ID")
         out = edit.set_source(news_dir, args.new_name, {**raw[args.name], "enabled": False},
-                              base_hash=args.base_hash, dry_run=args.dry_run, create_only=True)
+                              base_hash=args.base_hash or base_hash, dry_run=args.dry_run, create_only=True)
         return _write_result(command, out, news_dir, next_ok=["newspipe source list --json"])
     if args.action in ("set", "patch"):
         try:
@@ -677,7 +693,7 @@ def _sub_notification(args, news_dir):
             return result.fail("notification.retry", "E_CONFLICT", "待处理操作身份已变化或不存在",
                                hint="重新查看 notification preview；不能重试另一个操作")
         now = _now()
-        started = batch.get("send_started_at") or batch.get("remote_attempt_started_at")
+        started = batch.get("remote_attempt_started_at") or batch.get("send_started_at")
         if batch.get("delivery_effect_done"):
             return result.fail("notification.retry", "E_VALIDATION", "远端已确认成功，只需本地回执修复",
                                hint="等待下轮服务修复；不要再次发送")
@@ -689,8 +705,15 @@ def _sub_notification(args, news_dir):
             batch.update(notification_attempts=0, notification_retry_after=0,
                          notification_retry_generation=int(batch.get("notification_retry_generation") or 0) + 1)
             store.write_batch(batch)
+        warnings = []
+        if changed:
+            try:
+                events.append(news_dir, "notification_retry", source=args.source,
+                              payload={"operation_id": batch["delivery_id"], "retry_generation": batch["notification_retry_generation"]})
+            except Exception as exc:
+                warnings.append(f"重试状态已写入，但审计未写入：{type(exc).__name__}: {exc}")
         return result.ok("notification.retry", {"operation_id": batch["delivery_id"], "dry_run": args.dry_run,
-                                               "hash": edit.file_hash(news_dir / "sources.yaml")}, changed=changed)
+                                               "hash": edit.file_hash(news_dir / "sources.yaml")}, changed=changed, warnings=warnings)
 
 
 def _sub_phase(args, news_dir):
@@ -702,7 +725,7 @@ def _sub_phase(args, news_dir):
     if run.status in {"error", "config_missing", "send_failed", "overflow", "retry_exhausted", "send_result_unknown"}:
         return result.fail(args.cmd, "E_DELIVERY" if args.cmd == "notify" else "E_NETWORK", run.note or run.status,
                            hint="newspipe notification preview --source <ID> --json 查看原因与安全回执信息",
-                           details=run.as_dict())
+                           details=run.as_dict(), changed=before != after)
     return result.ok(args.cmd, run.as_dict(), changed=before != after)
 
 

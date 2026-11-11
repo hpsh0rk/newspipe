@@ -401,7 +401,7 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
 
                     try:
                         act = view_mod.action_snapshot(
-                            news_dir or config_mod.default_news_dir())
+                            news_dir or config_mod.default_news_dir(), payload=payload)
                         act["token"] = token
                     except Exception as exc:               # 动作面坏了不该连累只读页
                         logger(f"写操作面构建失败（{type(exc).__name__}: {exc}）")

@@ -15,6 +15,7 @@ from newspipe import config, delivery, edit, policy, state
 from newspipe.errors import ConfigError
 
 REASONS = {"nothing_new": "没有待通知内容", "waiting_slot": "等待通知时刻", "slot_complete": "本槽位已完成",
+           "retry_wait": "等待原操作重试间隔",
            "ok": "可以通知", "notifications_paused": "全局通知暂停", "global_quiet_hours": "全局静默时段",
            "global_budget_exceeded": "全局次数已用完", "global_min_gap": "等待全局最小间隔",
            "quiet_hours": "源级静默时段", "budget_exceeded": "该源次数已用完", "min_gap": "等待源级最小间隔",
@@ -37,12 +38,17 @@ def snapshot(news_dir: Path, *, source: str | None = None, candidate: dict | Non
              now: datetime | None = None, cfg=None, base_hash: str | None = None) -> dict:
     news_dir = Path(news_dir)
     now = now or datetime.now()
-    before = cfg or config.load(news_dir)
+    if cfg is None:
+        before, sources_text, base_hash = edit.sources_snapshot(news_dir)
+    else:
+        before = cfg
     after = before
     if candidate is not None:
         if not isinstance(candidate, dict) or set(candidate) - {"sources", "policies", "notifications", "chat", "slots"}:
             raise ConfigError("预览候选只能包含 sources、policies、notifications、chat、slots")
-        raw = yaml.safe_load((news_dir / "sources.yaml").read_text(encoding="utf-8"))
+        if cfg is not None:
+            raise ConfigError("候选预览必须从完整配置快照创建")
+        raw = yaml.safe_load(sources_text)
         for key, value in candidate.items():
             if key == "sources":
                 raw[key] = edit.merge_patch(raw.get(key), value)
@@ -86,13 +92,15 @@ def snapshot(news_dir: Path, *, source: str | None = None, candidate: dict | Non
             elif all(store.notification_slot_complete(day, name, s) for s in due) and not unfinished:
                 reason = "slot_complete"
         if unfinished:
-            started = unfinished.get("send_started_at") or unfinished.get("remote_attempt_started_at")
+            started = unfinished.get("remote_attempt_started_at") or unfinished.get("send_started_at")
             if unfinished.get("delivery_effect_done"):
                 reason = "receipt_repair"
             elif started and now.timestamp() - datetime.fromisoformat(started).timestamp() >= 3600:
                 reason = "send_result_unknown"
             elif int(unfinished.get("notification_attempts") or 0) >= 3:
                 reason = "retry_exhausted"
+            elif float(unfinished.get("notification_retry_after") or 0) > now.timestamp():
+                reason = "retry_wait"
         consequence = "collect mode consumes pending locally; switching back will not resend consumed items" if (
             rule["values"]["mode"] == "collect") else "pending retained until gates and notification schedule permit delivery"
         if current and (current.notify is None) != (scfg.notify is None):
@@ -101,7 +109,7 @@ def snapshot(news_dir: Path, *, source: str | None = None, candidate: dict | Non
             consequence += "; unfinished remote identity/target stay pinned, no force-resend or receipt invention"
         receipt = {key: unfinished.get(key) for key in (
             "delivery_id", "delivery_chat", "card_id", "message_id", "delivery_at",
-            "send_started_at", "remote_attempt_started_at", "notification_attempts", "notification_retry_after")} if unfinished else None
+            "delivery_confirmed_at", "send_started_at", "remote_attempt_started_at", "notification_attempts", "notification_retry_after")} if unfinished else None
         rows.append({"source": name, "enabled": scfg.enabled, "before": _rule(before, current) if current else None,
                      "after": rule, "pending": store.pending_count(name), "reason": reason,
                      "plan": plan.as_dict(), "budget": store.source_budget_state(day, name),

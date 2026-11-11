@@ -94,7 +94,7 @@ def global_gate(cfg: Any, store: Any, *, digest: str, now: datetime) -> str:
     budget = store.budget_state(digest)
     if gates.max_cards_per_day is not None and int(budget.get("cards") or 0) >= gates.max_cards_per_day:
         return "global_budget_exceeded"
-    gap = _gap_minutes(budget, now)
+    gap = _gap_minutes({"last_card_ts": store.latest_card_ts()}, now) if gates.min_gap_min else None
     if gates.min_gap_min and gap is not None and gap < gates.min_gap_min:
         return "global_min_gap"
     return ""
@@ -131,7 +131,7 @@ def plan(items: list[dict], scfg: Any, store: Any, *, digest: str, slot: str,
         if int(budget.get("cards") or 0) >= int(scfg.deliver.max_cards_per_day or 0):
             return Plan(reason="budget_exceeded", deferred=True,
                         deferred_items=list(items), **base)
-        gap = _gap_minutes(budget, now)
+        gap = _gap_minutes({"last_card_ts": store.latest_card_ts(scfg.name)}, now) if getattr(scfg, "notify", None) else _gap_minutes(budget, now)
         if scfg.deliver.min_gap_min and gap is not None and gap < scfg.deliver.min_gap_min:
             return Plan(reason="min_gap", deferred=True, deferred_items=list(items), **base)
 

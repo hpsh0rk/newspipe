@@ -70,6 +70,54 @@ class NotificationContractTests(unittest.TestCase):
             self.assertFalse(out["ok"], out)
             self.assertEqual(out["error"]["code"], "E_VALIDATION", out)
 
+    def test_snapshot_hash_and_candidate_values_use_the_same_file_bytes(self):
+        from newspipe import notification_view, view
+        text = self.path.read_text().replace("\n", "\r\n")
+        self.path.write_bytes(text.encode())
+        self.assertEqual(view.build(self.news)["sources_hash"], edit.file_hash(self.path))
+        original_load = config.load
+        old_hash = edit.file_hash(self.path)
+        def changing_load(*a, **kw):
+            cfg = original_load(*a, **kw)
+            self.path.write_text(TEXT.replace("Original", "Newer"))
+            return cfg
+        with patch.object(config, "load", side_effect=changing_load):
+            snap = notification_view.snapshot(self.news)
+        self.assertEqual(snap["hash"], old_hash)
+        self.path.write_text(TEXT)
+        old_hash = edit.file_hash(self.path)
+        with patch.object(config, "load", side_effect=changing_load):
+            out = self.command("source", "show", "src")
+        self.assertEqual(out["data"]["hash"], old_hash)
+        self.assertEqual(out["data"]["body"]["card"]["title"], "Original")
+
+    def test_failed_phase_reports_durable_changes_truthfully(self):
+        def failed(*args, **kwargs):
+            state.Store(self.news).append_pending("src", [_item(1)])
+            return pipeline.SourceRun(source="src", status="send_failed", note="remote failed")
+        with patch.object(pipeline, "notify_source", side_effect=failed):
+            out = self.command("notify", "src")
+        self.assertFalse(out["ok"])
+        self.assertTrue(out["changed"])
+
+    def test_retry_audits_identity_and_uses_append_operation_timestamp(self):
+        from datetime import datetime, timedelta
+        now = datetime(2026, 11, 11, 10, 16)
+        batch = {"source": "src", "digest": "2026-11-11", "slot": "am", "delivery_pending": True,
+                 "delivery_id": "op", "notification_attempts": 3, "form": "append_card", "items": [],
+                 "send_started_at": (now - timedelta(hours=2)).isoformat(),
+                 "remote_attempt_started_at": (now - timedelta(minutes=1)).isoformat()}
+        state.Store(self.news).write_batch(batch)
+        with patch.object(cli, "_now", return_value=now):
+            out = self.command("notification", "retry", "src", "--operation-id", "op")
+        self.assertTrue(out["ok"], out)
+        from newspipe import events, notification_view
+        audit = events.list_events(self.news, days=None, types=["notification_retry"])
+        self.assertEqual(audit[0]["payload"]["operation_id"], "op")
+        batch["notification_attempts"] = 3
+        state.Store(self.news).write_batch(batch)
+        self.assertEqual(notification_view.snapshot(self.news, now=now)["sources"][0]["reason"], "retry_exhausted")
+
     def test_source_patch_preserves_unknown_keys_and_removes_only_explicit_override(self):
         before = self.path.read_text().split("  other:", 1)[1]
         patch_body = {"card": {"title": "Renamed"}, "notify": {"overrides": {"quiet_hours": None}}}
@@ -159,6 +207,7 @@ class NotificationContractTests(unittest.TestCase):
         out = actions.dispatch("source-patch", {"name": ["src"], "f.fetch.interval_min": ["abc"]}, self.news)
         self.assertFalse(out["ok"])
         self.assertEqual(out["error"]["code"], "E_USAGE")
+        self.assertIn("fetch.interval_min", out["error"]["message"])
 
     def test_separate_collect_and_notify_commands_use_distinct_pipeline_entrypoints(self):
         run = pipeline.SourceRun(source="src", status="collected")
@@ -174,6 +223,22 @@ class NotificationContractTests(unittest.TestCase):
         names = {c["name"] for c in self.command("api", "describe")["data"]["commands"]}
         self.assertTrue({"source patch", "policy list", "policy set", "policy remove", "global set",
                          "notification preview", "collect", "notify", "notification retry"} <= names)
+
+    def test_new_contract_examples_include_required_arguments_and_parse(self):
+        import shlex
+        rows = self.command("api", "describe")["data"]["commands"]
+        names = {"source patch", "source copy", "policy set", "policy show", "policy remove", "global set", "notification retry", "collect", "notify"}
+        for row in rows:
+            if row["name"] not in names:
+                continue
+            for example in row["examples"]:
+                args = cli._build_sub_parser().parse_args(shlex.split(example)[1:])
+                if row["name"] in {"policy set", "source patch", "global set"}:
+                    self.assertTrue(args.from_json, example)
+                if row["name"] == "notification retry":
+                    self.assertTrue(args.operation_id, example)
+                if row["name"] != "global set":
+                    self.assertTrue(getattr(args, "name", None) or getattr(args, "source", None), example)
 
     def test_policy_preview_matches_replace_save_not_merge_of_old_values(self):
         self.command("policy", "set", "p", "--from-json", '{"quiet_hours":"23:00-07:30","min_gap_min":10}')

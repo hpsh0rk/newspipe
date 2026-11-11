@@ -250,6 +250,25 @@ class NotificationTests(unittest.TestCase):
         self.send.assert_not_called()
         self.assertEqual(self.store.pending_count("src"), 1)
 
+    def test_explicit_retry_generation_reopens_exhausted_digest_attempts_within_slot(self):
+        self.cfg = replace(self.cfg, policies={"p": policy.NotificationPolicy(mode="digest", slots=("am",))})
+        self.store.set_cursor("src", NOW.timestamp(), at=NOW)
+        self.store.append_pending("src", [_item(1)])
+        self.send.side_effect = OSError("temporary")
+        for minute in range(3):
+            service.run_once(self.cfg, self.store, now=NOW + timedelta(minutes=minute), logger=lambda _: None)
+        self.assertEqual(self.send.call_count, 3)
+        batch = self.store.unfinished_batch("src")
+        batch.update(notification_attempts=0, notification_retry_after=0, notification_retry_generation=1)
+        self.store.write_batch(batch)
+        self.send.side_effect = None
+        self.send.return_value = "message"
+        service.run_once(self.cfg, self.store, now=NOW + timedelta(minutes=3), logger=lambda _: None)
+        self.assertEqual(self.send.call_count, 4)
+        entry = service.load_runs(self.store.news_dir)["notification_slots"][DAY]["am"]["src"]
+        self.assertTrue(entry["complete"])
+        self.assertEqual(entry["retry_generation"], 1)
+
     def test_service_attempts_only_one_new_immediate_operation_per_tick(self):
         self.store.set_cursor("src", NOW.timestamp(), at=NOW)
         self.store.append_pending("src", [_item(i) for i in range(1, 41)])
@@ -320,3 +339,109 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(self.notify(now=NOW + timedelta(hours=2, minutes=1)).status, "ok")
         self.assertEqual(self.send.call_count, 1)
         self.assertEqual(self.store.source_budget_state(DAY, "src")["cards"], 2)
+
+    def test_confirmed_remote_receipt_consumes_global_budget_even_if_local_completion_fails(self):
+        other = replace(self.source, name="other")
+        self.cfg = replace(self.cfg, sources={"src": self.source, "other": other},
+                           notifications=policy.NotificationGlobals(max_cards_per_day=1))
+        self.store.append_pending("src", [_item(1)])
+        self.store.append_pending("other", [_item(2)])
+        with patch.object(self.store, "record_pushed", side_effect=OSError("disk unavailable")):
+            self.assertEqual(self.notify().status, "error")
+        self.assertTrue(self.store.unfinished_batch("src")["delivery_effect_done"])
+        self.assertEqual(self.store.budget_state(DAY)["cards"], 1)
+        self.assertEqual(self.store.source_budget_state(DAY, "src")["cards"], 1)
+        self.assertEqual(pipeline.notify_source(self.cfg, self.store, "other", now=NOW).status, "global_budget_exceeded")
+        self.assertEqual(self.notify(now=NOW + timedelta(minutes=1)).status, "ok")
+        self.assertEqual(self.store.budget_state(DAY)["cards"], 1)
+        self.assertEqual(self.send.call_count, 1)
+
+    def test_gap_is_measured_from_confirmed_success_not_the_original_failed_attempt(self):
+        self.cfg = replace(self.cfg, policies={"p": policy.NotificationPolicy(min_gap_min=10)},
+                           notifications=policy.NotificationGlobals(min_gap_min=10))
+        self.store.append_pending("src", [_item(1)])
+        self.create.side_effect = [OSError("not created"), "card"]
+        self.assertEqual(self.notify().status, "send_failed")
+        self.assertEqual(self.notify(now=NOW + timedelta(minutes=9)).status, "ok")
+        self.store.append_pending("src", [_item(2)])
+        self.assertEqual(self.notify(now=NOW + timedelta(minutes=10)).status, "global_min_gap")
+        self.cfg = replace(self.cfg, notifications=None)
+        self.assertEqual(self.notify(now=NOW + timedelta(minutes=10)).status, "min_gap")
+        self.assertEqual(self.send.call_count, 1)
+
+    def test_unbinding_preserves_exhaustion_horizon_payload_and_form_of_pending_operation(self):
+        self.cfg = replace(self.cfg, policies={"p": policy.NotificationPolicy(form="append_card")})
+        self.store.append_pending("src", [_item(1)])
+        self.notify()
+        self.store.append_pending("src", [_item(2)])
+        self.update.side_effect = OSError("response lost")
+        for minute in (1, 2, 3):
+            self.assertEqual(self.notify(now=NOW + timedelta(minutes=minute)).status, "send_failed")
+        before = self.store.unfinished_batch("src")
+        legacy = replace(self.source, notify=None)
+        self.cfg = replace(self.cfg, sources={"src": legacy})
+        self.adapter.return_value.fetch.return_value = [_item(3)]
+        self.update.side_effect = None
+        self.update.return_value = True
+        self.assertEqual(pipeline.run_poll(self.cfg, self.store, force=True, now=NOW + timedelta(minutes=4))[-1].status, "retry_exhausted")
+        self.assertEqual(pipeline.run_poll(self.cfg, self.store, force=True, now=NOW + timedelta(hours=2))[-1].status, "send_result_unknown")
+        after = self.store.unfinished_batch("src")
+        self.assertEqual(after["delivery_id"], before["delivery_id"])
+        self.assertEqual(after["form"], "append_card")
+        self.assertEqual(after["items"], before["items"])
+        self.assertEqual(self.update.call_count, 3)
+
+    def test_unbound_safe_retry_keeps_payload_and_bounded_attempts(self):
+        self.store.append_pending("src", [_item(1)])
+        self.send.side_effect = [OSError("lost response"), "message"]
+        self.notify()
+        before = self.store.unfinished_batch("src")
+        legacy = replace(self.source, notify=None)
+        self.cfg = replace(self.cfg, sources={"src": legacy})
+        self.adapter.return_value.fetch.return_value = [_item(2)]
+        pipeline.run_poll(self.cfg, self.store, force=True, now=NOW + timedelta(minutes=1))
+        after = self.store.read_batch(DAY, "src", before["slot"])
+        self.assertEqual(after["items"], before["items"])
+        self.assertEqual(after["notification_attempts"], 2)
+        self.assertEqual(self.send.call_count, 2)
+
+    def test_pending_retry_reuses_exact_rendered_payload_despite_new_content_and_hooks(self):
+        self.store.append_pending("src", [_item(1)])
+        self.send.side_effect = [OSError("lost response"), "message"]
+        self.notify()
+        original = self.create.call_args.args[0]
+        self.store.append_pending("src", [_item(i) for i in range(2, 23)])
+        with patch.object(pipeline.render, "render", side_effect=AssertionError("must use pinned card JSON")):
+            self.assertEqual(self.notify(now=NOW + timedelta(minutes=1)).status, "ok")
+        self.assertEqual(self.update.call_args.args[2], original)
+        self.assertEqual(self.store.pending_count("src"), 21)
+
+    def test_new_global_and_source_gaps_do_not_reset_at_midnight(self):
+        self.cfg = replace(self.cfg, policies={"p": policy.NotificationPolicy(min_gap_min=10)},
+                           notifications=policy.NotificationGlobals(min_gap_min=10))
+        self.store.append_pending("src", [_item(1)])
+        self.notify(now=NOW.replace(hour=23, minute=59))
+        self.store.append_pending("src", [_item(2)])
+        tomorrow = (NOW + timedelta(days=1)).replace(hour=0, minute=0)
+        self.assertEqual(self.notify(now=tomorrow).status, "global_min_gap")
+        self.cfg = replace(self.cfg, notifications=None)
+        self.assertEqual(self.notify(now=tomorrow).status, "min_gap")
+        self.assertEqual(self.send.call_count, 1)
+
+    def test_preview_shows_retry_cooldown_instead_of_can_notify(self):
+        from newspipe.notification_view import snapshot
+        self.store.append_pending("src", [_item(1)])
+        self.send.side_effect = OSError("lost response")
+        self.notify()
+        snap = snapshot(self.store.news_dir, cfg=self.cfg, base_hash="test", now=NOW + timedelta(seconds=30))
+        self.assertEqual(snap["sources"][0]["reason"], "retry_wait")
+
+    def test_confirmation_date_tracks_elapsed_remote_operation_across_midnight(self):
+        self.store.append_pending("src", [_item(1)])
+        start = NOW.replace(hour=23, minute=59)
+        with patch.object(pipeline.time, "monotonic", side_effect=[100, 220]):
+            self.assertEqual(self.notify(now=start).status, "ok")
+        self.assertEqual(self.store.budget_state(DAY)["cards"], 0)
+        next_day = (NOW + timedelta(days=1)).date().isoformat()
+        self.assertEqual(self.store.budget_state(next_day)["cards"], 1)
+        self.assertEqual(self.store.source_budget_state(next_day, "src")["last_card_ts"], next_day + "T00:01:00")
