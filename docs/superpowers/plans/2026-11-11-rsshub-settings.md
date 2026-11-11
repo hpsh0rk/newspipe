@@ -32,33 +32,35 @@ BROWSER: `NEWSPIPE_BROWSER_TESTS=1 uv run --python 3.13 --no-project --with-edit
 **Files:** create `rssconnect.py`, `tests/test_rsshub_settings.py`; modify `config.py`, `edit.py`, `cli.py`, `pipeline.py`, `adapters/rsshub.py`.
 **Interfaces:** `rssconnect.base_url(value)` normalizes/validates; `effective(configured)` returns `(url, origin)`; `feed_url(entry, configured)` bypasses the hub for absolute HTTP(S); `describe(cfg)` is network-free. `Config.rsshub` is a validated mapping; `rsshub show/set` use existing envelopes and atomic source-file hashes.
 
-- [ ] Add failing tests for config/env/default precedence, malformed values without disclosure, prefix/trailing slash joins, absolute bypass with invalid unused env, dynamic fetch resolution after endpoint changes, dry-run/atomic/hash behavior and sibling block preservation.
-- [ ] Run `test_rsshub_settings.py`. Expected: missing settings/resolution/CLI tests fail.
-- [ ] Implement normalization, config/schema, dedicated `edit.set_rsshub`, CLI show/set and runtime forwarding at both adapter call sites; retain legacy adapter name.
-- [ ] Run UNIT. Expected: all enabled tests pass. Commit `feat: configure optional RSSHub endpoints through the CLI`.
+- [x] Add failing tests for config/env/default precedence, malformed values without disclosure, prefix/trailing slash joins, absolute bypass with invalid unused env, dynamic fetch resolution after endpoint changes, dry-run/atomic/hash behavior and sibling block preservation.
+- [x] Run `test_rsshub_settings.py`. Expected: missing settings/resolution/CLI tests fail.
+- [x] Implement normalization, config/schema, dedicated `edit.set_rsshub`, CLI show/set and runtime forwarding at both adapter call sites; retain legacy adapter name.
+- [x] Run UNIT. Expected: all enabled tests pass. Commit `feat: configure optional RSSHub endpoints through the CLI`.
 
 ## Task 2: Read-Only Probe and Diagnostics
 
 **Files:** modify `rssconnect.py`, `cli.py`, `view.py`, `actions.py`, `adapters/rsshub.py`; create `tests/test_rsshub_probe.py`.
 **Interfaces:** `rssconnect.probe(configured, feed=None)` returns the standard `rsshub.probe` envelope; `_probe_request(url)` is the only bounded probe transport. `describe(cfg)` supplies `rsshub` metadata to doctor/view; new whitelisted action `rsshub-probe` delegates to CLI.
 
-- [ ] Add failing local-HTTP tests for successful reachability, valid empty/nonempty RSS, auth/404/5xx/network/invalid/unsupported/oversized responses, secret-free output, no retries and unchanged files/state. Assert doctor/view make no network calls and only enabled relative sources cause dependency warnings.
-- [ ] Run probe suite. Expected: absent probe/classification fails.
-- [ ] Implement bounded direct transport and safe classifications, CLI probe, network-free metadata, guarded action translation, and explicit runtime rejection of unsupported feed roots rather than quiet-empty success.
-- [ ] Run UNIT. Expected: enabled tests pass. Commit `feat: add guarded read-only RSSHub diagnostics`.
+- [x] Add failing local-HTTP tests for successful reachability, valid empty/nonempty RSS, auth/404/5xx/network/invalid/unsupported/oversized responses, secret-free output, no retries and unchanged files/state. Assert doctor/view make no network calls and only enabled relative sources cause dependency warnings.
+- [x] Run probe suite. Expected: absent probe/classification fails.
+- [x] Implement bounded direct transport and safe classifications, CLI probe, network-free metadata, guarded action translation, and explicit runtime rejection of unsupported feed roots rather than quiet-empty success.
+- [x] Run UNIT. Expected: enabled tests pass. Commit `feat: add guarded read-only RSSHub diagnostics`.
 
 ## Task 3: Workbench and Deployment Guidance
 
 **Files:** modify `workbench.py`, `webassets.py`, `style.py`, `inbound.py`, `webdrafts.py` if required, `tests/preview_workbench.py`, browser/SSR tests, `README.md`, `compose.yaml`, `AGENTS.md`.
 **Interfaces:** schema-driven settings form saves through `rsshub-save`; probe submitters use `rsshub-probe`. Probe feedback has a separate read-only path: no draft acknowledgment/hash updates/read reconciliation. Settings metadata is a code-owned replaceable read region, the editor is not.
 
-- [ ] Add failing guarded browser/HTTP tests for save/dry-run/inheritance, candidate connection and full/relative feed tests, unchanged files/draft/hash after probes, visible error feedback, stale save conflict, no-JS PRG/refresh and all POST gates. Guard the probe transport in every offline fixture; only designated synthetic URLs get test responses.
-- [ ] Run targeted browser/HTTP tests. Expected: missing settings/probe flow fails.
-- [ ] Render address/origin/dependencies and schema fields, historical directory copy, generic RSS label; handle probe feedback and no-JS retained forms; update container/environment and agent documentation.
-- [ ] Run UNIT and BROWSER. Expected: all enabled tests pass. Commit `feat: expose RSSHub settings and connection tests in the workbench`.
+- [x] Add failing guarded browser/HTTP tests for save/dry-run/inheritance, candidate connection and full/relative feed tests, unchanged files/draft/hash after probes, visible error feedback, stale save conflict, no-JS PRG/refresh and all POST gates. Guard the probe transport in every offline fixture; only designated synthetic URLs get test responses.
+- [x] Run targeted browser/HTTP tests. Expected: missing settings/probe flow fails.
+- [x] Render address/origin/dependencies and schema fields, historical directory copy, generic RSS label; handle probe feedback and no-JS retained forms; update container/environment and agent documentation.
+- [x] Run UNIT and BROWSER. Expected: all enabled tests pass. Commit `feat: expose RSSHub settings and connection tests in the workbench`.
 
 ## Final Acceptance
 
-- [ ] Fresh read-only review of `916ca00..HEAD`; one TDD fix pass for Important/Critical findings.
-- [ ] Python 3.11/3.12 UNIT and integrated 3.13 with `.[all,browser-test]` and both required flags; expected zero integrated skips.
-- [ ] Secret scan and diff check clean; commit acceptance notes and restart/open guarded offline preview.
+- [x] Fresh read-only review of `916ca00..HEAD`; one TDD fix pass for Important/Critical findings.
+- [x] Python 3.11/3.12 UNIT and integrated 3.13 with `.[all,browser-test]` and both required flags; expected zero integrated skips.
+- [x] Secret scan and diff check clean; commit acceptance notes and restart/open guarded offline preview.
+
+Acceptance evidence: `docs/rsshub-settings-acceptance.md`. Final integrated suite: 634/634, zero skips. Two Important runtime review findings fixed in one TDD pass; no deferred findings from that review.
