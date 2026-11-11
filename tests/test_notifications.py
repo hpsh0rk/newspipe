@@ -69,6 +69,17 @@ class NotificationTests(unittest.TestCase):
         self.adapter.return_value.fetch.assert_not_called()
         self.assertEqual(self.store.pending_count("src"), 0)
 
+    def test_policy_owned_clock_passes_final_effect_gate_and_preserves_completion(self):
+        self.cfg = replace(self.cfg, slots={}, policies={"p": policy.NotificationPolicy(
+            mode="digest", times={"morning": "08:15"})})
+        self.collect(force=True)
+        run = self.notify(slot="morning")
+        self.assertEqual(run.card, "sent")
+        self.assertTrue(self.store.notification_slot_complete(DAY, "src", "morning"))
+        self.store.append_pending("src", [_item(2)])
+        self.assertEqual(self.notify(slot="morning").status, "slot_complete")
+        self.assertEqual(self.send.call_count, 1)
+
     def test_digest_clock_is_not_bypassed_by_run_or_manual_acquisition(self):
         self.cfg = replace(self.cfg, policies={"p": policy.NotificationPolicy(mode="digest", slots=("pm",))})
         result = pipeline.run_source(self.cfg, self.store, "src", now=NOW)

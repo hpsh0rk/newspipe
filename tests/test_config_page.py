@@ -297,27 +297,36 @@ class ConfigPageTests(unittest.TestCase):
                                 actions=act, page=page or {})
 
     def test_form_fields_come_from_the_schema(self) -> None:
-        page = self._page()
-        for path in ("fetch.trigger", "filter.max_items", "enrich.summary", "deliver.form",
-                     "deliver.budget.max_cards_per_day", "card.title"):
+        page = self._page({"new": "1"})
+        for path in ("fetch.trigger", "filter.max_items", "enrich.summary", "card.title"):
             self.assertIn(f'name="f.{path}"', page, path)
+        self.assertNotIn('name="f.deliver.', page)
+        legacy = self._page({"edit": "aihot"})
+        self.assertIn('name="f.deliver.form"', legacy)
         self.assertIn("① 何时拉", page)                 # 四轴分组都在
-        self.assertIn("④ 怎么发", page)
+        self.assertIn("④ 怎么发", legacy)
         self.assertIn("高级（", page)                   # 高级字段折叠
 
     def test_edit_form_is_prefilled_with_current_values(self) -> None:
         cfg = config.load(self.news)
         page = self._page({"edit": "aihot", "values": config.source_values(cfg.sources["aihot"])})
-        self.assertIn("编辑 <code>aihot</code>", page)
+        self.assertIn("编辑消息源", page)
+        self.assertIn("稳定 ID <code>aihot</code>", page)
         self.assertIn('<option value="aihot" selected>', page)         # 适配器预选
         class SlotControls(HTMLParser):
             def __init__(self):
                 super().__init__()
                 self.checked = []
+                self.active = False
             def handle_starttag(self, tag, attrs):
                 attrs = dict(attrs)
-                if tag == "input" and attrs.get("name") == "f.fetch.slots" and "checked" in attrs:
+                if tag == "select":
+                    self.active = attrs.get("name") == "f.fetch.slots"
+                if tag == "option" and self.active and "selected" in attrs:
                     self.checked.append(attrs.get("value"))
+            def handle_endtag(self, tag):
+                if tag == "select":
+                    self.active = False
         slots = SlotControls()
         slots.feed(page)
         self.assertEqual(slots.checked, ["am"])

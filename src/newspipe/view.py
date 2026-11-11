@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import re
 from datetime import datetime, timedelta
@@ -48,6 +49,8 @@ DEFAULT_STALE_AFTER = timedelta(hours=30)
 
 #: 心跳词表：状态码 → (人可读标签, 语气)。语气取值 = 面板 Pill 的 tone 集合。
 STATUS_LABELS: dict[str, tuple[str, str]] = {
+    "never": ("从未运行", "muted"),
+    "collected": ("已采集", "ok"),
     "ok": ("已运行", "ok"),
     "nothing_new": ("无新内容", "ok"),
     "state_only": ("只落 state", "ok"),
@@ -64,7 +67,7 @@ STATUS_LABELS: dict[str, tuple[str, str]] = {
     "error": ("故障", "danger"),
 }
 #: 这些状态是「健康但安静」，超期检查只对它们生效（故障状态本来就该红，不必再标超期）。
-HEALTHY = {"ok", "nothing_new", "state_only", "baseline"}
+HEALTHY = {"ok", "nothing_new", "state_only", "baseline", "collected"}
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -102,9 +105,12 @@ def _is_stale(status: str, ts: Any, trigger: str, now: datetime) -> bool:
 
 
 def _source_row(src: config.SourceConfig, store: state.Store, *, now: datetime) -> dict[str, Any]:
+    from newspipe.notification_view import REASONS
     hb = store.status(src.name)
     status = str(hb.get("status") or "never")
-    label, tone = STATUS_LABELS.get(status, (status or "未知", ""))
+    notification_tone = ("danger" if status in {"retry_exhausted", "send_result_unknown"} else
+                         "warn" if status in {"global_budget_exceeded", "budget_attribution_incomplete", "receipt_repair"} else "muted")
+    label, tone = STATUS_LABELS.get(status, (REASONS.get(status, f"未知状态（{status}）"), notification_tone))
     ts = hb.get("ts")
     trigger = src.fetch.trigger
     stale = _is_stale(status, ts, trigger, now)
@@ -407,7 +413,10 @@ def build(news_dir: Path | None = None, *, now: datetime | None = None) -> dict[
     news_dir = Path(news_dir or config.default_news_dir())
     from newspipe import callback_jobs
     from newspipe.notification_view import snapshot as notification_snapshot
-    cfg, _, sources_hash = edit.sources_snapshot(news_dir)
+    from newspipe import rssconnect
+    cfg, sources_text, sources_hash = edit.sources_snapshot(news_dir)
+    import yaml
+    raw_sources = yaml.safe_load(sources_text)["sources"]
     store = state.Store(news_dir)
     moment = now or datetime.now()
     digest = moment.strftime("%Y-%m-%d")
@@ -436,7 +445,10 @@ def build(news_dir: Path | None = None, *, now: datetime | None = None) -> dict[
         },
         "sources": rows,
         "sources_hash": sources_hash,
+        "rsshub": rssconnect.describe(cfg),
         "source_values": {name: config.source_values(source) for name, source in cfg.sources.items()},
+        "source_revisions": {name: hashlib.sha256(yaml.safe_dump(body, sort_keys=True).encode()).hexdigest()
+                             for name, body in raw_sources.items()},
         "notification": notification_snapshot(news_dir, now=moment, cfg=cfg, base_hash=sources_hash),
         "today": today,
         "summary": {
@@ -662,10 +674,11 @@ def _health_rows(view: dict[str, Any]) -> str:
 
     单行只回答「好不好、为什么」；完整运行态表在运维页，不在这里重复。
     """
+    from newspipe.webui import help_tip
     hist = view.get("history") or []
     sources = sorted(view.get("sources") or [], key=_health_sort_key)
     if not sources:
-        return ('<h2>信源心跳 <span class="hint">异常的排前面 · 点开任何一行是诊断抽屉</span></h2>'
+        return ('<h2>信源心跳' + help_tip("异常的排前面 · 点开任何一行是诊断抽屉", "health-help", "心跳诊断说明") + '</h2>'
                 '<p class="empty">注册表里还没有信源</p>')
     rows = []
     for src in sources:
@@ -684,8 +697,7 @@ def _health_rows(view: dict[str, Any]) -> str:
             f'<span class="hint">{html.escape(trigger)} · {html.escape(note[:80])}</span></summary>'
             f"{_drawer_body(src, hist)}"
             "</details>")
-    return ('<h2>信源心跳 <span class="hint">异常的排前面 · 点开任何一行是诊断抽屉：'
-            "最近一次为什么这样 / 生效中的闸</span></h2>" + "".join(rows))
+    return ('<h2>信源心跳' + help_tip("异常的排前面 · 点开任何一行是诊断抽屉：最近一次为什么这样 / 生效中的闸", "health-help", "心跳诊断说明") + '</h2>' + "".join(rows))
 
 
 def _cockpit_stats(view: dict[str, Any], page: dict[str, Any] | None) -> str:
@@ -772,7 +784,7 @@ def ops_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
         p = e.get("payload") or {}
         title = str(p.get("title") or p.get("item_id") or "（无标题）")
         qrows.append(
-            "<tr>"
+            f'<tr data-feedback-anchor="queue:{html.escape(str(e.get("id") or ""))}">'
             f'<td><code>{html.escape(str(e.get("ts") or ""))}</code></td>'
             f'<td>{html.escape(str(e.get("source") or ""))}</td>'
             f'<td>{_link(title, str(p.get("url") or ""))}</td>'
@@ -797,14 +809,14 @@ def ops_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
             bits.append(_form("flush", token, {"name": src["name"]},
                               f"现在发 {src['pending_total']}", danger=True))
         rows.append(
-            "<tr>"
+            f'<tr data-source="{html.escape(src["name"])}">'
             f"<td><code>{html.escape(src['name'])}</code></td>"
             f"<td>{_pill(str(src['status_tone']), label)}</td>"
             f'<td class="actions">{"".join(bits)}</td>'
             "</tr>")
     sources_section = (
         '<h2>信源 <span class="hint">启停与手动补跑；「为什么是这样」回驾驶舱点开信源行</span></h2>'
-        '<table><thead><tr><th>源</th><th>心跳</th><th>操作</th></tr></thead><tbody>'
+        '<table data-read-region="legacy-sources"><thead><tr><th>源</th><th>心跳</th><th>操作</th></tr></thead><tbody>'
         + ("".join(rows) or '<tr><td colspan="3" class="empty">注册表里还没有信源</td></tr>')
         + "</tbody></table>")
 
@@ -819,7 +831,7 @@ def ops_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
             f'<td>{html.escape(str(it.get("score") or ""))}</td>'
             "</tr>" for it in items)
         pend_blocks.append(
-            f'<h3><code>{html.escape(str(name))}</code> · 显示 {len(items)} 条 '
+            f'<h3 data-feedback-anchor="pending:{html.escape(str(name))}"><code>{html.escape(str(name))}</code> · 显示 {len(items)} 条 '
             + _form("flush", token, {"name": str(name)}, "现在发", danger=True)
             + "</h3><table><thead><tr><th>标题</th><th>来源</th><th>分</th></tr></thead>"
             + f"<tbody>{prows}</tbody></table>")
@@ -830,7 +842,9 @@ def ops_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
             + "".join(pend_blocks) + "</details>")
 
     from newspipe.workbench import operation_controls
-    body = _banner(flash) + operation_controls(view, token) + '<details><summary>兼容操作 · 旧式跑一轮</summary>' + toolbar + sources_section + pending_section + '</details>' + queue_section
+    body = (_banner(flash) + operation_controls(view, token) + '<details><summary>兼容操作 · 旧式跑一轮</summary>'
+            + toolbar + sources_section + '<div data-read-region="legacy-pending">' + pending_section + '</div></details>'
+            + '<section data-read-region="queue">' + queue_section + '</section>')
     return _page(tab="ops", sub_meta=view, svc=svc, body=body)
 
 

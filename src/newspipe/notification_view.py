@@ -84,9 +84,10 @@ def snapshot(news_dir: Path, *, source: str | None = None, candidate: dict | Non
         if not scfg.enabled:
             reason = "disabled"
         elif rule["values"]["mode"] == "digest":
-            from newspipe.service import SLOT_TOLERANCE, slot_datetime
-            due = [s for s in rule["values"]["slots"] if slot_datetime(after, s, now) <= now <=
-                   slot_datetime(after, s, now) + SLOT_TOLERANCE]
+            from newspipe.service import SLOT_TOLERANCE
+            due = [s for s in policy.sending_times(after, rule["values"]) if
+                   policy.notification_datetime(after, scfg, s, now) <= now <=
+                   policy.notification_datetime(after, scfg, s, now) + SLOT_TOLERANCE]
             if not due:
                 reason = "waiting_slot"
             elif all(store.notification_slot_complete(day, name, s) for s in due) and not unfinished:
@@ -124,5 +125,7 @@ def snapshot(news_dir: Path, *, source: str | None = None, candidate: dict | Non
             "chat": after.chat, "slots": after.slots, "hash": base_hash if base_hash is not None else edit.file_hash(news_dir / "sources.yaml"),
             "notifications": asdict(after.notifications) if after.notifications is not None else None,
             "global_budget": store.budget_state(day), "sources": rows,
-            "policies": {name: {"values": template.values(), "summary": policy.human_summary({"policy_id": name, "values": template.values()}, after.slots), "bound_sources": [s.name for s in after.sources.values()
+            "migration": {"policies": [n for n, p in after.policies.items() if p.slots],
+                          "sources": [s.name for s in after.sources.values() if s.notify and s.notify.overrides]},
+            "policies": {name: {"values": {**template.values(), "times": policy.sending_times(after, template.values())}, "summary": policy.human_summary({"policy_id": name, "values": template.values()}, after.slots), "bound_sources": [s.name for s in after.sources.values()
                           if s.notify and s.notify.policy == name]} for name, template in after.policies.items()}}

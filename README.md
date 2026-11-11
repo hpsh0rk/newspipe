@@ -45,7 +45,7 @@ newspipe 想解决的是**中间那一层**：把「采集 → 判断 → 加工
 | **可运维** | 心跳（区分「缺配置」与「故障」）、投递去重、失败重试、状态原子写、`doctor` 自检 |
 | **给 Agent 的接口** | 所有命令输出**统一结果信封**（`ok`/`changed`/`data`/`error`/`next`）+ 语义化退出码；写操作先校验后落盘，支持 `--dry-run` |
 
-配置生效边界：信源、通知策略、槽位时间、hooks 与调度间隔可以热加载；
+配置生效边界：信源、通知策略发送时间、采集计划、hooks 与调度间隔可以热加载；
 `service.inbound`、`service.view`、`service.feishu`、`service.log` 需要重启服务。
 服务不会为了尝试新端口或凭据先拆掉工作的连接，更不会同时开两条 WS。
 `status --json` 与 `/view` 的 `service.runtime` 给出 `effective`（当前资源）、
@@ -249,7 +249,7 @@ newspipe view --html     # 同一份数据的服务端渲染页（无前端构�
 | `GET /items` | 条目 | **内容浏览**：近 3/7/14 天所有条目 + 服务端筛选（关键词/源/状态），批次列可点进详情 |
 | `GET /batch/<日期>/<文件>` | 条目 | **批次详情**：一个批次里到底有哪些条目（标题/发布者/分类/分数/摘要/原文链接/状态） |
 | `GET /config` | 消息源 | 搜索/筛选、增删改/复制、采集配置、策略绑定与单字段覆盖、RSS 目录/订阅 |
-| `GET /notifications` | 通知 | 唯一通知目标、槽位、全局硬限制、可复用策略模板与只读前后预览 |
+| `GET /notifications` | 通知 | 策略独立发送时间、全局硬限制、唯一目标、采集计划与只读预览 |
 | `GET /ops` | 运维 | 分开采集/通知待处理、安全重试原操作、旧式补跑、⭐标记已入库（回执/兜底） |
 
 全部页面都需 `service.yaml: view.enabled`；写操作额外需 `view.actions`。
@@ -348,15 +348,54 @@ URL 只有随机句柄，不含草稿或令牌；服务重启/过期后草稿消
 - 表单默认勾选**先演练**（`--dry-run`），落盘前先看 diff；取消勾选才是真写。
 - 编辑使用合并补丁：未提交字段不动，`null` 删除字段，保留未知适配器扩展、卡片配置和显式覆盖。
   CLI `source set` 仍是整体替换。修改块内注释可能丢失，其他块保持原样；warning 原样显示。
-- RSS 搜索两条路：① **关键词搜目录**（`src/newspipe/rss.py` 里的 `CATALOG`，**只收录在本机
-  RSSHub 上实测过**的条目，带实测日期与状态码）；② **站点地址发现 feed**（抓页面里的
+- RSS 搜索两条路：① **关键词搜目录**（`src/newspipe/rss.py` 里的 `CATALOG`，收录历史
+  RSSHub 验证记录，带当时的日期与状态码，**不代表当前实例可用**）；② **站点地址发现 feed**（抓页面里的
   `<link rel=alternate>`，没有再探 `/feed`、`/atom.xml` 等常见路径）。
   本地 RSSHub 没有 `/routes` 目录（实测 404），所以不做「全网 RSS 搜索」这种吹牛功能。
 - 搜到的候选点「用这个新建信源」→ 跳到配置页并**预填**成 `rsshub` 适配器 + 该地址。
 
+### RSSHub 可选配置与检测
+
+`rsshub` 是兼容保留的适配器名称，后台显示为 **RSS / RSSHub**。完整 HTTP(S) RSS 地址
+直接访问，不需要部署 RSSHub；`/sspai/matrix` 这样的相对路由才需要一个可用的 RSSHub 实例。
+支持本机与远端 HTTP(S) 地址，也支持反向代理前缀，例如 `https://example.com/rsshub`。
+不会自动发现、安装或启动本机 RSSHub，因为进程存在不等于用户配置的实例 / 路由可用。
+
+基础地址优先级：`sources.yaml: rsshub.base_url` → 环境变量 `RSSHub_BASE` →
+`http://127.0.0.1:1200`。后台 `/config` 的“RSSHub · 可选连接”显示生效地址、来源和
+启用且依赖的信源。展开“设置地址与测试订阅”可保存覆盖地址；显式留空并保存恢复继承。
+默认仅校验，取消勾选才写入。保存由 CLI 原子校验和乐观并发保护，后续采集无需重启即可使用。
+
+```sh
+newspipe rsshub show --json
+newspipe rsshub set --base-url https://example.com/rsshub --dry-run --json
+newspipe rsshub set --base-url '' --json           # 清除显式覆盖，恢复继承
+newspipe rsshub probe --json                      # 只检测当前端点可达
+newspipe rsshub probe --base-url https://example.com/rsshub --feed /sspai/matrix --json
+newspipe rsshub probe --feed https://example.com/feed.xml --json
+```
+
+后台“测试连接”仅验证候选端点可达，不证明服务一定是 RSSHub，也不证明所有路由正常；
+“测试订阅”检查 RSS 2.0，包括合法的空订阅，Atom / RDF 会明确报暂不支持。
+测试不会保存、采集入队或发送通知，不清除未保存提示、不更新表单版本；无 JavaScript 时
+保留本次草稿并重定向，刷新不会再次检测。失败区分网络、鉴权、路由不存在与订阅格式问题，
+不显示上游响应正文、原始异常或 URL 查询参数。页面和 `doctor` 只读元信息，**不自动联网检测**。
+检测直接访问端点，不走配置的出网代理；单次请求无重试，响应上限 1 MiB、套接字超时
+5 秒，DNS / TLS / HTTP 跳转可能增加总耗时。
+运行时同一信源含多个订阅时，异常 XML 单独记录安全的失败日志，正常订阅继续采集；
+全订阅失败则明确报错，不会伪装成没有新内容。推导出的来源名称不包含 URL 查询参数。
+
+容器中的 `localhost` 指容器自己。访问宿主 RSSHub 请用 `http://host.docker.internal:1200`，
+同一容器网络使用服务名，远端使用完整地址；不要把用户名、密码或密钥写进基础地址。
+`compose.yaml` 显式传递可选 `RSSHub_BASE`，但不启动 RSSHub；模型用的回环别名不会自动改写 RSSHub 地址。
+
 ### 页面写操作：仪表盘变控制台（`view.actions`）
 
 打开 `service.yaml: view.actions` 后，`/ops`、`/config` 与 `/notifications` 上出现按钮与表单。机制：
+
+消息源和策略的创建、编辑、复制，以及全局 / RSSHub 设置统一在弹窗中完成。普通页面只展示摘要与清单；`?` 支持悬停、键盘聚焦和点击固定，移动端可点击查看。高级选项折叠但始终保留当前值。
+默认按钮为“校验配置”；取消“仅校验，不应用”后变为“保存配置”。只有确认保存成功且提交期间没有新编辑时才关闭弹窗并刷新清单。关闭未保存弹窗会询问，草稿仅在当前页面保留，离开或刷新后丢失；多个草稿各自保留原始版本，其他配置保存不会替它们更新版本。
+禁用 JavaScript 时编辑链接进入同一份服务端表单；预览、校验和失败通过一次性 PRG 恢复草稿，刷新不会重放写入。错误、删除后果和入库回执条件不会藏进提示图标。
 
 ```
 页面表单 → POST /api/actions/<动作> → src/newspipe/actions.py（表单 → argv）→ CLI 的同一份 handler
@@ -396,7 +435,7 @@ policies:
   reading:
     label: 早晚读报
     mode: digest
-    slots: [am, pm]
+    times: {morning: '08:15', evening: '18:35'}
     form: card
     max_cards_per_day: 4
 sources:
@@ -406,16 +445,25 @@ sources:
     fetch: {trigger: poll, interval_min: 10}
     notify:
       policy: reading
-      overrides: {min_gap_min: 0}
 ```
 
-策略 `mode` 可选 `immediate`（有待处理即评估）、`digest`（指定槽位）或 `collect`（本地批次，不发送）。
-`card` 每批新卡，`append_card` 更新稳定卡片。未填覆盖字段继承模板，`0`/空字符串是明确覆盖。
+策略 `mode` 可选 `immediate`（有待处理即评估）、`digest`（指定多个发送时间）或 `collect`（本地批次，不发送）。
+`card` 每批新卡，`append_card` 更新稳定卡片。消息源只选择策略，参数在源弹窗只读展示；
+需要不同设置时，复制策略后绑定，不再提供源级覆盖。编辑一个策略，所有绑定源同步生效，其他策略不变。
+`times` 的键是内部稳定标识，保留通知完成记录；管理后台隐藏标识，仅编辑时间。
+旧同刻计划保留各自的完成记录；新建或改时不能引入重复时间，旧同刻计划可原样保留或消除重复。
+顶层 `slots` 只管理定时采集计划，修改它不影响已独立配置 `times` 的策略。
 全局上限未配置是不加硬上限，`0` 是不发送；源级例外只跳过该源的静默/上限/间隔，不能越过全局或时钟。
 暂停通知继续采集；停用源停止新采集与新通知，队列保留。已确认远端成功的本地回执仍可修复。
 
 既有源不会自动迁移。绑定/解绑先预览并确认：旧式预算是全局计数，模板预算是每源计数，转换不清零。
 旧字段保留用于回退。切到 `collect` 后待处理内容消费为本地批次，切回通知不会重发这些内容。
+旧策略 `slots` 引用与源 `notify.overrides` 仍兼容读取，通知页明确提示待迁移。
+先执行 `newspipe notification migrate --dry-run --json` 查看变更，再带当前 `--base-hash` 执行迁移：
+旧时间固定到各策略，源覆盖值保留为独立策略，已停用源也迁移，计数、队列和投递回执不变。
+旧覆盖配置迁移前不能改绑定或复制源，避免丢值；单独修改源的采集或加工参数仍可保存。
+从源弹窗创建策略后，本页保留源草稿。返回源草稿并选择新策略，点击“核对并同步最新配置版本”；
+只有完整源配置未被其他操作改动才更新版本，之后再预览、保存。离开页面不保留草稿。
 历史总计缺少源归属时，当天模板的源级限制保护性阻塞，不编造计数；次日或核对留存回执后再处理。
 删除策略前先解除所有引用（含停用源）；ID 稳定不可改名，复制必须使用新 ID，新源默认停用。
 

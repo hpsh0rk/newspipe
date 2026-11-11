@@ -80,6 +80,13 @@ def _adapter(name: str) -> Any:
     return importlib.import_module(f"newspipe.adapters.{name}")
 
 
+def _adapter_config(cfg: Any, source: Any) -> dict:
+    settings = source.adapter_config()
+    if source.adapter == "rsshub":
+        settings["rsshub_base_url"] = cfg.rsshub.get("base_url", "")
+    return settings
+
+
 def _merge(first: list[dict], second: list[dict]) -> list[dict]:
     """按 ext_id 去重合并（first 优先，保序）——顺延队列在旧条目在前的语义下先进先出。"""
     seen: set[str] = set()
@@ -263,7 +270,7 @@ def _process_locked(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slo
         return run
 
     try:
-        raw = _adapter(scfg.adapter).fetch(scfg.adapter_config(), since=since)
+        raw = _adapter(scfg.adapter).fetch(_adapter_config(cfg, scfg), since=since)
     except ConfigError as exc:
         run.status, run.note = "config_missing", str(exc)[:200]
         if not dry:
@@ -352,8 +359,8 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
         if current_plan.reason != "ok":
             return defer(current_plan.reason)
         if scheduled_slot:
-            from newspipe.service import SLOT_TOLERANCE, slot_datetime
-            when = slot_datetime(cfg, clock_slot or slot, current)
+            from newspipe.service import SLOT_TOLERANCE
+            when = policy.notification_datetime(cfg, scfg, clock_slot or slot, current)
             if current.date().isoformat() != digest or not when <= current <= when + SLOT_TOLERANCE:
                 return defer("waiting_slot")
         started = batch.get("remote_attempt_started_at") or batch.get("send_started_at")
@@ -629,7 +636,7 @@ def collect_source(cfg: Any, store: state.Store, name: str, *, now: datetime | N
                 run.status = "throttled"
                 return run
         try:
-            raw = _adapter(scfg.adapter).fetch(scfg.adapter_config(), since=since)
+            raw = _adapter(scfg.adapter).fetch(_adapter_config(cfg, scfg), since=since)
             kept = filter_mod.apply(raw, scfg)
             fresh = dedup.fresh(kept, store, name)
         except Exception as exc:
@@ -682,9 +689,10 @@ def notify_source(cfg: Any, store: state.Store, name: str, *, now: datetime | No
         effective = policy.effective_source(cfg, scfg)
         mode = rule.values["mode"] if rule else "immediate"
         if mode == "digest" and not bypass_clock:
-            from newspipe.service import SLOT_TOLERANCE, slot_datetime
-            eligible = [s for s in rule.values["slots"] if (slot is None or s == slot)
-                        and slot_datetime(cfg, s, now) <= now <= slot_datetime(cfg, s, now) + SLOT_TOLERANCE]
+            from newspipe.service import SLOT_TOLERANCE
+            eligible = [s for s in policy.sending_times(cfg, rule.values) if (slot is None or s == slot)
+                        and policy.notification_datetime(cfg, scfg, s, now) <= now <=
+                        policy.notification_datetime(cfg, scfg, s, now) + SLOT_TOLERANCE]
             if not eligible:
                 run.status, run.queued = "waiting_slot", store.pending_count(name)
                 return run

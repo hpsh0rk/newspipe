@@ -180,9 +180,9 @@ def _argv_source_save(form: dict[str, list[str]]) -> list[str]:
     if not re.fullmatch(r"[A-Za-z0-9_\-]{1,40}", name):
         raise ActionInputError("信源名只能用字母、数字、下划线、短横，1–40 字符")
     body = build_source_body(form)
+    binding = notification_binding(form)
     if "notify_policy" in form:
         from newspipe.edit import merge_patch
-        binding = notification_binding(form)
         if binding:
             body["notify"] = merge_patch({}, binding)
     if not body:
@@ -231,34 +231,21 @@ def _write_flags(argv: list[str], form: dict[str, list[str]]) -> list[str]:
 
 
 def notification_binding(form: dict[str, list[str]]) -> dict | None:
-    from newspipe import config as config_mod
+    if any(key.startswith(("inherit.", "n.")) for key in form):
+        raise ActionInputError("消息源不支持覆盖策略参数；请编辑策略，或复制策略后绑定")
     if "notify_policy" not in form:
         return {}
     name = (form.get("notify_policy") or [""])[0].strip()
     if not name:
         return None
-    overrides = {}
-    for field in config_mod.describe_schema()["policy_fields"]:
-        key = field["path"]
-        if key == "label" or f"inherit.{key}" not in form:
-            continue
-        inheritance = (form[f"inherit.{key}"] or [""])[0]
-        if inheritance == "inherit":
-            overrides[key] = None
-        elif inheritance == "custom":
-            value = _coerce(field, form.get(f"n.{key}", []))
-            if value is None:
-                raise ActionInputError(f"{key}: 自定义数值不能为空；请填写数值（可以为 0），或明确选择继承")
-            overrides[key] = value
-        else:
-            raise ActionInputError(f"{key}: 只能选择 inherit 或 custom")
-    return {"policy": name, "overrides": overrides}
+    return {"policy": name}
 
 
 def _source_patch_body(form):
     body = build_source_body(form, patch=True)
+    binding = notification_binding(form)
     if "notify_policy" in form:
-        body["notify"] = notification_binding(form)
+        body["notify"] = binding
     return body
 
 
@@ -272,8 +259,29 @@ def _argv_source_patch(form):
 
 def _policy_body(form):
     from newspipe import config as config_mod
-    return {field["path"]: _coerce(field, form[f"p.{field['path']}"])
-            for field in config_mod.describe_schema()["policy_fields"] if f"p.{field['path']}" in form}
+    body = {field["path"]: _coerce(field, form[f"p.{field['path']}"])
+            for field in config_mod.describe_schema()["policy_fields"]
+            if field["type"] != "times" and f"p.{field['path']}" in form}
+    if "p.times" in form or "p.times_key" in form:
+        clocks, keys = form.get("p.times", []), form.get("p.times_key", [])
+        if len(clocks) != len(keys):
+            raise ActionInputError("times: 发送时间行不完整，请重新打开编辑器")
+        times = {}
+        reserved = {key.strip() for key in keys if key.strip()}
+        for key, clock in zip(keys, clocks):
+            key, clock = key.strip(), clock.strip()
+            if not clock:
+                continue
+            if not key:
+                stem = "at_" + clock.replace(":", "")
+                key, suffix = stem, 2
+                while key in reserved or key in times:
+                    key, suffix = f"{stem}_{suffix}", suffix + 1
+            if key in times:
+                raise ActionInputError("times: 发送时间行标识重复，请重新打开编辑器")
+            times[key] = clock
+        body["times"] = times if body.get("mode") == "digest" else {}
+    return body
 
 
 def _argv_policy_save(form):
@@ -344,6 +352,23 @@ def _argv_retry(form):
                          "--operation-id", _one(form, "operation_id")], form)
 
 
+def _argv_rsshub_probe(form):
+    feed = (form.get("probe_feed") or [""])[0].strip()
+    kind = (form.get("probe_kind") or ["feed" if feed else "connection"])[0]
+    if kind not in {"connection", "feed"}:
+        raise ActionInputError("检测类型必须是 connection 或 feed")
+    if kind == "feed" and not feed:
+        raise ActionInputError("测试订阅前请填写 probe_feed：完整 RSS 地址或 RSSHub 相对路由")
+    return ["rsshub", "probe", "--base-url", (form.get("r.base_url") or [""])[0],
+            *(["--feed", feed] if kind == "feed" else [])]
+
+
+def _argv_rsshub_save(form):
+    if "r.base_url" not in form:
+        raise ActionInputError("缺少 RSSHub 基础地址字段；显式留空才会恢复继承")
+    return _write_flags(["rsshub", "set", "--base-url", form["r.base_url"][0]], form)
+
+
 ACTIONS: dict[str, Action] = {
     a.name: a for a in (
         Action("run", "跑一轮", _argv_run),
@@ -355,6 +380,9 @@ ACTIONS: dict[str, Action] = {
         Action("policy-remove", "删除通知策略", _argv_policy_remove, danger=True),
         Action("global-save", "保存全局通知设置", _argv_globals, danger=True),
         Action("notification-preview", "预览有效通知规则", _argv_preview),
+        Action("notification-migrate", "迁移旧通知配置", lambda form: _write_flags(["notification", "migrate"], form), danger=True),
+        Action("rsshub-save", "保存 RSSHub 地址", _argv_rsshub_save, danger=True),
+        Action("rsshub-probe", "只读检测 RSSHub / RSS 订阅", _argv_rsshub_probe),
         Action("collect", "只采集一次", lambda f: ["collect", _one(f, "name"), *(["--dry"] if _flag(f, "dry") else [])]),
         Action("notify", "通知现有待处理", _argv_notify, danger=True),
         Action("notification-retry", "安全重试原操作", _argv_retry, danger=True),
@@ -382,8 +410,14 @@ def dispatch(name: str, form: dict[str, list[str]], news_dir: Path) -> dict[str,
     argv = [*argv, "--json"]
     res = cli.run_subcommand(argv, news_dir)
     data = res.as_dict()
+    displayed = list(argv)
+    if name.startswith("rsshub-"):
+        from newspipe import rssconnect
+        for index, arg in enumerate(displayed[:-1]):
+            if arg in ("--base-url", "--feed"):
+                displayed[index + 1] = rssconnect.safe_url(displayed[index + 1])
     # 把「这个信封是哪个 Web 动作、以及它实际跑了哪条 CLI」记进 payload：
     # 用户看到失败时，下一步就是去终端复现这条命令。
     data["action"] = {"name": spec.name, "label": spec.label, "danger": spec.danger,
-                      "cli": " ".join(a if " " not in a else f"'{a}'" for a in argv)}
+                      "cli": " ".join(a if " " not in a else f"'{a}'" for a in displayed)}
     return data

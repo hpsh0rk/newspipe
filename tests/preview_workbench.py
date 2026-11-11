@@ -14,7 +14,7 @@ from unittest.mock import patch
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from newspipe import channel, credentials, inbound, llm, net, pipeline, runtime, state
+from newspipe import channel, credentials, inbound, llm, net, pipeline, rssconnect, runtime, state
 
 
 @dataclass
@@ -28,12 +28,12 @@ class WorkbenchFixture:
 
 
 @contextmanager
-def offline_workbench():
+def offline_workbench(*, view_actions=True):
     with TemporaryDirectory(prefix="newspipe-workbench-") as tmp, ExitStack() as stack:
         news = Path(tmp)
         raw = {"chat": "oc_offline_preview", "slots": {"am": "08:15", "pm": "18:35"},
                "notifications": {"max_cards_per_day": 24, "paused": False},
-               "policies": {"digest": {"label": "早晚读报", "mode": "digest", "slots": ["am", "pm"]},
+               "policies": {"digest": {"label": "早晚读报", "mode": "digest", "times": {"am": "08:15", "pm": "18:35"}},
                             "live": {"label": "值得及时知道", "mode": "immediate", "form": "append_card",
                                      "min_gap_min": 10, "quiet_hours": "23:00-07:30"},
                             "archive": {"label": "先收着，慢慢看", "mode": "collect"}},
@@ -48,7 +48,7 @@ def offline_workbench():
         for source in raw["sources"].values():
             source["enrich"] = {"summary": "off"}
         (news / "sources.yaml").write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False))
-        (news / "service.yaml").write_text("inbound: {mode: none}\nview: {enabled: true, actions: true}\n")
+        (news / "service.yaml").write_text(f"inbound: {{mode: none}}\nview: {{enabled: true, actions: {str(view_actions).lower()}}}\n")
         store = state.Store(news)
         store.append_pending("research", [{"ext_id": "preview-1", "title": "A small, verifiable research update",
                                            "url": "https://example.invalid/article", "source": "Preview"}])
@@ -70,13 +70,14 @@ def offline_workbench():
              "url": "https://example.invalid/collected", "source": "Preview"}])))
         stack.enter_context(patch.object(credentials, "resolve_feishu", side_effect=deny("credentials")))
         stack.enter_context(patch.object(net, "request", side_effect=deny("network")))
+        stack.enter_context(patch.object(rssconnect, "_probe_request", side_effect=deny("RSSHub probe network")))
         stack.enter_context(patch.object(llm, "chat_json", side_effect=deny("model")))
         stack.enter_context(patch.object(pipeline, "_enrich_new", side_effect=deny("enrichment")))
         for method in ("create_entity", "send_card", "update_entity"):
             stack.enter_context(patch.object(channel, method, side_effect=deny(method)))
-        stack.enter_context(patch.dict("os.environ", {"NEWSPIPE_BIND_HOST": "127.0.0.1"}))
+        stack.enter_context(patch.dict("os.environ", {"NEWSPIPE_BIND_HOST": "127.0.0.1", "RSSHub_BASE": ""}))
         server, _ = inbound.start_http(service_cfg={"http": {"host": "127.0.0.1", "port": 0}}, creds=None,
-                                       news_dir=news, accept_events=False, view_actions=True, logger=lambda _: None)
+                                       news_dir=news, accept_events=False, view_actions=view_actions, logger=lambda _: None)
         # Drain handlers before ExitStack restores guards; partial HTTP reads
         # time out rather than keeping a test/preview process alive indefinitely.
         server.daemon_threads = False

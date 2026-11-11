@@ -388,8 +388,8 @@ def describe_schema(news_dir: Path | None = None) -> dict[str, Any]:
         # ---- ① 何时拉
         {"path": "fetch.trigger", "axis": "fetch", "label": "触发方式", "type": "enum",
          "choices": list(TRIGGERS), "default": "slot"},
-        {"path": "fetch.slots", "axis": "fetch", "label": "槽位", "type": "slots",
-         "choices": slots, "default": [], "help": "trigger=slot 必填；取值来自 sources.yaml 顶层的 slots"},
+        {"path": "fetch.slots", "axis": "fetch", "label": "采集计划", "type": "slots",
+         "choices": slots, "default": [], "help": "定时采集时选择；多个源共用同一采集计划。发送时间在通知策略中独立配置。"},
         {"path": "fetch.interval_min", "axis": "fetch", "label": "轮询间隔（分钟）", "type": "float",
          "default": 0.0, "help": "trigger=poll 用：两次真抓取之间的最小间隔"},
         # ---- ② 留什么
@@ -435,6 +435,8 @@ def describe_schema(news_dir: Path | None = None) -> dict[str, Any]:
         if entry["type"] == "slots":
             entry["choices"] = slots
     return {"contract_version": 1, "axes": axes, "fields": f, "adapters": adapter_names(),
+            "rsshub_fields": [{"path": "base_url", "label": "RSSHub 基础地址", "type": "str", "default": "",
+                               "help": "可填本地或远端 HTTP(S) 地址；留空继承 RSSHub_BASE，未设置时使用本地默认。完整 RSS 地址不依赖它。"}],
             "policy_fields": policy_fields, "notification_fields": notification_fields,
             "slots": slots,
             "globals": {"note": "chat、slots、notifications 由 global set 原子校验；策略由 policy set 编辑",
@@ -529,6 +531,7 @@ class Config:
     hooks: hooks_lib.HookSet = field(default_factory=hooks_lib.HookSet)
     policies: dict[str, policy_lib.NotificationPolicy] = field(default_factory=dict)
     notifications: policy_lib.NotificationGlobals | None = None
+    rsshub: dict[str, str] = field(default_factory=dict)
 
     def enabled_sources(self) -> list[SourceConfig]:
         return [s for s in self.sources.values() if s.enabled]
@@ -620,6 +623,11 @@ def load(news_dir: Path | None = None, *, sources_text: str | None = None,
         template.validate(where=f"policies.{name}", slots=slots)
     notifications = (policy_lib.NotificationGlobals.parse(raw["notifications"])
                      if "notifications" in raw else None)
+    from newspipe import rssconnect
+    rsshub = raw.get("rsshub", {})
+    if not isinstance(rsshub, dict) or set(rsshub) - {"base_url"}:
+        raise ConfigError("rsshub 必须是映射，且只能包含 base_url")
+    rsshub = {"base_url": rssconnect.base_url(rsshub.get("base_url", ""))}
 
     sources = _parse_sources(raw.get("sources"), news_dir=news_dir)
     for src in sources.values():
@@ -637,7 +645,7 @@ def load(news_dir: Path | None = None, *, sources_text: str | None = None,
             raise ConfigError(f"{models_path}: 顶层需要映射")
 
     result = Config(chat=chat, slots=slots, sources=sources, models=models,
-                  policies=policies, notifications=notifications,
+                  policies=policies, notifications=notifications, rsshub=rsshub,
                   service=load_service(news_dir),
                   hooks=hooks_lib.load_from(news_dir / "hooks.yaml", text=hooks_text))
     for src in sources.values():

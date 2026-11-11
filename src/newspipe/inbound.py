@@ -206,6 +206,8 @@ def _flash_of(envelope: dict[str, Any]) -> dict[str, Any]:
         bits = [f"{k}: {data[k]}" for k in ("summary", "message", "changed", "note")
                 if data.get(k)]
         summary = " · ".join(bits) or "完成"
+        if data.get("dry_run"):
+            summary = "校验通过 · 尚未应用；取消“仅校验，不应用”后保存才会真正写入配置。"
     return {
         "ok": ok,
         "label": str(action.get("label") or envelope.get("command") or "操作"),
@@ -347,7 +349,7 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                 page["prefill"] = prefill
                 page["prefill_name"] = hint
             page.update({key: (query.get(key) or [""])[0] for key in
-                         ("new", "copy", "search", "policy_filter", "enabled_filter", "adapter_filter")})
+                         ("new", "copy", "search", "policy_filter", "enabled_filter", "adapter_filter", "rsshub")})
             if query.get("edit"):
                 name = (query["edit"] or [""])[0]
                 try:
@@ -379,7 +381,7 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                 return
             query = parse_qs(urlparse(self.path).query)
             is_batch = route.startswith("/batch/")
-            if route in ("/", "/ops", "/config", "/notifications", "/items", view_path) or is_batch:
+            if route in ("/", "/ops", "/config", "/notifications", "/items", "/confirm-delete", view_path) or is_batch:
                 try:
                     payload = self._view()
                 except Exception as exc:                   # 配置坏了要说清楚，别回空壳
@@ -408,7 +410,7 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                         act = None
                     flash = view_mod.flash_decode((query.get("r") or [""])[0])
                     if draft:
-                        flash = draft["flash"]
+                        flash = None if draft.get("probe") else draft["flash"]
                 if is_batch:
                     parts = route.split("/")
                     if len(parts) == 4 and parts[2] and parts[3]:
@@ -417,25 +419,46 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                         status, page = 404, view_mod.batch_html(payload, page={})
                     self._send_html(status, page)
                     return
-                if route == "/ops":
+                if route == "/confirm-delete":
+                    from newspipe.webconfirmation import confirmation_body
+                    kind, name = (query.get("kind") or [""])[0], (query.get("name") or [""])[0]
+                    try:
+                        body = confirmation_body(payload, act, kind, name)
+                    except ValueError:
+                        self._send(404, {"ok": False, "error": "删除目标不存在"})
+                        return
+                    page = view_mod._page(tab="config" if kind == "source" else "notifications",
+                                          sub_meta=payload, svc=payload["service"], body=body)
+                elif route == "/ops":
                     page = view_mod.ops_html(payload, actions=act, flash=flash)
                 elif route == "/config":
                     page = self._config_page(payload, act, flash, query)
                 elif route == "/notifications":
                     from newspipe import config as config_mod
+                    policy_page = {key: (query.get(key) or [""])[0] for key in ("edit", "copy", "new", "preset", "global")}
+                    if draft and draft.get("action") == "policy-save" and draft.get("form"):
+                        from itertools import zip_longest
+                        values = draft["form"]
+                        if "p.times" in values:
+                            policy_page["time_rows"] = list(zip_longest(values.get("p.times_key", []), values["p.times"], fillvalue=""))
                     page = view_mod.notifications_html(payload, schema=config_mod.describe_schema(), actions=act, flash=flash,
-                           page={key: (query.get(key) or [""])[0] for key in ("edit", "copy", "new", "preset")})
+                           page=policy_page)
                 elif route == "/items":
                     page = self._items_page(payload, query)
                 else:
                     page = view_mod.cockpit_html(payload, flash=flash, page=self._recent_page())
                 if draft and draft.get("form"):
                     from newspipe.webdrafts import restore
+                    from newspipe.workbench import probe_result
                     page = restore(page, draft["action"], draft["form"],
-                                   reveal=not (draft.get("flash") or {}).get("ok"))
+                                   reveal=not (draft.get("flash") or {}).get("ok"),
+                                   feedback=probe_result(draft["probe"]) if draft.get("probe") else "")
                 if draft and draft.get("preview"):
                     from newspipe.workbench import preview_result
                     page = page.replace('<div id="action-result"', preview_result(draft["preview"]) + '<div id="action-result"', 1)
+                if draft and draft.get("migration"):
+                    from newspipe.workbench import migration_result
+                    page = page.replace('<div id="action-result"', migration_result(draft["migration"]) + '<div id="action-result"', 1)
                 self._send_html(200, page)
                 return
             self._send(200, {"ok": True, "service": "newspipe", "inbound": "http",
@@ -493,25 +516,35 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
             if "application/json" in (self.headers.get("Accept") or ""):
                 self._send(200, envelope)
                 return
-            # PRG（Post/Redirect/Get）：结果编码进 URL，刷新页面不会重放写操作
+            # PRG: opaque one-use handle; refresh never repeats a write or probe.
             return_to = (form.get("return_to") or ["/"])[0]
             if return_to not in {"/", "/config", "/notifications", "/items", "/ops"}:
                 return_to = "/"
             # One-use PRG memory: neither raw input nor CLI argv belongs in URLs.
             data = envelope.get("data") or {}
-            retain = not envelope.get("ok") or data.get("dry_run") or name == "notification-preview"
+            retain = not envelope.get("ok") or data.get("dry_run") or name in {"notification-preview", "rsshub-probe"}
             action = name
             if name == "notification-preview":
                 kind = (form.get("preview_kind") or ["source"])[0]
                 action = {"global": "global-save", "policy": "policy-save"}.get(kind, "source-save" if form.get("create_only") else "source-patch")
+            elif name == "rsshub-probe":
+                action = "rsshub-save"
             query = {}
             if action in {"source-patch", "policy-save", "source-save"}:
                 query = {"new": ["1"]} if form.get("create_only") or action == "source-save" else {"edit": form.get("name", [])}
+                if action == "policy-save" and form.get("copy_from"):
+                    query = {"copy": form["copy_from"]}
             elif action == "source-copy":
                 query = {"copy": form.get("name", [])}
+            elif action == "rsshub-save":
+                query = {"rsshub": ["1"]}
+            elif action == "global-save":
+                query = {"global": ["1"]}
             key = drafts.put({"action": action, "query": query if retain else {}, "flash": _flash_of(envelope),
                               "form": {k: v for k, v in form.items() if k != "token"} if retain else None,
-                              "preview": data if name == "notification-preview" and envelope.get("ok") else None})
+                              "probe": envelope if name == "rsshub-probe" else None,
+                              "preview": data if name == "notification-preview" and envelope.get("ok") else None,
+                              "migration": data if name == "notification-migrate" and envelope.get("ok") else None})
             self.send_response(303)
             self.send_header("Location", f"{return_to}?draft={key}")
             self.send_header("Content-Length", "0")

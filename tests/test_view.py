@@ -75,6 +75,24 @@ class ViewBuildTests(unittest.TestCase):
         self.assertEqual(row["status_detail"]["fetched"], 2)
         self.assertEqual(row["status_note"], "攒批")
 
+    def test_collection_and_never_statuses_have_human_labels(self) -> None:
+        for status, label, tone in (("never", "从未运行", "muted"),
+                                    ("collected", "已采集", "ok"),
+                                    ("notifications_paused", "全局通知暂停", "muted"),
+                                    ("send_result_unknown", "远端结果未知，请核对回执", "danger")):
+            with self.subTest(status=status):
+                self.store.heartbeat("aihot", status=status, ts=NOW.isoformat())
+                row = next(r for r in view.build(self.news, now=NOW)["sources"] if r["name"] == "aihot")
+                self.assertEqual(row["status"], status)
+                self.assertEqual((row["status_label"], row["status_tone"]), (label, tone))
+
+    def test_old_collection_heartbeat_is_stale_with_aware_and_naive_clocks(self) -> None:
+        self.store.heartbeat("aihot", status="collected", ts=(NOW - timedelta(hours=31)).isoformat())
+        for now in (NOW, NOW.replace(tzinfo=None)):
+            row = next(r for r in view.build(self.news, now=now)["sources"] if r["name"] == "aihot")
+            self.assertTrue(row["stale"])
+            self.assertEqual((row["status_label"], row["status_tone"]), ("超期未运行", "warn"))
+
     def test_stale_detection_uses_the_trigger_window_and_aligns_timezones(self) -> None:
         self.store.heartbeat("aihot", status="ok")            # 槽位源：30h
         # 心跳写的是墙钟时间，把文件改成 31 小时前

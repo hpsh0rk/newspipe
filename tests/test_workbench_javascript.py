@@ -13,42 +13,54 @@ HARNESS = r"""
 const assert = require('node:assert/strict');
 const listeners = {}, windowListeners = {};
 class Element {
-  constructor() { this.children = []; this.dataset = {}; this.hidden = false; }
+  constructor() { this.children = []; this.dataset = {}; this.hidden = false; this.isConnected = true; }
   append(node) { this.children.push(node); }
   replaceChildren() { this.children = []; }
+  setAttribute() {}
+  getAttribute(name) { return name === 'method' ? 'post' : name === 'action' ? this.action : null; }
+  removeAttribute() {}
+  getBoundingClientRect() { return {top: 100, bottom: 150}; }
+  scrollIntoView() {}
   focus() {}
 }
-const result = new Element();
+let result = new Element();
 const field = {value: 'old'};
 const hash = {value: 'old-hash'};
 const button = {disabled: false};
 const form = {
   action: 'http://localhost/api/actions/source-patch', dataset: {},
+  hasAttribute: () => false,
+  closest: () => null, append: () => {},
   reportValidity: () => true, setAttribute: () => {}, removeAttribute: () => {},
+  querySelector: () => null,
   querySelectorAll: selector => selector.startsWith('button') ? [button] : [],
   elements: {namedItem: name => name === 'base_hash' ? hash : null}
 };
 global.location = {origin: 'http://localhost', pathname: '/config', search: ''};
 global.document = {
-  getElementById: () => result, createElement: () => new Element(), querySelectorAll: () => [],
+  getElementById: id => id === 'action-result' ? result : null,
+  createElement: tag => { const node = new Element(); if (tag === 'div') result = node; return node; },
+  querySelectorAll: () => [], querySelector: () => null,
   addEventListener: (name, fn) => { listeners[name] = fn; }, body: {dataset: {viewPath: '/view'}}
 };
 global.window = {
   addEventListener: (name, fn) => { windowListeners[name] = fn; },
   confirm: () => true, scrollY: 0, scrollTo: () => {}
 };
+global.DOMParser = class { parseFromString() { return {querySelectorAll: () => []}; } };
 global.FormData = class {
   constructor() { this.rows = [['f.feed_label', field.value], ['base_hash', hash.value]]; }
   *[Symbol.iterator]() { yield* this.rows; }
 };
-let release, submitted, postCount = 0;
+let release, submitted, postCount = 0, readCount = 0;
 global.fetch = (url, options) => {
   if (options.method === 'POST') {
     postCount++;
     submitted = options.body.get('f.feed_label');
     return new Promise(resolve => { release = envelope => resolve({json: async () => envelope}); });
   }
-  return Promise.resolve({ok: true, json: async () => ({notification: {sources: [], policies: {}, global_budget: {cards: 0}}})});
+  readCount++;
+  return Promise.resolve({ok: true, headers: {get: () => 'text/html'}, text: async () => '<html></html>'});
 };
 const edit = (value, event = 'input') => {
   field.value = value;
@@ -133,4 +145,36 @@ release({ok: true, changed: false, data: {sources: []}});
 await pending;
 assert.equal(warns(), true);
 assert.equal(hash.value, 'old-hash');
+""")
+
+    def test_probe_success_never_acknowledges_or_refreshes_even_with_a_hash(self):
+        self.run_javascript(r"""
+form.action = 'http://localhost/api/actions/rsshub-probe';
+edit('candidate');
+const pending = submit();
+release({ok: true, changed: false, data: {hash: 'irrelevant', message: 'reachable', checked_url: 'https://example.invalid', http_status: 200}});
+await pending;
+assert.equal(warns(), true);
+assert.equal(hash.value, 'old-hash');
+assert.equal(readCount, 0);
+assert.equal(result.children.some(node => node.textContent?.includes('只读检测')), true);
+""")
+
+    def test_failed_probe_and_transport_are_not_unknown_writes(self):
+        self.run_javascript(r"""
+form.action = 'http://localhost/api/actions/rsshub-probe';
+edit('candidate');
+let pending = submit();
+release({ok: false, error: {code: 'E_NETWORK', message: 'unreachable', hint: 'check', details: {http_status: 404}}});
+await pending;
+assert.equal(result.children.some(node => node.textContent?.includes('未应用')), false);
+assert.equal(result.children.some(node => node.textContent?.includes('只读检测')), true);
+global.fetch = async () => { postCount++; throw new Error('offline'); };
+await submit();
+assert.equal(result.children.some(node => node.textContent?.includes('检测结果未确认')), true);
+assert.equal(result.children.some(node => node.textContent?.includes('写入')), false);
+assert.equal(warns(), true);
+assert.equal(hash.value, 'old-hash');
+assert.equal(readCount, 0);
+assert.equal(postCount, 2);
 """)

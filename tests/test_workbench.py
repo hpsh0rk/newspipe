@@ -37,15 +37,36 @@ class WorkbenchTests(unittest.TestCase):
         self.assertNotIn("<script", page.replace(SCRIPT, ""))
         self.assertIn('aria-live="polite"', page)
 
-    def test_sources_editor_uses_patch_and_explicit_inherit_controls(self):
+    def test_sources_editor_selects_and_displays_managed_policy_without_overrides(self):
         page = view.config_html(self.payload, schema=config.describe_schema(self.news), actions=self.actions,
                                 page={"edit": "src", "values": config.source_values(config.load(self.news).sources["src"])})
         self.assertIn('action="/api/actions/source-patch"', page)
         self.assertIn('name="notify_policy"', page)
-        self.assertIn('name="inherit.quiet_hours"', page)
-        self.assertIn('value="custom" selected', page)
+        self.assertNotIn('name="inherit.', page)
+        self.assertNotIn('name="n.', page)
+        self.assertNotIn('name="f.deliver.', page)
+        self.assertIn('data-bound-policy-details', page)
+        self.assertIn('href="/notifications?new=1" data-editor-open', page)
+        self.assertIn('data-edit-bound-policy', page)
+        self.assertIn("旧版独立设置", page)
         self.assertIn('name="return_to" value="/config"', page)
-        self.assertIn("未提交字段保持原样", page)
+        self.assertIn("参数由策略统一管理", page)
+
+    def test_policy_editor_owns_multiple_times_and_explains_affected_sources(self):
+        page = view.notifications_html(self.payload, schema=config.describe_schema(self.news),
+                                       actions=self.actions, page={"edit": "p"})
+        self.assertIn('type="time"', page)
+        self.assertIn('name="p.times"', page)
+        self.assertNotIn('name="p.slots"', page)
+        self.assertIn('data-add-time', page)
+        self.assertIn("其他策略不受影响", page)
+        self.assertIn("src", page)
+
+    def test_migration_is_explicit_and_defaults_to_dry_run(self):
+        page = view.notifications_html(self.payload, schema=config.describe_schema(self.news), actions=self.actions)
+        self.assertIn('action="/api/actions/notification-migrate"', page)
+        self.assertIn('name="dry" value="1" checked', page)
+        self.assertIn("迁移", page)
 
     def test_sources_search_and_policy_filter_work_without_javascript(self):
         page = view.config_html(self.payload, schema=config.describe_schema(self.news), actions=self.actions,
@@ -53,11 +74,38 @@ class WorkbenchTests(unittest.TestCase):
         self.assertIn('data-source="src"', page)
         self.assertNotIn('data-source="other"', page)
 
+    def test_source_card_uses_health_tone_independently_of_enabled(self):
+        from newspipe import state
+        state.Store(self.news).heartbeat("src", status="send_failed")
+        page = view.config_html(view.build(self.news), schema=config.describe_schema(), actions=self.actions)
+        from html.parser import HTMLParser
+        class Pills(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.pills = []
+                self.active = None
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                if tag == "span" and "pill" in attrs.get("class", "").split():
+                    self.active = attrs["class"]
+            def handle_data(self, data):
+                if self.active:
+                    self.pills.append((self.active, data))
+            def handle_endtag(self, tag):
+                if tag == "span":
+                    self.active = None
+        parsed = Pills()
+        parsed.feed(page)
+        self.assertIn(("pill danger", "发送失败"), parsed.pills)
+        self.assertIn(("pill warn", "已停用"), parsed.pills)
+
     def test_notifications_page_separates_hard_globals_and_editable_templates(self):
         renderer = getattr(view, "notifications_html", None)
         self.assertIsNotNone(renderer, "new notification route must have a focused renderer")
         page = renderer(self.payload, schema=config.describe_schema(self.news), actions=self.actions, page={"edit": "p"})
-        self.assertIn('action="/api/actions/global-save"', page)
+        self.assertNotIn('action="/api/actions/global-save"', page)
+        global_page = renderer(self.payload, schema=config.describe_schema(self.news), actions=self.actions, page={"global": "1"})
+        self.assertIn('action="/api/actions/global-save"', global_page)
         self.assertIn('action="/api/actions/policy-save"', page)
         self.assertIn("全局硬限制", page)
         self.assertIn("更新已有卡片也计一次", page)
@@ -92,10 +140,11 @@ class WorkbenchTests(unittest.TestCase):
         page = view.config_html(self.payload, schema=config.describe_schema(), actions=self.actions, page={"new": "1"})
         self.assertIn("信源清单", page)
         self.assertIn('name="create_only" value="1"', page)
-        self.assertIn('name="confirm_delete" value="1" required', page)
+        self.assertIn('/confirm-delete?kind=source', page)
+        self.assertNotIn('type="checkbox" name="confirm_delete"', page)
         policy_page = view.notifications_html(self.payload, schema=config.describe_schema(), actions=self.actions, page={"copy": "p"})
         self.assertIn('name="create_only" value="1"', policy_page)
-        self.assertIn('name="preview_kind" value="global"', policy_page)
+        self.assertIn('name="preview_kind" value="policy"', policy_page)
 
     def test_ops_has_separate_collection_notification_and_no_force_resend(self):
         from newspipe import state

@@ -8,15 +8,13 @@
 from __future__ import annotations
 
 import email.utils
-import os
+import logging
 import re
 import time
-import xml.etree.ElementTree as ET
+from urllib.parse import urlsplit
 
-from newspipe import net
+from newspipe import net, rssconnect
 from newspipe.errors import ConfigError
-
-BASE = os.environ.get("RSSHub_BASE", "http://127.0.0.1:1200")
 
 _TAG = re.compile(r"<[^>]+>")
 
@@ -33,24 +31,31 @@ def fetch(cfg: dict | None = None, since: float | None = None) -> list[dict]:
     failed: list[str] = []
     ok_feeds = 0
     for entry in cfg.get("feeds") or []:
-        if entry.startswith("http"):
-            url, label = entry, cfg.get("feed_label") or entry.split("/")[2]
-        else:
-            url = f"{BASE}{entry}"
-            label = cfg.get("feed_label") or entry.strip("/").split("/")[0]
+        url = rssconnect.feed_url(entry, cfg.get("rsshub_base_url", ""))
+        parts = urlsplit(entry)
+        label = cfg.get("feed_label") or (parts.hostname if parts.scheme else parts.path.strip("/").split("/")[0]) or "RSS"
         root = None
+        parse_error = ""
         last_err: Exception | None = None
         for _ in range(3):  # RSSHub 冷路由首发常见 503（内部重试后），退避再试
             try:
-                root = ET.fromstring(net.request(url, timeout=40, http2=h2))
+                root = rssconnect.parse_rss(net.request(url, timeout=40, http2=h2))
+                break
+            except rssconnect.ProbeError as exc:
+                parse_error = rssconnect.MESSAGES[exc.reason][0]
                 break
             except Exception as exc:
                 last_err = exc
                 time.sleep(3)
         if root is None:
-            msg = str(last_err or "")[:200]
-            if "not configured" in msg.lower() or "401" in msg or "cookie" in msg.lower():
-                raise ConfigError(f"{label}: RSSHub 路由缺凭据 — {msg}") from last_err
+            if parse_error:
+                failed.append(f"{label}: {parse_error}")
+                continue
+            import urllib.error
+            code = last_err.code if isinstance(last_err, urllib.error.HTTPError) else None
+            msg = f"HTTP {code}" if code else "连接失败；请在后台测试订阅以检查地址和网络"
+            if code in (401, 403):
+                raise ConfigError(f"{label}: RSSHub 路由缺凭据") from None
             failed.append(f"{label}: {msg}")
             continue
         ok_feeds += 1
@@ -84,4 +89,6 @@ def fetch(cfg: dict | None = None, since: float | None = None) -> list[dict]:
     # （fetched:0/status:quiet），单 feed 信源被上游持续拒绝后永远无声。
     if failed and not ok_feeds:
         raise RuntimeError("; ".join(failed)[:300])
+    if failed:
+        logging.getLogger(__name__).warning("RSS 订阅部分失败：%s", "; ".join(failed)[:300])
     return items

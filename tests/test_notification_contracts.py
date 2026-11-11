@@ -118,15 +118,15 @@ class NotificationContractTests(unittest.TestCase):
         state.Store(self.news).write_batch(batch)
         self.assertEqual(notification_view.snapshot(self.news, now=now)["sources"][0]["reason"], "retry_exhausted")
 
-    def test_source_patch_preserves_unknown_keys_and_removes_only_explicit_override(self):
+    def test_source_patch_preserves_unknown_keys_and_legacy_override_values(self):
         before = self.path.read_text().split("  other:", 1)[1]
-        patch_body = {"card": {"title": "Renamed"}, "notify": {"overrides": {"quiet_hours": None}}}
+        patch_body = {"card": {"title": "Renamed"}}
         out = self.command("source", "patch", "src", "--from-json", json.dumps(patch_body))
         self.assertTrue(out["ok"], out)
         raw = yaml.safe_load(self.path.read_text())["sources"]["src"]
         self.assertEqual(raw["custom_adapter_key"], {"nested": [1, 2]})
         self.assertIn("custom_card_key", raw["card"])
-        self.assertNotIn("quiet_hours", raw["notify"]["overrides"])
+        self.assertEqual(raw["notify"]["overrides"]["quiet_hours"], "")
         self.assertEqual(raw["notify"]["overrides"]["min_gap_min"], 0)
         self.assertEqual(self.path.read_text().split("  other:", 1)[1], before)
 
@@ -193,13 +193,12 @@ class NotificationContractTests(unittest.TestCase):
         after = {str(p.relative_to(self.news)): p.read_bytes() for p in self.news.rglob("*") if p.is_file()}
         self.assertEqual(after, before)
 
-    def test_source_patch_action_keeps_inherit_and_custom_values_distinct(self):
+    def test_source_patch_action_preserves_legacy_settings_until_explicit_migration(self):
         out = actions.dispatch("source-patch", {"name": ["src"], "f.feed_label": ["Changed"],
-             "notify_policy": ["p"], "inherit.quiet_hours": ["inherit"],
-             "inherit.min_gap_min": ["custom"], "n.min_gap_min": ["0"]}, self.news)
+             "notify_policy": ["p"]}, self.news)
         self.assertTrue(out["ok"], out)
         src = config.load(self.news).sources["src"]
-        self.assertNotIn("quiet_hours", src.notify.overrides)
+        self.assertEqual(src.notify.overrides["quiet_hours"], "")
         self.assertEqual(src.notify.overrides["min_gap_min"], 0)
         self.assertIn("custom_adapter_key", src.extra)
 
@@ -223,8 +222,7 @@ class NotificationContractTests(unittest.TestCase):
                         out = actions.dispatch(action, form, self.news)
                         self.assertFalse(out["ok"], out)
                         self.assertEqual(out["error"]["code"], "E_USAGE")
-                        self.assertIn(key, out["error"]["message"])
-                        self.assertIn("继承", out["error"]["message"])
+                        self.assertIn("覆盖", out["error"]["message"])
                         self.assertEqual(self.path.read_bytes(), before)
 
     def test_zero_custom_numbers_and_empty_non_numbers_remain_explicit(self):
@@ -235,16 +233,16 @@ class NotificationContractTests(unittest.TestCase):
                 "inherit.max_cards_per_day": ["custom"], "n.max_cards_per_day": ["0"],
                 "inherit.min_gap_min": ["custom"], "n.min_gap_min": ["0"]}
         out = actions.dispatch("source-patch", form, self.news)
-        self.assertTrue(out["ok"], out)
-        overrides = config.load(self.news).sources["src"].notify.overrides
-        self.assertEqual(overrides, {"mode": "collect", "slots": (), "quiet_hours": "",
-                                     "max_cards_per_day": 0, "min_gap_min": 0.0})
-        for key in ("max_cards_per_day", "min_gap_min"):
-            form[f"inherit.{key}"] = ["inherit"]
+        self.assertFalse(out["ok"], out)
+        self.assertTrue(self.command("notification", "migrate")["ok"])
+        binding = config.load(self.news).sources["src"].notify
+        form = {"name": ["src"], "notify_policy": [binding.policy], "f.feed_label": ["New label"]}
         out = actions.dispatch("source-patch", form, self.news)
         self.assertTrue(out["ok"], out)
-        self.assertEqual(config.load(self.news).sources["src"].notify.overrides,
-                         {"mode": "collect", "slots": (), "quiet_hours": ""})
+        self.assertEqual(config.load(self.news).sources["src"].notify.overrides, {})
+        cfg = config.load(self.news)
+        self.assertEqual(cfg.policies[binding.policy].quiet_hours, "")
+        self.assertEqual(cfg.policies[binding.policy].min_gap_min, 0)
 
     def test_source_numeric_clearing_restores_defaults_but_omission_preserves(self):
         seed = {"fetch": {"interval_min": 30}, "filter": {"min_items": 2, "max_items": 5},
@@ -296,6 +294,7 @@ class NotificationContractTests(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), before)
 
     def test_numeric_clear_preview_and_save_predict_the_same_defaults(self):
+        self.assertTrue(self.command("notification", "migrate")["ok"])
         self.assertTrue(self.command("source", "patch", "src", "--from-json",
             '{"notify":null,"filter":{"max_items":5},"deliver":{"budget":{"max_cards_per_day":4}}}',
             "--confirm-conversion")["ok"])
@@ -402,6 +401,7 @@ class NotificationContractTests(unittest.TestCase):
         self.assertEqual(actions.ACTIONS["run"].argv({"target": ["slot:evening"]}), ["run", "--slot", "evening"])
 
     def test_copied_sources_preserve_extensions_but_start_disabled_and_reject_collision(self):
+        self.assertTrue(self.command("notification", "migrate")["ok"])
         out = self.command("source", "copy", "src", "--new-name", "copy")
         self.assertTrue(out["ok"], out)
         copied = config.load(self.news).sources["copy"]
