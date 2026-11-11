@@ -81,10 +81,10 @@ class WorkbenchBrowserTests(unittest.TestCase):
         action = "policy-save" if policy else "source-patch"
         return page.locator(f'form[action="/api/actions/{action}"]')
 
-    def submit(self, page, form, button="验证 / 保存"):
+    def submit(self, page, form, button=None):
         handle = form.element_handle()
         with page.expect_response(lambda response: "/api/actions/" in response.url) as response:
-            form.get_by_role("button", name=button, exact=True).click()
+            (form.get_by_role("button", name=button, exact=True) if button else form.locator('[data-save-button]')).click()
         envelope = response.value.json()
         page.wait_for_function("form => !form.hasAttribute('aria-busy')", arg=handle)
         return envelope
@@ -159,6 +159,46 @@ class WorkbenchBrowserTests(unittest.TestCase):
                     self.expect(page.locator("#action-result")).to_contain_text("编辑器未加载")
                     self.assertEqual(page.url, original)
                     self.assertIsNone(page.evaluate("window.unsafeExecuted"))
+
+    def test_failed_editor_import_keeps_current_draft_and_rejects_active_styles(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                page.goto(fixture.url + '/notifications?new=1')
+                modal = page.locator('#editor-dialog')
+                field = modal.locator('[name="p.label"]')
+                field.fill('Keep current draft')
+                base = modal.locator('[name="base_hash"]').input_value()
+                def inject(route):
+                    response = route.fetch()
+                    text = response.text().replace('data-editor-panel="policy"',
+                        'data-editor-panel="policy" style="background-image:url(https://unsafe.example.invalid/image)"')
+                    route.fulfill(response=response, body=text)
+                page.route('**/notifications?new=1&preset=collect', inject)
+                modal.get_by_role('link', name='只采集', exact=True).click()
+                self.expect(page.locator('#action-result')).to_contain_text('编辑器未加载')
+                self.expect(field).to_have_value('Keep current draft')
+                self.assertEqual(modal.locator('[name="base_hash"]').input_value(), base)
+
+    def test_busy_editor_cannot_close_or_duplicate_write(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                form = self.editor(fixture, page, policy=True)
+                form.locator('[name="p.label"]').fill('Submitted policy')
+                form.locator('[name="dry"]').uncheck()
+                held = []
+                def hold(route):
+                    held.append((route, route.fetch()))
+                    page.evaluate("document.body.dataset.writeHeld='1'")
+                page.route('**/api/actions/policy-save', hold)
+                form.locator('[data-save-button]').click()
+                self.expect(page.locator('body')).to_have_attribute('data-write-held', '1')
+                page.keyboard.press('Escape')
+                page.locator('#editor-dialog [data-editor-close]').first.click()
+                self.expect(page.locator('#editor-dialog')).to_be_visible()
+                form.evaluate("form => form.dispatchEvent(new Event('submit', {bubbles:true, cancelable:true}))")
+                self.assertEqual(len(held), 1)
+                held[0][0].fulfill(response=held[0][1])
+                self.expect(page.locator('#editor-dialog')).not_to_be_visible()
 
     def test_rsshub_candidate_probes_preserve_draft_and_hash_with_and_without_js(self):
         for engine in self.browsers:
@@ -336,7 +376,7 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 section.locator(":scope > summary").click()
                 requests = []
                 page.on("request", lambda request: requests.append(request.url) if request.method == "POST" else None)
-                form.get_by_role("button", name="验证 / 保存").click()
+                form.locator('[data-save-button]').click()
                 self.expect(field).to_be_visible()
                 self.expect(field).to_be_focused()
                 self.assertEqual(requests, [])
@@ -365,7 +405,7 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 form.locator('[name="dry"]').uncheck()
                 result = cli.run_subcommand(["source", "enable", "reading", "--json"], fixture.news_dir)
                 self.assertTrue(result.ok, result.as_dict())
-                button = form.get_by_role("button", name="验证 / 保存")
+                button = form.locator('[data-save-button]')
                 button.scroll_into_view_if_needed()
                 stale_hash = form.locator('[name="base_hash"]').input_value()
                 failed = self.submit(page, form)
@@ -549,7 +589,7 @@ class WorkbenchBrowserTests(unittest.TestCase):
                         if javascript:
                             return self.submit(page, form)
                         with page.expect_navigation():
-                            form.get_by_role("button", name="验证 / 保存", exact=True).click()
+                            form.locator('[data-save-button]').click()
                         return None
                     saved = save()
                     if javascript:
@@ -642,7 +682,7 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 form.locator('[name="p.label"]').fill('Raw <draft> "value"')
                 form.locator('[name="p.mode"]').select_option("digest")
                 with page.expect_navigation():
-                    form.get_by_role("button", name="验证 / 保存").click()
+                    form.locator('[data-save-button]').click()
                 self.assertRegex(page.url, r"/notifications\?draft=[A-Za-z0-9_-]+$")
                 form = page.locator('form[action="/api/actions/policy-save"]')
                 self.expect(form).to_be_visible()
@@ -653,13 +693,13 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 form.locator('[name="p.slots"][value="am"]').check()
                 form.locator('[name="dry"]').uncheck()
                 with page.expect_navigation():
-                    form.get_by_role("button", name="验证 / 保存").click()
+                    form.locator('[data-save-button]').click()
                 self.assertEqual(config.load(fixture.news_dir).policies["live"].mode, "digest")
                 form = self.editor(fixture, page)
                 form.locator('[name="f.feed_label"]').fill('Source <draft> "value"')
                 form.locator('[name="f.feeds"]').fill("")
                 with page.expect_navigation():
-                    form.get_by_role("button", name="验证 / 保存").click()
+                    form.locator('[data-save-button]').click()
                 self.assertRegex(page.url, r"/config\?draft=[A-Za-z0-9_-]+$")
                 form = page.locator('form[action="/api/actions/source-patch"]')
                 self.expect(form).to_be_visible()
@@ -675,7 +715,7 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 maximum.fill("")
                 form.locator('[name="dry"]').uncheck()
                 with page.expect_navigation():
-                    form.get_by_role("button", name="验证 / 保存").click()
+                    form.locator('[data-save-button]').click()
                 self.assertEqual(self.source_label(fixture), 'Source <draft> "value"')
                 values = config.source_values(config.load(fixture.news_dir).sources["research"])
                 self.assertEqual(values["fetch.interval_min"], 0.0)
@@ -701,7 +741,7 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 section.locator(":scope > summary").click()
                 before = (fixture.news_dir / "sources.yaml").read_bytes()
                 with page.expect_navigation():
-                    form.get_by_role("button", name="验证 / 保存").click()
+                    form.locator('[data-save-button]').click()
                 self.assertIn("/config?draft=", page.url)
                 field = page.locator('form[action="/api/actions/source-patch"] [name="f.filter.max_items"]')
                 self.expect(field).to_be_visible()

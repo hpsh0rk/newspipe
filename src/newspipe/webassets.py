@@ -96,6 +96,64 @@ JAVASCRIPT = r"""'use strict';
     }
   }, true);
   document.querySelectorAll('form[data-server-validation]').forEach(form => { form.noValidate = false; });
+  const hideTip = help => {
+    const tip = help.querySelector('[role="tooltip"]');
+    if (tip.matches(':popover-open')) tip.hidePopover();
+    help.removeAttribute('open');
+    delete help.dataset.pinned;
+  };
+  const positionTip = help => {
+    const trigger = help.querySelector('button');
+    const tip = help.querySelector('[role="tooltip"]');
+    const anchor = trigger.getBoundingClientRect();
+    tip.style.width = `${Math.min(320, window.innerWidth - 16)}px`;
+    tip.style.bottom = 'auto';
+    const box = tip.getBoundingClientRect();
+    tip.style.left = `${Math.max(8, Math.min(anchor.left, window.innerWidth - box.width - 8))}px`;
+    const below = anchor.bottom + 6;
+    const top = below + box.height <= window.innerHeight - 8 ? below : anchor.top - box.height - 6;
+    tip.style.top = `${Math.max(8, Math.min(top, window.innerHeight - box.height - 8))}px`;
+  };
+  const showTip = help => {
+    const tip = help.querySelector('[role="tooltip"]');
+    if (!tip.matches(':popover-open')) tip.showPopover();
+    help.setAttribute('open', '');
+    positionTip(help);
+  };
+  document.addEventListener('toggle', event => {
+    if (event.newState === 'closed' && event.target.matches('[data-help] > [popover]')) {
+      event.target.parentElement.removeAttribute('open');
+      delete event.target.parentElement.dataset.pinned;
+    }
+  }, true);
+  document.addEventListener('pointerover', event => {
+    const help = event.target.closest('[data-help]');
+    if (help && !help.contains(event.relatedTarget) && event.pointerType !== 'touch') showTip(help);
+  });
+  document.addEventListener('pointerout', event => {
+    const help = event.target.closest('[data-help]');
+    if (help && !help.contains(event.relatedTarget) && !help.dataset.pinned && !help.contains(document.activeElement)) hideTip(help);
+  });
+  document.addEventListener('focusin', event => {
+    const help = event.target.closest('[data-help]');
+    if (help) showTip(help);
+  });
+  document.addEventListener('focusout', event => {
+    const help = event.target.closest('[data-help]');
+    if (help && !help.dataset.pinned && !help.contains(event.relatedTarget)) hideTip(help);
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    const tips = [...document.querySelectorAll('[data-help][open]')].filter(node => node.getClientRects().length);
+    if (tips.length) {
+      event.preventDefault();
+      event.stopPropagation();
+      tips.forEach(hideTip);
+    }
+  }, true);
+  const repositionTips = () => document.querySelectorAll('[data-help][open]').forEach(positionTip);
+  window.addEventListener('resize', repositionTips);
+  document.addEventListener('scroll', repositionTips, true);
   const editorDialog = document.getElementById('editor-dialog');
   const editorHost = editorDialog?.querySelector('[data-editor-host]');
   const editorCache = document.getElementById('editor-cache');
@@ -114,6 +172,7 @@ JAVASCRIPT = r"""'use strict';
   };
   const parkPanel = panel => {
     if (!panel) return;
+    panel.querySelectorAll('[data-help]').forEach(hideTip);
     if (panelDirty(panel)) editorCache.append(panel);
     else { editors.delete(panel.dataset.editorKey); panel.remove(); }
     updateDraftCount();
@@ -134,6 +193,7 @@ JAVASCRIPT = r"""'use strict';
     panel.querySelectorAll('[data-override]').forEach(override);
     panel.querySelectorAll('form[data-server-validation]').forEach(form => { form.noValidate = false; });
     editorDialog.setAttribute('aria-labelledby', panel.getAttribute('aria-labelledby'));
+    editorDialog.dataset.editorKind = panel.dataset.editorPanel;
     if (!editorDialog.open) editorDialog.showModal();
     const field = panel.querySelector('input:not([type="hidden"]), select');
     if (field) { reveal(field); field.focus({preventScroll: true}); }
@@ -151,7 +211,7 @@ JAVASCRIPT = r"""'use strict';
     if (!panel.dataset.editorKey || !['source', 'source-copy', 'policy', 'global', 'rsshub'].includes(panel.dataset.editorPanel) ||
         !panel.querySelector('h2') || panel.querySelector('script, iframe, object, embed, link, style, meta, base, template, img, svg, math')) return false;
     return [panel, ...panel.querySelectorAll('*')].every(node => {
-      if (node.getAttributeNames().some(attr => /^on/i.test(attr) || ['srcdoc', 'src'].includes(attr.toLowerCase()))) return false;
+      if (node.getAttributeNames().some(attr => /^on/i.test(attr) || ['srcdoc', 'src', 'style'].includes(attr.toLowerCase()))) return false;
       for (const attr of ['action', 'formaction']) {
         if (!node.hasAttribute(attr)) continue;
         const url = new URL(node.getAttribute(attr), location.href);
@@ -233,6 +293,15 @@ JAVASCRIPT = r"""'use strict';
     if (dirty.size) { event.preventDefault(); event.returnValue = ''; }
   });
   document.addEventListener('click', event => {
+    const helpTrigger = event.target.closest('[data-help] > button');
+    if (helpTrigger) {
+      event.preventDefault();
+      const help = helpTrigger.parentElement;
+      if (help.dataset.pinned) hideTip(help);
+      else { help.dataset.pinned = '1'; showTip(help); }
+      return;
+    }
+    document.querySelectorAll('[data-help][open]').forEach(help => { if (!help.contains(event.target)) hideTip(help); });
     const editorLink = event.target.closest('[data-editor-open]');
     const editorClose = event.target.closest('[data-editor-close]');
     if (editorDialog && typeof editorDialog.showModal === 'function' && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) {
@@ -272,7 +341,7 @@ JAVASCRIPT = r"""'use strict';
       row.querySelector('input').focus();
     }
   });
-  const regionNames = new Set(['sources', 'policies', 'operations', 'legacy-sources', 'legacy-pending', 'queue', 'rsshub']);
+  const regionNames = new Set(['sources', 'policies', 'operations', 'legacy-sources', 'legacy-pending', 'queue', 'rsshub', 'global']);
   let readRevision = 0;
   const refreshReads = async owner => {
     const revision = ++readRevision;
@@ -294,7 +363,7 @@ JAVASCRIPT = r"""'use strict';
         }
         const next = fresh[0];
         if (next.querySelector('script, iframe, object, embed, link, style, meta, base, template') ||
-            [next, ...next.querySelectorAll('*')].some(node => node.getAttributeNames().some(attr => /^on/i.test(attr) || attr === 'srcdoc'))) {
+            [next, ...next.querySelectorAll('*')].some(node => node.getAttributeNames().some(attr => /^on/i.test(attr) || ['srcdoc', 'style'].includes(attr.toLowerCase())))) {
           throw new Error('unsafe region');
         }
         const messages = [...region.querySelectorAll('[data-action-feedback]')];

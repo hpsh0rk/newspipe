@@ -316,6 +316,8 @@ dialog h2{margin-top:0}
 dialog p{overflow-wrap:anywhere}
 dialog .row-actions{margin-top:20px}
 #editor-dialog{width:min(1040px,calc(100vw - 40px));max-width:1040px;max-height:calc(100dvh - 40px);padding:0;overflow:auto}
+#editor-dialog:is([data-editor-kind=policy],[data-editor-kind=global],[data-editor-kind=rsshub]){width:min(760px,calc(100vw - 40px))}
+#editor-dialog[data-editor-kind=source-copy]{width:min(520px,calc(100vw - 40px))}
 .editor-panel{margin:20px 0;min-width:0}
 #editor-dialog .editor-panel{margin:0;padding:20px 24px}
 .editor-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px;position:sticky;top:0;background:var(--surface);z-index:2;padding:8px 0}
@@ -345,6 +347,9 @@ dialog .row-actions{margin-top:20px}
 .override [data-custom]{margin-top:12px}
 .form-actions{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin:24px 0 0;padding-top:16px;border-top:1px solid var(--border)}
 .form-actions .check{margin-right:auto}
+.save-actual{display:none}
+form:has([name=dry]:not(:checked)) .save-dry{display:none}
+form:has([name=dry]:not(:checked)) .save-actual{display:inline}
 .rule-aside{position:sticky;top:calc(var(--nav-h) + 20px);align-self:start;padding:24px;border-left:2px solid var(--accent);background:var(--accent-soft);border-radius:var(--radius-sm)}
 .rule-aside h3{font-size:16px;margin:0 0 12px}
 .global-panel{padding:24px;background:linear-gradient(130deg,var(--accent-soft),var(--surface));border:1px solid var(--border);border-radius:var(--radius);margin-top:28px}
@@ -357,6 +362,16 @@ dialog .row-actions{margin-top:20px}
 .rsshub-panel summary{font-weight:600;color:var(--accent)}
 .rsshub-panel .editor{margin-top:16px;background:var(--surface-2)}
 .rsshub-panel .banner{overflow-wrap:anywhere}
+.summary-strip{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 20px}
+.summary-strip>div{min-width:0}
+.summary-strip h2{margin:0 0 6px}
+.summary-strip p{margin:4px 0}
+.field-label{display:flex;align-items:center;gap:6px}
+.help,.editor .help{display:inline-block;position:relative;margin:0 0 0 6px;padding:0;border:0;vertical-align:middle;font-weight:400}
+.help>button{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0;border:1px solid var(--border-strong);border-radius:50%;background:var(--surface);color:var(--muted);font:12px var(--font);cursor:help}
+.help>button:hover{color:var(--accent);border-color:var(--accent)}
+.help>[role=tooltip]{position:fixed;inset:auto;left:max(8px,calc(50vw - 160px));bottom:16px;margin:0;width:min(320px,calc(100vw - 16px));max-height:calc(100dvh - 16px);overflow:auto;padding:12px 14px;border:1px solid var(--border-strong);border-radius:var(--radius-sm);background:var(--text);color:var(--surface);box-shadow:var(--shadow-2);font:12px/1.7 var(--font);white-space:normal;overflow-wrap:anywhere;z-index:50}
+.field .help [role=tooltip]{color:var(--surface)}
 .policy-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
 .policy-card{padding:24px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)}
 .policy-card h3{font-size:16px;margin-top:0}
@@ -381,7 +396,7 @@ dialog .row-actions{margin-top:20px}
 @media(max-width:900px){.workbench-grid,#editor-dialog .workbench-grid{grid-template-columns:1fr}.rule-aside{position:static}}
 @media(max-width:640px){
  .btn{min-height:44px}
- #editor-dialog{width:calc(100vw - 16px);max-height:calc(100dvh - 16px)}
+ #editor-dialog,#editor-dialog[data-editor-kind]{width:calc(100vw - 16px);max-height:calc(100dvh - 16px)}
  #editor-dialog .editor-panel{padding:12px}
  nav.tabs{padding:8px 8px 0;gap:0;overflow:visible}
  nav.tabs a.tab{font-size:12.5px;padding:8px;flex:1;text-align:center}
@@ -391,6 +406,7 @@ dialog .row-actions{margin-top:20px}
  .editor,.global-panel,.policy-card,.rsshub-panel{padding:16px}
  .field-grid{grid-template-columns:1fr}
  .policy-grid{grid-template-columns:minmax(0,1fr)}
+ .summary-strip{align-items:start;flex-wrap:wrap}
  .override>label{align-items:start;flex-direction:column}
  td,th{overflow-wrap:anywhere}
  .lead{font-size:16px}

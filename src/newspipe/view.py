@@ -669,10 +669,11 @@ def _health_rows(view: dict[str, Any]) -> str:
 
     单行只回答「好不好、为什么」；完整运行态表在运维页，不在这里重复。
     """
+    from newspipe.webui import help_tip
     hist = view.get("history") or []
     sources = sorted(view.get("sources") or [], key=_health_sort_key)
     if not sources:
-        return ('<h2>信源心跳 <span class="hint">异常的排前面 · 点开任何一行是诊断抽屉</span></h2>'
+        return ('<h2>信源心跳' + help_tip("异常的排前面 · 点开任何一行是诊断抽屉", "health-help", "心跳诊断说明") + '</h2>'
                 '<p class="empty">注册表里还没有信源</p>')
     rows = []
     for src in sources:
@@ -691,8 +692,7 @@ def _health_rows(view: dict[str, Any]) -> str:
             f'<span class="hint">{html.escape(trigger)} · {html.escape(note[:80])}</span></summary>'
             f"{_drawer_body(src, hist)}"
             "</details>")
-    return ('<h2>信源心跳 <span class="hint">异常的排前面 · 点开任何一行是诊断抽屉：'
-            "最近一次为什么这样 / 生效中的闸</span></h2>" + "".join(rows))
+    return ('<h2>信源心跳' + help_tip("异常的排前面 · 点开任何一行是诊断抽屉：最近一次为什么这样 / 生效中的闸", "health-help", "心跳诊断说明") + '</h2>' + "".join(rows))
 
 
 def _cockpit_stats(view: dict[str, Any], page: dict[str, Any] | None) -> str:

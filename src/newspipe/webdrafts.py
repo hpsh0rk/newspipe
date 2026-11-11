@@ -53,7 +53,7 @@ def restore(page, action, values, *, reveal=False, feedback=""):
             attrs = dict(attrs)
             if tag == "form":
                 self.active = attrs.get("action") == f"/api/actions/{action}"
-            if self.active and tag == "details" and reveal:
+            if self.active and tag == "details" and reveal and "data-help" not in attrs:
                 attrs["open"] = None
             if self.active and tag == "select":
                 self.select = attrs.get("name")
