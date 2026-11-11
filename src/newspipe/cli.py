@@ -552,7 +552,6 @@ def _sub_source(args: argparse.Namespace, news_dir: Path) -> result.Result:
                                    "values": config.source_values(cfg.sources[args.name]),
                                    "hash": edit.file_hash(news_dir / "sources.yaml")})
     if args.action == "copy":
-        import yaml
         raw = yaml.safe_load((news_dir / "sources.yaml").read_text(encoding="utf-8"))["sources"]
         if args.name not in raw or not args.new_name or args.new_name in raw:
             return result.fail(command, "E_VALIDATION", "原信源不存在，或新 ID 为空/已存在",
