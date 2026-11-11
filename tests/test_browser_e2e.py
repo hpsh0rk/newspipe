@@ -419,6 +419,36 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 self.assertEqual(attempts, [], "Dangerous confirmation must still use native validation")
                 self.assertIn("research", config.load(fixture.news_dir).sources)
 
+    def test_confirmed_source_and_policy_deletion_work_with_and_without_javascript(self):
+        for engine in self.browsers:
+            for javascript in (True, False):
+                with self.subTest(engine=engine, javascript=javascript), self.scenario(
+                        engine, javascript=javascript) as (fixture, page):
+                    page.on("dialog", lambda dialog: dialog.accept())
+                    attempts = []
+                    page.on("request", lambda request: attempts.append(request.url) if request.method == "POST" else None)
+                    for action, name, route in (("source-remove", "reading", "/config"),
+                                                ("policy-remove", "archive", "/notifications")):
+                        page.goto(fixture.url + route)
+                        form = page.locator(f'form[action="/api/actions/{action}"]').filter(
+                            has=page.locator(f'[name="name"][value="{name}"]'))
+                        before = len(attempts)
+                        form.get_by_role("button", name="删除", exact=True).click()
+                        self.assertEqual(len(attempts), before, "Unchecked confirmation must not submit")
+                        form.locator('[name="confirm_delete"]').check()
+                        if javascript:
+                            self.assertTrue(self.submit(page, form, "删除")["ok"])
+                        else:
+                            with page.expect_navigation():
+                                form.get_by_role("button", name="删除", exact=True).click()
+                            self.assertIn(route + "?draft=", page.url)
+                        self.assertEqual(len(attempts), before + 1)
+                        cfg = config.load(fixture.news_dir)
+                        self.assertNotIn(name, cfg.sources if action == "source-remove" else cfg.policies)
+                        if not javascript:
+                            page.reload()
+                            self.assertEqual(len(attempts), before + 1, "PRG refresh must not repeat deletion")
+
 
 if __name__ == "__main__":
     unittest.main()

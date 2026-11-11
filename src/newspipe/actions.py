@@ -199,7 +199,8 @@ def _argv_source_save(form: dict[str, list[str]]) -> list[str]:
 
 
 def _argv_source_remove(form: dict[str, list[str]]) -> list[str]:
-    """删除信源（危险动作：页面必须二次确认）。"""
+    """删除信源（危险动作：服务端也必须检查页面的显式确认）。"""
+    _require_delete_confirmation(form)
     name = _one(form, "name")
     argv = ["source", "remove", name]
     if _flag(form, "dry"):
@@ -208,6 +209,16 @@ def _argv_source_remove(form: dict[str, list[str]]) -> list[str]:
     if base:
         argv += ["--base-hash", base]
     return argv
+
+
+def _require_delete_confirmation(form: dict[str, list[str]]) -> None:
+    if form.get("confirm_delete") != ["1"]:
+        raise ActionInputError("confirm_delete: 删除需要显式确认；请勾选删除确认后重新提交")
+
+
+def _argv_policy_remove(form: dict[str, list[str]]) -> list[str]:
+    _require_delete_confirmation(form)
+    return _write_flags(["policy", "remove", _one(form, "name")], form)
 
 
 def _write_flags(argv: list[str], form: dict[str, list[str]]) -> list[str]:
@@ -341,7 +352,7 @@ ACTIONS: dict[str, Action] = {
         Action("source-patch", "修改信源（保留未编辑字段）", _argv_source_patch, danger=True),
         Action("source-copy", "复制信源（默认停用）", lambda f: _write_flags(["source", "copy", _one(f, "name"), "--new-name", _one(f, "new_name")], f), danger=True),
         Action("policy-save", "保存通知策略", _argv_policy_save, danger=True),
-        Action("policy-remove", "删除通知策略", lambda f: _write_flags(["policy", "remove", _one(f, "name")], f), danger=True),
+        Action("policy-remove", "删除通知策略", _argv_policy_remove, danger=True),
         Action("global-save", "保存全局通知设置", _argv_globals, danger=True),
         Action("notification-preview", "预览有效通知规则", _argv_preview),
         Action("collect", "只采集一次", lambda f: ["collect", _one(f, "name"), *(["--dry"] if _flag(f, "dry") else [])]),

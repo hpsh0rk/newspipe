@@ -430,6 +430,54 @@ class NotificationContractTests(unittest.TestCase):
         self.assertFalse(out["ok"])
         self.assertEqual(out["error"]["code"], "E_VALIDATION")
 
+    def test_unconfirmed_or_ambiguous_web_deletion_never_writes(self):
+        self.assertTrue(self.command("policy", "set", "spare", "--from-json", '{}')["ok"])
+        before = self.path.read_bytes()
+        for action, name in (("source-remove", "src"), ("policy-remove", "spare")):
+            for confirmation in (None, [], [""], ["0"], ["false"], ["on"], ["true"],
+                                 ["forged"], [" 1 "], ["1", "0"], ["1", "1"]):
+                with self.subTest(action=action, confirmation=confirmation):
+                    form = {"name": [name]}
+                    if confirmation is not None:
+                        form["confirm_delete"] = confirmation
+                    out = actions.dispatch(action, form, self.news)
+                    self.assertFalse(out["ok"], out)
+                    self.assertEqual(out["error"]["code"], "E_USAGE")
+                    self.assertIn("confirm_delete", out["error"]["message"])
+                    self.assertEqual(self.path.read_bytes(), before)
+
+    def test_confirmed_web_deletion_preserves_cli_dry_conflict_and_reference_guards(self):
+        self.assertTrue(self.command("policy", "set", "spare", "--from-json", '{}')["ok"])
+        before = self.path.read_bytes()
+        denied = actions.dispatch("policy-remove", {"name": ["p"], "confirm_delete": ["1"]}, self.news)
+        self.assertEqual(denied["error"]["code"], "E_VALIDATION")
+        self.assertEqual(self.path.read_bytes(), before)
+        for action, name in (("source-remove", "src"), ("policy-remove", "spare")):
+            form = {"name": [name], "confirm_delete": ["1"], "dry": ["1"],
+                    "base_hash": [edit.file_hash(self.path)]}
+            before = self.path.read_bytes()
+            dry = actions.dispatch(action, form, self.news)
+            self.assertTrue(dry["ok"], dry)
+            self.assertFalse(dry["changed"])
+            self.assertEqual(self.path.read_bytes(), before)
+            form.pop("dry")
+            form["base_hash"] = ["stale"]
+            conflict = actions.dispatch(action, form, self.news)
+            self.assertEqual(conflict["error"]["code"], "E_CONFLICT")
+            self.assertEqual(self.path.read_bytes(), before)
+            form["base_hash"] = [edit.file_hash(self.path)]
+            out = actions.dispatch(action, form, self.news)
+            self.assertTrue(out["ok"], out)
+            self.assertTrue(out["changed"])
+            form.pop("base_hash")
+            again = actions.dispatch(action, form, self.news)
+            self.assertEqual(again["error"]["code"], "E_NOT_FOUND")
+        cfg = config.load(self.news)
+        self.assertNotIn("src", cfg.sources)
+        self.assertNotIn("spare", cfg.policies)
+        self.assertIn("other", cfg.sources)
+        self.assertIn("p", cfg.policies)
+
 
 class NotificationHttpTests(unittest.TestCase):
     setUp = NotificationContractTests.setUp
@@ -443,7 +491,8 @@ class NotificationHttpTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
         return f"http://127.0.0.1:{server.server_address[1]}"
 
-    def post(self, url, *, token="test-token", origin=None, json_accept=True, extra=None):
+    def post(self, url, *, token="test-token", origin=None, json_accept=True, extra=None,
+             action="source-patch"):
         values = {"name": "src", "f.feed_label": "Saved", "token": token,
                   "return_to": "/config"}
         values.update(extra or {})
@@ -452,9 +501,35 @@ class NotificationHttpTests(unittest.TestCase):
             headers["Accept"] = "application/json"
         if origin:
             headers["Origin"] = origin
-        request = urllib.request.Request(url + "/api/actions/source-patch",
-            data=urllib.parse.urlencode(values).encode(), headers=headers)
+        request = urllib.request.Request(url + "/api/actions/" + action,
+            data=urllib.parse.urlencode(values, doseq=True).encode(), headers=headers)
         return urllib.request.urlopen(request)
+
+    def test_http_delete_requires_exact_confirmation_after_security_gates(self):
+        self.assertTrue(cli.run_subcommand(["policy", "set", "spare", "--from-json", '{}', "--json"], self.news).ok)
+        url = self.serve()
+        before = self.path.read_bytes()
+        for action, name in (("source-remove", "src"), ("policy-remove", "spare")):
+            for confirmation in (None, "", "0", "false", "on", "forged", ["1", "0"], ["1", "1"]):
+                extra = {"name": name}
+                if confirmation is not None:
+                    extra["confirm_delete"] = confirmation
+                with self.subTest(action=action, confirmation=confirmation), self.post(
+                        url, action=action, origin=url, extra=extra) as response:
+                    out = json.load(response)
+                    self.assertFalse(out["ok"], out)
+                    self.assertEqual(out["error"]["code"], "E_USAGE")
+                    self.assertEqual(self.path.read_bytes(), before)
+            for token, origin in (("wrong", url), ("test-token", "https://evil.example")):
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    self.post(url, action=action, token=token, origin=origin,
+                              extra={"name": name, "confirm_delete": "1"})
+                self.assertEqual(caught.exception.code, 403)
+                self.assertEqual(self.path.read_bytes(), before)
+            with self.post(url, action=action, origin=url,
+                           extra={"name": name, "confirm_delete": "1", "dry": "1"}) as response:
+                self.assertTrue(json.load(response)["ok"])
+                self.assertEqual(self.path.read_bytes(), before)
 
     def test_json_action_uses_same_envelope_and_security_gates(self):
         url = self.serve()

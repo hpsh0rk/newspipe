@@ -206,10 +206,10 @@ class SourceCrudTests(unittest.TestCase):
 
     def test_remove_deletes_and_then_reports_not_found(self) -> None:
         actions.dispatch("source-save", self._form(), self.news)
-        out = actions.dispatch("source-remove", {"name": ["demo_feed"]}, self.news)
+        out = actions.dispatch("source-remove", {"name": ["demo_feed"], "confirm_delete": ["1"]}, self.news)
         self.assertTrue(out["ok"], out)
         self.assertNotIn("demo_feed", config.load(self.news).sources)
-        again = actions.dispatch("source-remove", {"name": ["demo_feed"]}, self.news)
+        again = actions.dispatch("source-remove", {"name": ["demo_feed"], "confirm_delete": ["1"]}, self.news)
         self.assertFalse(again["ok"])
         self.assertEqual(again["error"]["code"], "E_NOT_FOUND")
 
