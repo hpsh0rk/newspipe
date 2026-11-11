@@ -53,6 +53,7 @@ JAVASCRIPT = r"""'use strict';
       }
     }
   }, true);
+  document.querySelectorAll('form[data-server-validation]').forEach(form => { form.noValidate = false; });
   document.addEventListener('input', event => {
     const form = event.target.closest('form[method="post"]');
     if (form) markDirty(form);

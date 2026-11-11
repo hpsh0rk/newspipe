@@ -431,7 +431,8 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                     page = view_mod.cockpit_html(payload, flash=flash, page=self._recent_page())
                 if draft and draft.get("form"):
                     from newspipe.webdrafts import restore
-                    page = restore(page, draft["action"], draft["form"])
+                    page = restore(page, draft["action"], draft["form"],
+                                   reveal=not (draft.get("flash") or {}).get("ok"))
                 if draft and draft.get("preview"):
                     from newspipe.workbench import preview_result
                     page = page.replace('<div id="action-result"', preview_result(draft["preview"]) + '<div id="action-result"', 1)

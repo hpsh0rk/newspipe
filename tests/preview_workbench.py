@@ -74,8 +74,13 @@ def offline_workbench():
         stack.enter_context(patch.object(pipeline, "_enrich_new", side_effect=deny("enrichment")))
         for method in ("create_entity", "send_card", "update_entity"):
             stack.enter_context(patch.object(channel, method, side_effect=deny(method)))
+        stack.enter_context(patch.dict("os.environ", {"NEWSPIPE_BIND_HOST": "127.0.0.1"}))
         server, _ = inbound.start_http(service_cfg={"http": {"host": "127.0.0.1", "port": 0}}, creds=None,
                                        news_dir=news, accept_events=False, view_actions=True, logger=lambda _: None)
+        # Drain handlers before ExitStack restores guards; partial HTTP reads
+        # time out rather than keeping a test/preview process alive indefinitely.
+        server.daemon_threads = False
+        server.RequestHandlerClass.timeout = 5
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:

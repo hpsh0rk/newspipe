@@ -313,6 +313,32 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 page.reload()
                 self.assertEqual(fixture.store.pending_count("research"), before + 1, "PRG refresh must not replay collection")
 
+    def test_no_javascript_collapsed_invalid_field_reaches_server_validation(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine, javascript=False) as (fixture, page):
+                form = self.editor(fixture, page)
+                field = form.locator('[name="f.filter.max_items"]')
+                section = field.locator("xpath=ancestor::details[1]")
+                section.locator(":scope > summary").click()
+                field.fill("0")
+                section.locator(":scope > summary").click()
+                before = (fixture.news_dir / "sources.yaml").read_bytes()
+                with page.expect_navigation():
+                    form.get_by_role("button", name="验证 / 保存").click()
+                self.assertIn("/config?draft=", page.url)
+                field = page.locator('form[action="/api/actions/source-patch"] [name="f.filter.max_items"]')
+                self.expect(field).to_be_visible()
+                self.expect(field).to_have_value("0")
+                self.expect(page.locator(".banner.err")).to_contain_text("filter")
+                self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
+                page.goto(fixture.url + "/config")
+                remove = page.locator('form[action="/api/actions/source-remove"]').first
+                attempts = []
+                page.on("request", lambda request: attempts.append(request.url) if request.method == "POST" else None)
+                remove.get_by_role("button").click()
+                self.assertEqual(attempts, [], "Dangerous confirmation must still use native validation")
+                self.assertIn("research", config.load(fixture.news_dir).sources)
+
 
 if __name__ == "__main__":
     unittest.main()

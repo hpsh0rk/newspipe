@@ -14,8 +14,10 @@ def _hidden(name, value):
 
 
 def _start(action, token, base_hash, route, *, cls="editor", confirm=""):
+    validation = ' novalidate data-server-validation' if action in {
+        "source-save", "source-patch", "source-copy", "policy-save", "global-save"} else ""
     return (f'<form method="post" action="/api/actions/{E(action)}" class="{E(cls)}"'
-            + (f' data-confirm="{E(confirm)}"' if confirm else "") + ">"
+            + validation + (f' data-confirm="{E(confirm)}"' if confirm else "") + ">"
             + _hidden("token", token) + _hidden("base_hash", base_hash) + _hidden("return_to", route)
             + (f'<label class="check"><input type="checkbox" name="confirm_delete" value="1" required>{E(confirm)}</label>' if confirm else ""))
 

@@ -27,3 +27,11 @@ class WebDraftTests(unittest.TestCase):
         self.assertIsNone(cache.pop(second, now=3))
         expired = cache.put({}, now=4)
         self.assertIsNone(cache.pop(expired, now=15))
+
+    def test_failed_editor_reveals_nested_controls_without_opening_sibling_forms(self):
+        from newspipe.webdrafts import restore
+        page = '<form action="/api/actions/source-patch"><details><summary>Filter</summary><details><summary>Advanced</summary><input name="f.filter.max_items" value="13"></details></details></form><form action="/api/actions/policy-save"><details><summary>Other</summary></details></form>'
+        out = restore(page, "source-patch", {"f.filter.max_items": ["0"]}, reveal=True)
+        self.assertEqual(out.count("<details open>"), 2)
+        self.assertIn('<input name="f.filter.max_items" value="0">', out)
+        self.assertIn('<details><summary>Other</summary>', out)

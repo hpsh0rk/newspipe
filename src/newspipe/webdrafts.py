@@ -41,7 +41,7 @@ class Drafts:
             return value[1] if value else None
 
 
-def restore(page, action, values):
+def restore(page, action, values, *, reveal=False):
     """Restore only form controls in the code-rendered target; escape raw edits."""
     class Controls(HTMLParser):
         def __init__(self):
@@ -53,6 +53,8 @@ def restore(page, action, values):
             attrs = dict(attrs)
             if tag == "form":
                 self.active = attrs.get("action") == f"/api/actions/{action}"
+            if self.active and tag == "details" and reveal:
+                attrs["open"] = None
             if self.active and tag == "select":
                 self.select = attrs.get("name")
             if self.active and tag == "option" and self.select in values:
