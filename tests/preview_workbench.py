@@ -33,7 +33,7 @@ def offline_workbench(*, view_actions=True):
         news = Path(tmp)
         raw = {"chat": "oc_offline_preview", "slots": {"am": "08:15", "pm": "18:35"},
                "notifications": {"max_cards_per_day": 24, "paused": False},
-               "policies": {"digest": {"label": "早晚读报", "mode": "digest", "slots": ["am", "pm"]},
+               "policies": {"digest": {"label": "早晚读报", "mode": "digest", "times": {"am": "08:15", "pm": "18:35"}},
                             "live": {"label": "值得及时知道", "mode": "immediate", "form": "append_card",
                                      "min_gap_min": 10, "quiet_hours": "23:00-07:30"},
                             "archive": {"label": "先收着，慢慢看", "mode": "collect"}},

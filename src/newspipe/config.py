@@ -388,8 +388,8 @@ def describe_schema(news_dir: Path | None = None) -> dict[str, Any]:
         # ---- ① 何时拉
         {"path": "fetch.trigger", "axis": "fetch", "label": "触发方式", "type": "enum",
          "choices": list(TRIGGERS), "default": "slot"},
-        {"path": "fetch.slots", "axis": "fetch", "label": "槽位", "type": "slots",
-         "choices": slots, "default": [], "help": "trigger=slot 必填；取值来自 sources.yaml 顶层的 slots"},
+        {"path": "fetch.slots", "axis": "fetch", "label": "采集计划", "type": "slots",
+         "choices": slots, "default": [], "help": "定时采集时选择；多个源共用同一采集计划。发送时间在通知策略中独立配置。"},
         {"path": "fetch.interval_min", "axis": "fetch", "label": "轮询间隔（分钟）", "type": "float",
          "default": 0.0, "help": "trigger=poll 用：两次真抓取之间的最小间隔"},
         # ---- ② 留什么

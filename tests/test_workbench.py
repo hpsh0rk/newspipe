@@ -37,15 +37,36 @@ class WorkbenchTests(unittest.TestCase):
         self.assertNotIn("<script", page.replace(SCRIPT, ""))
         self.assertIn('aria-live="polite"', page)
 
-    def test_sources_editor_uses_patch_and_explicit_inherit_controls(self):
+    def test_sources_editor_selects_and_displays_managed_policy_without_overrides(self):
         page = view.config_html(self.payload, schema=config.describe_schema(self.news), actions=self.actions,
                                 page={"edit": "src", "values": config.source_values(config.load(self.news).sources["src"])})
         self.assertIn('action="/api/actions/source-patch"', page)
         self.assertIn('name="notify_policy"', page)
-        self.assertIn('name="inherit.quiet_hours"', page)
-        self.assertIn('value="custom" selected', page)
+        self.assertNotIn('name="inherit.', page)
+        self.assertNotIn('name="n.', page)
+        self.assertNotIn('name="f.deliver.', page)
+        self.assertIn('data-bound-policy-details', page)
+        self.assertIn('href="/notifications?new=1" data-editor-open', page)
+        self.assertIn('data-edit-bound-policy', page)
+        self.assertIn("旧版独立设置", page)
         self.assertIn('name="return_to" value="/config"', page)
-        self.assertIn("未提交字段保持原样", page)
+        self.assertIn("参数由策略统一管理", page)
+
+    def test_policy_editor_owns_multiple_times_and_explains_affected_sources(self):
+        page = view.notifications_html(self.payload, schema=config.describe_schema(self.news),
+                                       actions=self.actions, page={"edit": "p"})
+        self.assertIn('type="time"', page)
+        self.assertIn('name="p.times"', page)
+        self.assertNotIn('name="p.slots"', page)
+        self.assertIn('data-add-time', page)
+        self.assertIn("其他策略不受影响", page)
+        self.assertIn("src", page)
+
+    def test_migration_is_explicit_and_defaults_to_dry_run(self):
+        page = view.notifications_html(self.payload, schema=config.describe_schema(self.news), actions=self.actions)
+        self.assertIn('action="/api/actions/notification-migrate"', page)
+        self.assertIn('name="dry" value="1" checked', page)
+        self.assertIn("迁移", page)
 
     def test_sources_search_and_policy_filter_work_without_javascript(self):
         page = view.config_html(self.payload, schema=config.describe_schema(self.news), actions=self.actions,

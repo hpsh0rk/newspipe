@@ -380,6 +380,13 @@ form:has([name=dry]:not(:checked)) .save-actual{display:inline}
 .slot-edit-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:8px 0}
 .slot-edit-row label{display:grid;gap:4px;font-size:12px}
 .slot-edit-row input{width:100%;min-width:0}
+.time-edit-row{display:flex;align-items:center;gap:8px;margin:8px 0}
+.time-edit-row input{flex:1;min-width:0;width:100%}
+.policy-parameters{display:grid;grid-template-columns:minmax(120px,1fr) 1.4fr;gap:6px 16px;margin:12px 0}
+.policy-parameters dt{color:var(--muted);font-size:12px}
+.policy-parameters dd{margin:0;overflow-wrap:anywhere}
+[data-digest-times]{grid-column:1/-1}
+[data-editor-drafts]{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .feed-result{display:grid;gap:4px;padding:16px;margin:8px 0;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm)}
 .feed-result span,.feed-result small{color:var(--muted);font-size:12px}
 .feed-result code{overflow-wrap:anywhere;white-space:normal}

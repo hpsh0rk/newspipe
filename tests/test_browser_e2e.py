@@ -98,6 +98,68 @@ class WorkbenchBrowserTests(unittest.TestCase):
     def source_label(self, fixture):
         return config.source_values(config.load(fixture.news_dir).sources["research"])["feed_label"]
 
+    def test_policy_owned_times_can_add_remove_and_do_not_change_other_policy(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine, width=360) as (fixture, page):
+                form = self.editor(fixture, page, policy=True)
+                self.expect(form.locator('[data-digest-times]')).not_to_be_visible()
+                form.locator('[name="p.mode"]').select_option("digest")
+                form.locator('[name="p.times"]').first.fill("09:45")
+                form.locator('[data-add-time]').click()
+                form.locator('[name="p.times"]').last.fill("12:30")
+                form.locator('[data-add-time]').click()
+                form.locator('[name="p.times"]').last.fill("20:00")
+                form.locator('[data-remove-time]').nth(1).click()
+                form.locator('[name="dry"]').uncheck()
+                self.assertTrue(self.submit(page, form)["ok"])
+                cfg = config.load(fixture.news_dir)
+                self.assertEqual(set(cfg.policies["live"].times.values()), {"09:45", "20:00"})
+                from newspipe import policy
+                self.assertEqual(set(policy.sending_times(cfg, cfg.policies["digest"].values()).values()), {"08:15", "18:35"})
+
+    def test_source_policy_create_resume_and_explicit_version_sync(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                form = self.editor(fixture, page)
+                original = page.url
+                form.locator('[name="f.feed_label"]').fill("Keep source draft")
+                old_hash = form.locator('[name="base_hash"]').input_value()
+                self.assertEqual(form.locator('[name^="inherit."], [name^="n."], [name^="f.deliver."]').count(), 0)
+                form.get_by_role("link", name="创建策略", exact=True).click()
+                policy_form = page.locator('#editor-dialog form[action="/api/actions/policy-save"]')
+                policy_form.locator('[name="name"]').fill("new_strategy")
+                policy_form.locator('[name="p.label"]').fill("My new strategy")
+                policy_form.locator('[name="p.mode"]').select_option("collect")
+                policy_form.locator('[name="dry"]').uncheck()
+                self.assertTrue(self.submit(page, policy_form)["ok"])
+                page.locator('[data-editor-drafts]').get_by_role("link").click()
+                form = page.locator('#editor-dialog form[action="/api/actions/source-patch"]')
+                self.expect(form.locator('[name="f.feed_label"]')).to_have_value("Keep source draft")
+                self.assertEqual(form.locator('[name="base_hash"]').input_value(), old_hash)
+                form.locator('[name="notify_policy"]').select_option("new_strategy")
+                form.locator('[data-bound-policy-details] > summary').click()
+                self.expect(form.locator('[data-policy-record="new_strategy"]')).to_be_visible()
+                self.expect(form.locator('[data-policy-record="digest"]')).not_to_be_visible()
+                form.locator('[data-sync-source-version]').click()
+                self.expect(form.locator('[name="base_hash"]')).not_to_have_value(old_hash)
+                form.locator('[name="dry"]').uncheck()
+                self.assertTrue(self.submit(page, form)["ok"])
+                self.assertEqual(config.load(fixture.news_dir).sources["research"].notify.policy, "new_strategy")
+                self.assertEqual(page.url, original)
+
+    def test_explicit_source_version_sync_rejects_changed_source(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                form = self.editor(fixture, page)
+                form.locator('[name="f.feed_label"]').fill("Keep old draft")
+                old_hash = form.locator('[name="base_hash"]').input_value()
+                self.assertTrue(cli.run_subcommand(["source", "patch", "research", "--from-json",
+                    '{"feed_label":"Changed externally"}', "--json"], fixture.news_dir).ok)
+                form.locator('[data-sync-source-version]').click()
+                self.assertEqual(form.locator('[name="base_hash"]').input_value(), old_hash)
+                self.expect(form.locator('[data-source-version-note]')).to_contain_text("消息源已被修改")
+                self.expect(form.locator('[name="f.feed_label"]')).to_have_value("Keep old draft")
+
     def test_editor_links_open_dialogs_without_navigation_and_reopen_dirty_drafts(self):
         for engine in self.browsers:
             with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
@@ -402,14 +464,14 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 page.goto(fixture.url + "/notifications?edit=live#policy-editor")
                 form = page.locator('form[action="/api/actions/policy-save"]')
                 form.locator('[name="p.mode"]').select_option("digest")
-                for slot in form.locator('[name="p.slots"][type=checkbox]').all():
-                    slot.uncheck()
+                for time in form.locator('[name="p.times"]').all():
+                    time.fill("")
                 failed = self.submit(page, form)
                 self.assertFalse(failed["ok"])
-                slots = form.locator('[name="p.slots"][type=checkbox]').first
+                slots = form.locator('[name="p.times"]').first
                 self.expect(slots).to_have_attribute("aria-invalid", "true")
                 described = slots.get_attribute("aria-describedby") or ""
-                self.assertIn("policy-p-slots-error", described)
+                self.assertIn("policy-p-times-error", described)
                 self.expect(page.locator('[id="' + slots.get_attribute('aria-errormessage') + '"]')).not_to_be_empty()
                 self.expect(slots).to_be_focused()
 
@@ -429,15 +491,14 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 self.expect(field).to_be_focused()
                 self.assertEqual(requests, [])
 
-    def test_inherited_override_does_not_validate_hidden_unused_candidate(self):
+    def test_source_policy_dropdown_updates_read_only_details(self):
         for engine in self.browsers:
             with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
                 form = self.editor(fixture, page)
-                form.get_by_text("自定义覆盖 · 每个字段可独立继承", exact=True).click()
-                choice = form.locator('[name="inherit.quiet_hours"]')
-                choice.select_option("custom")
-                form.locator('[name="n.quiet_hours"]').fill("not-a-clock")
-                choice.select_option("inherit")
+                form.locator('[name="notify_policy"]').select_option("live")
+                form.locator('[data-bound-policy-details] > summary').click()
+                self.expect(form.locator('[data-policy-record="live"]')).to_be_visible()
+                self.expect(form.locator('[data-policy-record="digest"]')).not_to_be_visible()
                 form.locator('[name="f.feed_label"]').fill("Use inherited values")
                 saved = self.submit(page, form)
                 self.assertTrue(saved["ok"], saved)
@@ -449,7 +510,7 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 form = self.editor(fixture, page)
                 field = form.locator('[name="f.feed_label"]')
                 field.fill("Keep this edit")
-                form.get_by_text("自定义覆盖 · 每个字段可独立继承", exact=True).click()
+                form.locator('[data-bound-policy-details] > summary').click()
                 form.locator('[name="dry"]').uncheck()
                 result = cli.run_subcommand(["source", "enable", "reading", "--json"], fixture.news_dir)
                 self.assertTrue(result.ok, result.as_dict())
@@ -461,7 +522,7 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 self.expect(field).to_have_value("Keep this edit")
                 self.assertEqual(form.locator('[name="base_hash"]').input_value(), stale_hash)
                 self.expect(page.locator("#action-result")).to_be_in_viewport()
-                self.expect(form.locator("details").filter(has=page.get_by_text("自定义覆盖 · 每个字段可独立继承", exact=True))).to_have_attribute("open", "")
+                self.expect(form.locator('[data-bound-policy-details]')).to_have_attribute("open", "")
                 attempts = []
                 def abort(route):
                     attempts.append(route.request.url)
@@ -621,16 +682,14 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 self.expect(page.locator('[data-policy="first_policy"]')).to_be_visible()
                 self.expect(empty).to_have_count(0)
 
-    def test_custom_budget_blank_is_rejected_until_explicit_inheritance(self):
+    def test_managed_policy_budget_zero_and_blank_validation_without_source_override(self):
         for engine in self.browsers:
             for javascript in (True, False):
                 with self.subTest(engine=engine, javascript=javascript), self.scenario(
                         engine, javascript=javascript) as (fixture, page):
-                    form = self.editor(fixture, page)
-                    form.get_by_text("自定义覆盖 · 每个字段可独立继承", exact=True).click()
-                    choice = form.locator('[name="inherit.max_cards_per_day"]')
-                    choice.select_option("custom")
-                    field = form.locator('[name="n.max_cards_per_day"]')
+                    form = self.editor(fixture, page, policy=True)
+                    form.locator('[data-policy-advanced] > summary').click()
+                    field = form.locator('[name="p.max_cards_per_day"]')
                     field.fill("0")
                     form.locator('[name="dry"]').uncheck()
                     def save():
@@ -642,26 +701,25 @@ class WorkbenchBrowserTests(unittest.TestCase):
                     saved = save()
                     if javascript:
                         self.assertTrue(saved["ok"], saved)
-                    self.assertEqual(config.load(fixture.news_dir).sources["research"].notify.overrides["max_cards_per_day"], 0)
-                    form = self.editor(fixture, page)
-                    form.get_by_text("自定义覆盖 · 每个字段可独立继承", exact=True).click()
+                    self.assertEqual(config.load(fixture.news_dir).policies["live"].max_cards_per_day, 0)
+                    form = self.editor(fixture, page, policy=True)
+                    form.locator('[data-policy-advanced] > summary').click()
                     form.locator('[name="dry"]').uncheck()
-                    field = form.locator('[name="n.max_cards_per_day"]')
+                    field = form.locator('[name="p.max_cards_per_day"]')
                     field.fill("")
                     before = (fixture.news_dir / "sources.yaml").read_bytes()
                     failed = save()
                     if javascript:
                         self.assertFalse(failed["ok"], failed)
                     else:
-                        form = page.locator('form[action="/api/actions/source-patch"]')
-                    self.expect(form.locator('[name="n.max_cards_per_day"]')).to_have_value("")
-                    self.expect(form.locator('[name="inherit.max_cards_per_day"]')).to_have_value("custom")
+                        form = page.locator('form[action="/api/actions/policy-save"]')
+                    self.expect(form.locator('[name="p.max_cards_per_day"]')).to_have_value("")
                     self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
-                    form.locator('[name="inherit.max_cards_per_day"]').select_option("inherit")
+                    form.locator('[name="p.max_cards_per_day"]').fill("12")
                     saved = save()
                     if javascript:
                         self.assertTrue(saved["ok"], saved)
-                    self.assertNotIn("max_cards_per_day", config.load(fixture.news_dir).sources["research"].notify.overrides)
+                    self.assertEqual(config.load(fixture.news_dir).sources["research"].notify.overrides, {})
                     preview = cli.run_subcommand(["notification", "preview", "--source", "research", "--json"], fixture.news_dir)
                     self.assertEqual(preview.data["sources"][0]["after"]["values"]["max_cards_per_day"], 12)
 
@@ -736,9 +794,9 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 self.expect(form).to_be_visible()
                 self.expect(form.locator('[name="p.label"]')).to_have_value('Raw <draft> "value"')
                 self.expect(form.locator('[name="p.mode"]')).to_have_value("digest")
-                self.expect(form.locator('[name="p.slots"][type=checkbox]').first).not_to_be_checked()
+                self.expect(form.locator('[name="p.times"]').first).to_have_value("")
                 self.assertEqual(config.load(fixture.news_dir).policies["live"].mode, "immediate")
-                form.locator('[name="p.slots"][value="am"]').check()
+                form.locator('[name="p.times"]').first.fill("08:15")
                 form.locator('[name="dry"]').uncheck()
                 with page.expect_navigation():
                     form.locator('[data-save-button]').click()

@@ -8,6 +8,26 @@ from preview_workbench import offline_workbench
 
 
 class WebEditorTests(unittest.TestCase):
+    def test_no_js_policy_validation_preserves_all_added_clock_rows_and_keys(self):
+        from test_rsshub_web import RssForm
+        with offline_workbench() as fixture:
+            with urllib.request.urlopen(fixture.url + '/notifications?edit=live') as response:
+                page = response.read().decode()
+            parser = RssForm()
+            parser.feed(page.replace('/api/actions/policy-save', '/api/actions/rsshub-save'))
+            values = {key: [value] for key, value in parser.values.items()}
+            values.update({'p.mode': ['digest'], 'p.times_key': ['one', 'two', 'three', 'four'],
+                           'p.times': ['09:45', '12:30', '20:00', 'bad-time']})
+            before = (fixture.news_dir / 'sources.yaml').read_bytes()
+            request = urllib.request.Request(fixture.url + '/api/actions/policy-save',
+                data=urllib.parse.urlencode(values, doseq=True).encode(), headers={'Origin': fixture.url})
+            with urllib.request.urlopen(request) as response:
+                restored = response.read().decode()
+            self.assertTrue('data-editor-panel="policy"' in restored)
+            for value in ('09:45', '12:30', '20:00', 'bad-time', 'one', 'two', 'three', 'four'):
+                self.assertTrue('value="' + value + '"' in restored, value)
+            self.assertEqual((fixture.news_dir / 'sources.yaml').read_bytes(), before)
+
     def test_no_js_policy_copy_validation_retains_copy_context(self):
         from test_rsshub_web import RssForm
         with offline_workbench() as fixture:

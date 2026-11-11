@@ -32,6 +32,7 @@ const form = {
   hasAttribute: () => false,
   closest: () => null, append: () => {},
   reportValidity: () => true, setAttribute: () => {}, removeAttribute: () => {},
+  querySelector: () => null,
   querySelectorAll: selector => selector.startsWith('button') ? [button] : [],
   elements: {namedItem: name => name === 'base_hash' ? hash : null}
 };

@@ -43,8 +43,6 @@ def _field(field, value, *, prefix, scope, slots):
     name = prefix + path
     ident = scope + "-" + name.replace(".", "-")
     help_text = field.get("help", "")
-    if prefix == "n." and kind in ("int", "float"):
-        help_text += " 自定义时必须填写数值（可以为 0）；使用策略值请明确选择继承。"
     if prefix == "f." and kind in ("int", "float"):
         help_text += f' 主动清空会恢复默认值 {field["default"]}；0 是明确设置，不等于清空。'
     described = f'aria-describedby="{E(ident)}-help {E(ident)}-error" aria-errormessage="{E(ident)}-error"'
@@ -52,14 +50,22 @@ def _field(field, value, *, prefix, scope, slots):
     if kind == "bool":
         control = _hidden(name, "0") + f'<input type="checkbox" {attr} value="1"' + (" checked" if value else "") + ">"
     elif kind == "enum":
-        labels = {**ADAPTER_LABELS, "immediate": "有新内容即通知", "digest": "按槽位汇总", "collect": "只采集，不通知", "card": "每批新卡", "append_card": "追加已有卡片"}
+        labels = {**ADAPTER_LABELS, "immediate": "有新内容即通知", "digest": "定时汇总", "collect": "只采集，不通知", "card": "每批新卡", "append_card": "追加已有卡片"}
         options = "".join(f'<option value="{E(c)}"' + (" selected" if str(c) == str(value) else "") + f'>{E(labels.get(c, c))}</option>'
                           for c in field.get("choices", []))
         control = f'<select {attr}>{options}</select>'
     elif kind == "slots":
-        control = _hidden(name, "") + f'<div class="slot-options" role="group" aria-labelledby="{E(ident)}-label">' + "".join(
-            f'<label class="check"><input type="checkbox" id="{E(ident)}-{index}" name="{E(name)}" {described} value="{E(c)}"'
-            + (" checked" if c in (value or []) else "") + f'> {E(c)} · {E(slots.get(c, ""))}</label>' for index, c in enumerate(slots)) + "</div>"
+        control = _hidden(name, "") + f'<select {attr} multiple size="{min(max(len(slots), 2), 5)}">' + "".join(
+            f'<option value="{E(c)}"' + (" selected" if c in (value or []) else "")
+            + f'>{E(c)} · {E(slots.get(c, ""))}</option>' for c in slots) + '</select>'
+    elif kind == "times":
+        entries = (list(value.items()) if isinstance(value, dict) else list(value or [])) + [("", "")]
+        control = '<div data-times-editor><div data-time-rows>'
+        for index, (key, time) in enumerate(entries):
+            control += ('<div class="time-edit-row">' + _hidden(name + "_key", key)
+                        + f'<input type="time" id="{E(ident)}-{index}" name="{E(name)}" value="{E(time)}" {described} aria-label="发送时间 {index + 1}">'
+                        + '<button class="btn" type="button" data-remove-time aria-label="移除发送时间">移除</button></div>')
+        control += '</div><button class="btn" type="button" data-add-time>添加发送时间</button><p class="note">可填写多个时间；清空或移除一行即可删除。</p></div>'
     else:
         shown = ", ".join(str(v) for v in (value or [])) if kind == "list" else "" if value is None else str(value)
         numeric = kind in ("int", "float")
@@ -69,10 +75,39 @@ def _field(field, value, *, prefix, scope, slots):
         if path == "quiet_hours" or path.endswith(".quiet_hours"):
             extra += ' placeholder="23:00-07:30 或留空" pattern="([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]"'
         control = f'<input type="{"number" if numeric else "text"}" {attr} value="{E(shown)}"{extra}>'
-    label = f'<label for="{E(ident)}">{E(field["label"])}</label>' if kind != "slots" else f'<span id="{E(ident)}-label">{E(field["label"])}</span>'
+    label = f'<label for="{E(ident)}">{E(field["label"])}</label>' if kind != "times" else f'<span id="{E(ident)}-label">{E(field["label"])}</span>'
     help_node = help_tip(help_text, ident + "-help", field["label"] + "说明") if help_text else f'<small id="{E(ident)}-help"></small>'
-    return (f'<div class="field"><div class="field-label">{label}{help_node}</div>{control}'
+    return (f'<div class="field"' + (' data-digest-times' if kind == "times" else '') + f'><div class="field-label">{label}{help_node}</div>{control}'
             f'<small class="field-error" id="{E(ident)}-error"></small></div>')
+
+
+def _policy_records(snap, schema):
+    body = ""
+    labels = {"immediate": "有新内容即通知", "digest": "定时汇总", "collect": "只采集，不通知",
+              "card": "每批新卡", "append_card": "追加已有卡片"}
+    for name, item in snap["policies"].items():
+        values = item["values"]
+        body += f'<article data-policy-record="{E(name)}" data-policy-label="{E(values.get("label") or name)}"><h4>{E(values.get("label") or name)}</h4>'
+        body += f'<p data-policy-description>{E(item["summary"])}</p><dl class="policy-parameters">'
+        for field in schema["policy_fields"]:
+            key = field["path"]
+            if key == "label" or (key == "times" and values["mode"] != "digest"):
+                continue
+            value = values.get(key, field.get("default"))
+            if key == "times":
+                value = " / ".join(sorted(value.values()))
+            elif isinstance(value, bool):
+                value = "是" if value else "否"
+            else:
+                value = labels.get(value, value) if isinstance(value, str) else value
+            body += f'<dt>{E(field["label"])}</dt><dd>{E(value if value != "" else "未设置")}</dd>'
+        body += '</dl></article>'
+    return body
+
+
+def _policy_catalog(payload, schema):
+    return ('<div data-read-region="policy-catalog" hidden data-config-hash="' + E(payload["sources_hash"]) + '">'
+            + _policy_records(payload["notification"], schema) + '</div>')
 
 
 def _rss(page):
@@ -155,6 +190,7 @@ def _source_editor(payload, schema, token, page):
     action = "source-patch" if existing else "source-save"
     route = "/config"
     form = _start(action, token, payload["sources_hash"], route)
+    form += _hidden("source_revision", payload.get("source_revisions", {}).get(name, "new"))
     form += _hidden("preview_kind", "source")
     if existing:
         form += f'<p>稳定 ID <code>{E(name)}</code></p>' + _hidden("name", name)
@@ -164,6 +200,8 @@ def _source_editor(payload, schema, token, page):
                  f'value="{E(page.get("prefill_name", ""))}" placeholder="my_feed"></label>')
     groups = []
     for axis in schema["axes"]:
+        if axis["key"] == "deliver" and (binding and binding["policy_id"] or not existing):
+            continue
         fields = [f for f in schema["fields"] if f["axis"] == axis["key"]]
         # Retained legacy values stay editable for rollback, but never participate while bound.
         inner = "".join(_field(f, values.get(f["path"], False if f["path"] == "enabled" and not existing else f.get("default")),
@@ -174,7 +212,7 @@ def _source_editor(payload, schema, token, page):
                 _field(f, values.get(f["path"], f.get("default")), prefix="f.", scope=action, slots=payload["slots"]) for f in advanced) + '</div></details>'
         group = f'<fieldset><legend>{E(axis["label"])}' + help_tip(axis["hint"], action + "-axis-" + axis["key"], axis["label"] + "说明") + f'</legend><div class="field-grid">{inner}</div></fieldset>'
         if axis["key"] in ("filter", "enrich", "card", "deliver"):
-            group = f'<details><summary>{E(axis["label"])}' + (" · 旧设置，绑定策略后不参与通知" if axis["key"] == "deliver" else "") + f'</summary>{group}</details>'
+            group = '<details' + (' data-legacy-deliver' if axis["key"] == "deliver" else '') + f'><summary>{E(axis["label"])}' + (" · 旧设置，绑定策略后不参与通知" if axis["key"] == "deliver" else "") + f'</summary>{group}</details>'
         groups.append(group)
     # Source identity/acquisition first, then notification choice, then optional processing.
     form += "".join(groups[:2])
@@ -182,23 +220,20 @@ def _source_editor(payload, schema, token, page):
     for ident, template in snap["policies"].items():
         selected = ' selected' if binding and binding["policy_id"] == ident else ""
         options += f'<option value="{E(ident)}"{selected}>{E(template["values"].get("label") or ident)}</option>'
-    form += '<fieldset><legend>通知策略</legend><label class="field">绑定模板 '
+    form += '<fieldset><legend>通知策略</legend><label class="field">选择通知策略 '
     form += f'<select name="notify_policy"' + (" required" if not existing else "") + f'>{options}</select></label>'
-    if not snap["policies"]:
-        form += '<p class="notice">先创建通知策略，再添加消息源。<a href="/notifications?new=1">创建策略</a></p>'
-    form += help_tip("未提交字段保持原样；继承不等于把模板值复制进源。旧式预算是全局计数，新模板预算按每个源独立计算。", "source-inheritance-help", "策略继承说明")
-    form += '<details><summary>自定义覆盖 · 每个字段可独立继承</summary>'
-    for field in schema["policy_fields"]:
-        key = field["path"]
-        if key == "label":
-            continue
-        custom = bool(binding and binding.get("origins", {}).get(key, "").startswith("source:"))
-        value = (binding or {}).get("values", {}).get(key, field.get("default"))
-        form += f'<div class="override" data-override="{E(key)}"><label>值来源 · {E(field["label"])} '
-        form += f'<select name="inherit.{E(key)}"><option value="inherit"' + ("" if custom else " selected") + '>继承模板</option>'
-        form += '<option value="custom"' + (" selected" if custom else "") + '>自定义</option></select></label><div data-custom>'
-        form += _field(field, value, prefix="n.", scope=action, slots=payload["slots"]) + '</div></div>'
-    form += '</details>'
+    form += '<div class="row-actions">' + editor_link("/notifications?new=1", "创建策略")
+    policy_id = (binding or {}).get("policy_id")
+    if policy_id:
+        form += f'<a class="btn" href="/notifications?edit={quote(policy_id)}" data-editor-open data-edit-bound-policy>编辑所选策略</a>'
+    else:
+        form += '<a class="btn" href="/notifications" data-editor-open data-edit-bound-policy hidden>编辑所选策略</a>'
+    form += '<a class="btn" href="/notifications">管理全部策略</a></div>'
+    form += '<p class="note">参数由策略统一管理，这里只读展示。需要不同设置时，请复制策略后绑定。</p>'
+    form += '<details data-bound-policy-details><summary>策略参数（只读）</summary>' + _policy_records(snap, schema) + '</details>'
+    if name in snap.get("migration", {}).get("sources", []):
+        form += '<p class="notice">此源含旧版独立设置，当前行为见右侧。先到通知页迁移为独立策略，再修改绑定；不会静默删除旧设置。<a href="/notifications">查看迁移</a></p>'
+    form += '<button class="btn" type="button" data-sync-source-version>核对并同步最新配置版本</button><p class="note" data-source-version-note hidden></p>'
     if existing:
         form += '<label class="check"><input type="checkbox" name="confirm_conversion" value="1">我已预览并确认绑定/解绑引起的行为与预算范围变化</label>'
     form += '</fieldset>' + "".join(groups[2:]) + _buttons() + '</form>'
@@ -267,7 +302,7 @@ def sources_body(payload, schema, actions, page):
                             "/config", "source:" + (edit_name or "new:" + str(page.get("prefill") or ""))) + body
     elif not token:
         body += '<p class="notice">写操作未开启，表单不渲染。需要 service.yaml 的 view.actions。</p>'
-    return body + _rss(page) + (delete_dialog() + editor_dialog() if token else "")
+    return body + _rss(page) + _policy_catalog(payload, schema) + (delete_dialog() + editor_dialog() if token else "")
 
 
 def notifications_body(payload, schema, actions, page):
@@ -275,7 +310,16 @@ def notifications_body(payload, schema, actions, page):
     token = actions.get("token", "")
     snap = payload["notification"]
     gates = snap["notifications"] or {}
-    body = '<p class="eyebrow">NOTIFICATION CONTROL</p><p class="lead">一处调整模板，多个消息源共享行为，各自独立计数。</p>'
+    body = '<p class="eyebrow">NOTIFICATION CONTROL</p><p class="lead">每个策略独立管理发送时间；绑定同一策略的消息源同步生效，各自计数。</p>'
+    migration = snap.get("migration", {})
+    if migration.get("policies") or migration.get("sources"):
+        body += '<details class="notice" data-read-region="migration"><summary>旧通知配置待迁移</summary><p>旧发送时间仍引用全局采集计划；旧源覆盖值将转为独立策略。迁移保留当前行为和投递台账。</p>'
+        body += f'<p>{len(migration.get("policies", []))} 个旧时间策略 · {len(migration.get("sources", []))} 个源含独立设置</p>'
+        if token:
+            body += _start("notification-migrate", token, payload["sources_hash"], "/notifications") + _buttons(preview=False) + '</form>'
+        body += '</details>'
+    else:
+        body += '<div data-read-region="migration" hidden></div>'
     body += '<section class="global-panel summary-strip" data-read-region="global"><div><h2>全局硬限制'
     body += help_tip("更新已有卡片也计一次。全局限制约束全部信源，源级例外不能越过；暂停通知不会停止采集。全局上限留空 = 未配置硬上限；0 = 完全不发送。", "global-summary-help", "全局限制说明") + '</h2>'
     limit = gates.get("max_cards_per_day")
@@ -290,10 +334,10 @@ def notifications_body(payload, schema, actions, page):
         form += '<div class="field-grid">' + "".join(_field(f, gates.get(f["path"], f.get("default")), prefix="g.", scope="global",
                                                            slots=payload["slots"]) for f in schema["notification_fields"]) + '</div>'
         form += '<p class="note">全局上限留空 = 未配置硬上限；0 = 完全不发送。策略的每源限制仍独立生效。</p>'
-        form += '<details><summary>通知 / 采集槽位 · 修改会校验全部引用</summary><div class="slot-editor">'
+        form += '<details><summary>采集计划 · 不控制策略发送时间</summary><div class="slot-editor">'
         for ident, clock in [*payload["slots"].items(), ("", ""), ("", "")]:
-            form += f'<div class="slot-edit-row"><label>槽位 ID<input name="slot_id" value="{E(ident)}"></label><label>时刻 HH:MM<input name="slot_time" value="{E(clock)}" placeholder="08:15"></label></div>'
-        form += '</div><button class="btn" type="button" data-add-slot>添加槽位行</button><p class="note">移除仍被引用的槽位会被拒绝；先改信源采集槽位及策略。</p></details>' + _buttons() + '</form>'
+            form += f'<div class="slot-edit-row"><label>采集计划标识<input name="slot_id" value="{E(ident)}"></label><label>采集时间<input type="time" name="slot_time" value="{E(clock)}"></label></div>'
+        form += '</div><button class="btn" type="button" data-add-slot>添加采集计划</button><p class="note">共用此采集计划的源会同步修改采集时间。旧通知策略需先迁移；移除仍被引用的计划会被拒绝。</p></details>' + _buttons() + '</form>'
         body += editor_panel("global", "全局通知设置", form, "/notifications", "global")
     elif not token:
         body += '<p class="notice">写操作未开启，配置表单不渲染。</p>'
@@ -319,11 +363,13 @@ def notifications_body(payload, schema, actions, page):
         if ident and ident not in snap["policies"]:
             return body + '<p class="notice">策略不存在，请返回模板清单重新选择；不会把编辑转换为新建。</p>'
         values = dict(snap["policies"].get(ident, {}).get("values") or {})
+        if "time_rows" in page:
+            values["times"] = page["time_rows"]
         preset = page.get("preset", "")
         if preset == "continuous":
             values.update(mode="immediate", form="append_card", min_gap_min=10, quiet_hours="23:00-07:30")
         elif preset == "digest":
-            values.update(mode="digest", slots=[s for s in ("am", "pm") if s in payload["slots"]])
+            values.update(mode="digest", times={"morning": "08:15", "evening": "18:35"})
         elif preset == "collect":
             values.update(mode="collect")
         form = '<p class="preset-links">起点：' + " · ".join(editor_link(f'/notifications?new=1&preset={key}', label) for key, label in (("digest", "早晚汇总"), ("continuous", "持续更新"), ("collect", "只采集"))) + '</p>'
@@ -342,15 +388,16 @@ def notifications_body(payload, schema, actions, page):
             if advanced:
                 form += '<details data-policy-advanced><summary>高级设置 · 卡片、静默与额度</summary>'
             form += '<div class="field-grid">' + "".join(_field(f, values.get(f["path"], f.get("default")), prefix="p.", scope="policy", slots=payload["slots"])
-                    for f in schema["policy_fields"] if (f["path"] not in {"label", "mode", "slots"}) == advanced) + '</div>'
+                    for f in schema["policy_fields"] if (f["path"] not in {"label", "mode", "times"}) == advanced) + '</div>'
             if advanced:
                 form += '</details>'
         if ident and not copying:
+            form += '<p class="notice">保存后，下列绑定源将同步使用此策略的新参数与发送时间；其他策略不受影响。</p>'
             form += '<details><summary>受影响的信源</summary><ul>' + "".join(f'<li>{E(name)} · {"已启用" if payload["source_values"][name]["enabled"] else "已停用"}</li>' for name in snap["policies"].get(ident, {}).get("bound_sources", [])) + '</ul></details>'
         form += _buttons() + '</form>'
         body = editor_panel("policy", "编辑策略" if page.get("edit") else "复制策略" if copying else "创建策略", form, "/notifications",
                             "policy:" + ("copy:" if copying else "edit:" if ident else "new:") + (ident or preset)) + body
-    return body + (delete_dialog() + editor_dialog() if token else "")
+    return body + _policy_catalog(payload, schema) + (delete_dialog() + editor_dialog() if token else "")
 
 
 def preview_result(data):

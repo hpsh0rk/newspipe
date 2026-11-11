@@ -114,6 +114,21 @@ class PolicyTimeTests(unittest.TestCase):
         self.assertEqual(out["error"]["code"], "E_CONFLICT")
         self.assertEqual(self.path.read_bytes(), before)
 
+    def test_legacy_policy_cli_writes_freeze_clocks_instead_of_new_global_references(self):
+        self.load()
+        out = self.command("policy", "set", "legacy_input", "--from-json", '{"mode":"digest","slots":["am"]}')
+        self.assertTrue(out["ok"], out)
+        cfg = config.load(self.news)
+        self.assertEqual(cfg.policies["legacy_input"].slots, ())
+        self.assertEqual(cfg.policies["legacy_input"].times, {"am": "08:15"})
+
+    def test_source_revision_supports_unknown_yaml_extension_types(self):
+        self.raw["sources"]["s1"]["extension"] = {"data": {1: "one", "x": "text"}}
+        self.load()
+        from newspipe import view
+        payload = view.build(self.news)
+        self.assertTrue(payload["source_revisions"]["s1"])
+
     def test_bound_source_save_cannot_silently_drop_or_add_overrides(self):
         self.legacy()
         before = self.path.read_bytes()

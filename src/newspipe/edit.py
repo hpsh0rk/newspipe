@@ -175,6 +175,12 @@ def set_policy(news_dir: Path, name: str, body: dict[str, Any], *,
         policy.identifier(name, where="policies")
         before = config_mod.load(news_dir)
         text = path.read_text(encoding="utf-8")
+        template = policy.NotificationPolicy.parse(body, where=f"policies.{name}")
+        template.validate(where=f"policies.{name}", slots=before.slots)
+        if template.slots:
+            body = template.values()
+            body["times"] = policy.sending_times(before, body)
+            body.pop("slots", None)
         block = _dump_block({name: body})
         existed = yamlblocks.has_block(text, "policies", name)
         if create_only and existed:

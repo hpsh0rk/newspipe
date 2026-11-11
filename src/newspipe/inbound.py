@@ -435,8 +435,14 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                     page = self._config_page(payload, act, flash, query)
                 elif route == "/notifications":
                     from newspipe import config as config_mod
+                    policy_page = {key: (query.get(key) or [""])[0] for key in ("edit", "copy", "new", "preset", "global")}
+                    if draft and draft.get("action") == "policy-save" and draft.get("form"):
+                        from itertools import zip_longest
+                        values = draft["form"]
+                        if "p.times" in values:
+                            policy_page["time_rows"] = list(zip_longest(values.get("p.times_key", []), values["p.times"], fillvalue=""))
                     page = view_mod.notifications_html(payload, schema=config_mod.describe_schema(), actions=act, flash=flash,
-                           page={key: (query.get(key) or [""])[0] for key in ("edit", "copy", "new", "preset", "global")})
+                           page=policy_page)
                 elif route == "/items":
                     page = self._items_page(payload, query)
                 else:

@@ -11,7 +11,7 @@ JAVASCRIPT = r"""'use strict';
   const inertTags = new Set('SECTION ARTICLE HEADER ASIDE DIV SPAN P SMALL B STRONG EM I A CODE PRE BR HR UL OL LI DL DT DD TABLE THEAD TBODY TFOOT TR TH TD H2 H3 H4 H5 FORM INPUT SELECT OPTION OPTGROUP BUTTON LABEL FIELDSET LEGEND DETAILS SUMMARY TEXTAREA'.split(' '));
   const inertAttributes = new Set('class id role tabindex hidden title action formaction method name type value readonly required checked disabled selected multiple placeholder pattern min max step size rows cols for colspan rowspan open href target rel novalidate popover popovertarget'.split(' '));
   const domProperties = new Set('action method elements reportValidity dataset querySelectorAll querySelector closest hasAttribute getAttribute setAttribute removeAttribute append remove noValidate classList'.toLowerCase().split(' '));
-  const actionNames = new Set('run source-toggle source-save source-patch source-copy policy-save policy-remove global-save notification-preview rsshub-save rsshub-probe collect notify notification-retry source-remove queue-ack events-ack flush'.split(' '));
+  const actionNames = new Set('run source-toggle source-save source-patch source-copy policy-save policy-remove global-save notification-preview notification-migrate rsshub-save rsshub-probe collect notify notification-retry source-remove queue-ack events-ack flush'.split(' '));
   const safeAction = value => {
     const url = new URL(value, location.href || location.origin);
     return url.origin === location.origin && !url.search && !url.hash &&
@@ -90,11 +90,47 @@ JAVASCRIPT = r"""'use strict';
     const top = document.querySelector('nav')?.getBoundingClientRect().bottom || 0;
     if (rect.top < top || rect.bottom > window.innerHeight) feedback.scrollIntoView({block: 'nearest', behavior: 'instant'});
   };
-  const override = node => {
-    const select = node.querySelector('select[name^="inherit."]');
-    const custom = node.querySelector('[data-custom]');
-    custom.hidden = select.value === 'inherit';
-    custom.querySelectorAll('input, select').forEach(field => { field.disabled = custom.hidden; });
+  const policyTiming = form => {
+    const mode = form.querySelector('[name="p.mode"]');
+    const times = form.querySelector('[data-digest-times]');
+    if (!mode || !times) return;
+    times.hidden = mode.value !== 'digest';
+    times.querySelectorAll('input').forEach(field => { field.disabled = times.hidden; });
+  };
+  const sourcePolicy = (form, refresh = false) => {
+    const select = form.querySelector('[name="notify_policy"]');
+    const details = form.querySelector('[data-bound-policy-details]');
+    if (!select || !details) return;
+    const catalog = document.querySelector('[data-read-region="policy-catalog"]');
+    if (refresh && catalog && safeMarkup(catalog)) {
+      const selected = select.value;
+      const options = [select.options[0].cloneNode(true)];
+      catalog.querySelectorAll('[data-policy-record]').forEach(record => {
+        const option = document.createElement('option');
+        option.value = record.dataset.policyRecord;
+        option.textContent = record.dataset.policyLabel;
+        options.push(option);
+      });
+      if (selected && !options.some(option => option.value === selected)) {
+        const missing = document.createElement('option');
+        missing.value = selected;
+        missing.textContent = `${selected}（已不存在，请重新选择）`;
+        options.push(missing);
+      }
+      select.replaceChildren(...options);
+      select.value = selected;
+      details.querySelectorAll('[data-policy-record]').forEach(record => record.remove());
+      catalog.querySelectorAll('[data-policy-record]').forEach(record => details.append(document.importNode(record, true)));
+    }
+    details.querySelectorAll('[data-policy-record]').forEach(record => { record.hidden = record.dataset.policyRecord !== select.value; });
+    details.hidden = !select.value;
+    const legacy = form.querySelector('[data-legacy-deliver]');
+    if (legacy) {
+      legacy.hidden = Boolean(select.value);
+      legacy.querySelectorAll('input, select').forEach(field => { field.disabled = legacy.hidden; });
+    }
+    const edit = form.querySelector('[data-edit-bound-policy]');
+    if (edit) { edit.hidden = !select.value; edit.href = `/notifications?edit=${encodeURIComponent(select.value)}`; }
   };
   const reveal = field => {
     for (let parent = field.parentElement; parent; parent = parent.parentElement) {
@@ -107,7 +143,7 @@ JAVASCRIPT = r"""'use strict';
     if (detail) detail.textContent = message;
     reveal(field);
   };
-  document.querySelectorAll('[data-override]').forEach(override);
+  document.querySelectorAll('form').forEach(form => { policyTiming(form); sourcePolicy(form); });
   // Native validation precedes submit and does not bubble. Reveal before the
   // browser tries to focus an invalid control inside a closed details element.
   document.addEventListener('invalid', event => {
@@ -192,7 +228,21 @@ JAVASCRIPT = r"""'use strict';
   const updateDraftCount = () => {
     const node = document.querySelector('[data-editor-drafts]');
     const count = [...editors.values()].filter(panelDirty).length;
-    if (node) { node.hidden = !count; node.textContent = `${count} 个未保存草稿 · 重新打开对应编辑器可继续；离开页面后不保留。`; }
+    if (node) {
+      node.hidden = !count;
+      node.replaceChildren();
+      appendText('span', `${count} 个未保存草稿 · 离开页面后不保留。`, node);
+      [...editors.values()].filter(panelDirty).forEach(panel => {
+        const url = [...editorURLs].find(([, key]) => key === panel.dataset.editorKey)?.[0];
+        if (!url) return;
+        const link = document.createElement('a');
+        link.href = url;
+        link.className = 'btn';
+        link.setAttribute('data-editor-open', '');
+        link.textContent = '继续' + panel.querySelector('h2').textContent;
+        node.append(link);
+      });
+    }
   };
   const parkPanel = panel => {
     if (!panel) return;
@@ -214,7 +264,7 @@ JAVASCRIPT = r"""'use strict';
     editors.set(panel.dataset.editorKey, panel);
     editorHost.append(panel);
     editorTrigger = trigger;
-    panel.querySelectorAll('[data-override]').forEach(override);
+    editorForms(panel).forEach(form => { policyTiming(form); sourcePolicy(form, true); });
     panel.querySelectorAll('form[data-server-validation]').forEach(form => { form.noValidate = false; });
     editorDialog.setAttribute('aria-labelledby', panel.getAttribute('aria-labelledby'));
     editorDialog.dataset.editorKind = panel.dataset.editorPanel;
@@ -276,6 +326,33 @@ JAVASCRIPT = r"""'use strict';
       expose(feedback);
     }
   };
+  const syncSourceVersion = async button => {
+    const form = button.closest('form');
+    const panel = form.closest('[data-editor-panel]');
+    if (panelBusy(panel)) return;
+    const note = form.querySelector('[data-source-version-note]');
+    const sourceRevision = form.elements.namedItem('source_revision');
+    const oldRevision = sourceRevision.value;
+    const url = [...editorURLs].find(([, key]) => key === panel.dataset.editorKey)?.[0];
+    button.disabled = true;
+    busy.add(form);
+    try {
+      const response = await fetch(editorURL(url).href, {headers: {'Accept': 'text/html'}, cache: 'no-store', credentials: 'same-origin'});
+      if (!response.ok || !response.headers.get('Content-Type')?.includes('text/html') || editorURL(response.url).href !== editorURL(url).href) throw new Error('read failed');
+      const page = new DOMParser().parseFromString(await response.text(), 'text/html');
+      const panels = page.querySelectorAll('[data-editor-panel]');
+      if (panels.length !== 1 || !safePanel(panels[0]) || panels[0].dataset.editorKey !== panel.dataset.editorKey) throw new Error('unsafe source version');
+      const fresh = panels[0].querySelector('form');
+      if (fresh.elements.namedItem('source_revision')?.value !== oldRevision) {
+        note.textContent = '消息源已被修改，不能同步版本。当前草稿保留；对照最新配置后重新打开编辑器。';
+      } else {
+        form.elements.namedItem('base_hash').value = fresh.elements.namedItem('base_hash').value;
+        note.textContent = '已核对消息源未被修改，配置版本已同步；当前草稿保留。请预览最新策略后保存。';
+        await refreshReads(form);
+      }
+    } catch (_) { note.textContent = '版本核对失败；草稿和原版本保持不变，不会自动重试。'; }
+    finally { note.hidden = false; button.disabled = false; busy.delete(form); }
+  };
   if (editorDialog && typeof editorDialog.showModal === 'function') {
     editorDialog.addEventListener('cancel', event => { event.preventDefault(); closeEditor(); });
     editorDialog.addEventListener('close', () => {
@@ -309,14 +386,40 @@ JAVASCRIPT = r"""'use strict';
   document.addEventListener('change', event => {
     const form = event.target.closest('form[method="post"]');
     if (form) markDirty(form);
-    const node = event.target.closest('[data-override]');
-    if (node) override(node);
+    if (form) { policyTiming(form); sourcePolicy(form); }
     updateDraftCount();
   });
   window.addEventListener('beforeunload', event => {
     if (dirty.size) { event.preventDefault(); event.returnValue = ''; }
   });
   document.addEventListener('click', event => {
+    const sync = event.target.closest('[data-sync-source-version]');
+    if (sync) { event.preventDefault(); syncSourceVersion(sync); return; }
+    const addTime = event.target.closest('[data-add-time]');
+    const removeTime = event.target.closest('[data-remove-time]');
+    if (addTime || removeTime) {
+      event.preventDefault();
+      const button = addTime || removeTime;
+      const form = button.closest('form');
+      if (busy.has(form)) return;
+      const rows = button.closest('[data-times-editor]').querySelector('[data-time-rows]');
+      if (addTime) {
+        const row = rows.firstElementChild.cloneNode(true);
+        row.querySelectorAll('input').forEach(input => { input.value = ''; input.removeAttribute('aria-invalid'); });
+        const field = row.querySelector('[type="time"]');
+        field.id = `time-${crypto.randomUUID()}`;
+        rows.append(row);
+        field.focus();
+      } else {
+        const row = button.closest('.time-edit-row');
+        if (rows.children.length > 1) row.remove();
+        else row.querySelectorAll('input').forEach(input => { input.value = ''; });
+        rows.querySelector('[type="time"]').focus();
+      }
+      markDirty(form);
+      updateDraftCount();
+      return;
+    }
     const helpTrigger = event.target.closest('[data-help] > button');
     if (helpTrigger) {
       event.preventDefault();
@@ -365,7 +468,7 @@ JAVASCRIPT = r"""'use strict';
       row.querySelector('input').focus();
     }
   });
-  const regionNames = new Set(['sources', 'policies', 'operations', 'legacy-sources', 'legacy-pending', 'queue', 'rsshub', 'global']);
+  const regionNames = new Set(['sources', 'policies', 'operations', 'legacy-sources', 'legacy-pending', 'queue', 'rsshub', 'global', 'policy-catalog', 'migration']);
   let readRevision = 0;
   const refreshReads = async owner => {
     const revision = ++readRevision;
@@ -403,6 +506,7 @@ JAVASCRIPT = r"""'use strict';
           if (match) node.textContent = match.textContent;
         });
       }
+      document.querySelectorAll('[data-editor-panel] form').forEach(form => sourcePolicy(form, true));
     } catch (_) { warnings.push('写入已确认，但看板刷新失败；可手动刷新读取最新状态。不要重复已确认的写操作。'); }
     return [...new Set(warnings)];
   };
@@ -476,6 +580,7 @@ JAVASCRIPT = r"""'use strict';
       const dry = payload.dry_run || data.get('dry') === '1';
       show(true, preview ? '只读预览 · 没有应用或发送' : dry ? '校验通过 · 尚未应用' : envelope.changed ? '已应用' : '没有变化',
         [dry && !preview ? '取消“仅校验，不应用”后保存，才会真正写入配置。' : '', ...(envelope.warnings || [])]);
+      (payload.changes || []).forEach(change => addText('p', change.source ? `${change.source} → 独立策略 ${change.policy}` : `策略 ${change.policy}：固定发送时间 ${Object.values(change.times || {}).join(' / ')}`));
       if (preview) {
         (payload.sources || []).forEach(row => {
           addText('h4', row.source);

@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import re
 from datetime import datetime, timedelta
@@ -413,7 +414,9 @@ def build(news_dir: Path | None = None, *, now: datetime | None = None) -> dict[
     from newspipe import callback_jobs
     from newspipe.notification_view import snapshot as notification_snapshot
     from newspipe import rssconnect
-    cfg, _, sources_hash = edit.sources_snapshot(news_dir)
+    cfg, sources_text, sources_hash = edit.sources_snapshot(news_dir)
+    import yaml
+    raw_sources = yaml.safe_load(sources_text)["sources"]
     store = state.Store(news_dir)
     moment = now or datetime.now()
     digest = moment.strftime("%Y-%m-%d")
@@ -444,6 +447,8 @@ def build(news_dir: Path | None = None, *, now: datetime | None = None) -> dict[
         "sources_hash": sources_hash,
         "rsshub": rssconnect.describe(cfg),
         "source_values": {name: config.source_values(source) for name, source in cfg.sources.items()},
+        "source_revisions": {name: hashlib.sha256(yaml.safe_dump(body, sort_keys=True).encode()).hexdigest()
+                             for name, body in raw_sources.items()},
         "notification": notification_snapshot(news_dir, now=moment, cfg=cfg, base_hash=sources_hash),
         "today": today,
         "summary": {
