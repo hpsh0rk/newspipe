@@ -240,9 +240,9 @@ def notifications_body(payload, schema, actions, page):
             body += f'<a class="btn" href="/notifications?edit={quote(ident)}#policy-editor">编辑</a> <a class="btn" href="/notifications?copy={quote(ident)}#policy-editor">复制</a>'
             body += " " + delete_link(payload, token, "policy", ident)
         body += '</article>'
-    body += '</div>'
     if not snap["policies"]:
         body += '<p class="empty">还没有模板。选择下面的起点，保存后才能绑定消息源。</p>'
+    body += '</div>'
     if token:
         ident = str(page.get("edit") or page.get("copy") or "")
         if ident and ident not in snap["policies"]:

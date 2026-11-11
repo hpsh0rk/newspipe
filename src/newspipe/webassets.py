@@ -17,8 +17,13 @@ JAVASCRIPT = r"""'use strict';
   };
   const feedbackNodes = new WeakMap();
   const placements = new WeakMap();
-  const placeFeedback = (feedback, region, placement) => {
-    const cards = [...region.querySelectorAll('.source-row, .policy-card, .operation-row, tr')];
+  const contexts = '.source-row, .policy-card, .operation-row, tr, [data-feedback-anchor]';
+  const placeFeedback = (feedback, region, placement = {index: -1}) => {
+    if (placement.index < 0 && !placement.key) {
+      region.prepend(feedback);
+      return;
+    }
+    const cards = [...region.querySelectorAll(contexts)];
     const target = cards.find(card => placement.key && card.getAttribute(placement.key) === placement.value)
       || cards[Math.min(placement.index, cards.length - 1)];
     if (target?.tagName === 'TR') {
@@ -40,12 +45,12 @@ JAVASCRIPT = r"""'use strict';
       feedback.setAttribute('aria-live', 'polite');
       feedback.tabIndex = -1;
       feedbackNodes.set(context, feedback);
-      const card = context.closest('.source-row, .policy-card, .operation-row, tr');
-      const region = card?.closest('[data-read-region]');
+      const card = context.closest(contexts);
+      const region = context.closest('[data-read-region]');
       if (region) {
-        const key = ['data-source', 'data-policy', 'id'].find(key => card.hasAttribute(key));
-        const cards = [...region.querySelectorAll('.source-row, .policy-card, .operation-row, tr')];
-        const placement = {key, value: key ? card.getAttribute(key) : '', index: cards.indexOf(card)};
+        const key = card && ['data-source', 'data-policy', 'id', 'data-feedback-anchor'].find(key => card.hasAttribute(key));
+        const cards = [...region.querySelectorAll(contexts)];
+        const placement = {key, value: key ? card.getAttribute(key) : '', index: card ? cards.indexOf(card) : -1};
         placements.set(feedback, placement);
         placeFeedback(feedback, region, placement);
       } else context.append(feedback);

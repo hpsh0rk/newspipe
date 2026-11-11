@@ -5,6 +5,7 @@ requests are restricted to the ephemeral fixture origin; provider calls are deni
 server-side too. Only failing scenarios retain synthetic screenshots and traces.
 """
 from contextlib import contextmanager
+import json
 import os
 from pathlib import Path
 import sys
@@ -342,6 +343,48 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 self.expect(page.locator("#action-result")).to_contain_text("刷新失败")
                 self.assertFalse(page.evaluate("Boolean(window.injected)"))
                 self.assertTrue(config.load(fixture.news_dir).sources["reading"].enabled)
+
+    def test_confirmed_legacy_flush_keeps_contextual_feedback_after_read_replacement(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                added = cli.run_subcommand(["source", "set", "legacy", "--from-json",
+                    '{"adapter":"hn","fetch":{"trigger":"manual"}}', "--json"], fixture.news_dir)
+                self.assertTrue(added.ok, added.as_dict())
+                fixture.store.append_pending("legacy", [{"ext_id": "legacy-test", "title": "Offline pending item",
+                    "url": "https://example.invalid/legacy", "source": "Preview"}])
+                page.goto(fixture.url + "/ops")
+                page.get_by_text("兼容操作 · 旧式跑一轮", exact=True).click()
+                page.get_by_text("顺延队列明细 · 点「现在发」立刻补跑", exact=True).click()
+                page.on("dialog", lambda dialog: dialog.accept())
+                attempts = []
+                def confirm_without_send(route):
+                    attempts.append(route.request.url)
+                    route.fulfill(content_type="application/json", body=json.dumps({"ok": True,
+                        "changed": True, "data": {}, "warnings": []}))
+                page.route("**/api/actions/flush", confirm_without_send)
+                form = page.locator('[data-read-region="legacy-pending"] form[action="/api/actions/flush"]')
+                self.assertTrue(self.submit(page, form, "现在发")["ok"])
+                self.expect(page.locator("#action-result")).to_contain_text("已应用")
+                self.expect(page.locator("#action-result")).to_be_in_viewport()
+                self.assertEqual(len(attempts), 1)
+
+    def test_first_policy_creation_removes_stale_empty_state(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                for name in ("research", "products", "reading"):
+                    self.assertTrue(cli.run_subcommand(["source", "remove", name, "--json"], fixture.news_dir).ok)
+                for name in ("digest", "live", "archive"):
+                    self.assertTrue(cli.run_subcommand(["policy", "remove", name, "--json"], fixture.news_dir).ok)
+                page.goto(fixture.url + "/notifications?new=1#policy-editor")
+                empty = page.get_by_text("还没有模板。选择下面的起点，保存后才能绑定消息源。", exact=True)
+                self.expect(empty).to_be_visible()
+                form = page.locator('form[action="/api/actions/policy-save"]')
+                form.locator('[name="name"]').fill("first_policy")
+                form.locator('[name="p.mode"]').select_option("collect")
+                form.locator('[name="dry"]').uncheck()
+                self.assertTrue(self.submit(page, form)["ok"])
+                self.expect(page.locator('[data-policy="first_policy"]')).to_be_visible()
+                self.expect(empty).to_have_count(0)
 
     def test_custom_budget_blank_is_rejected_until_explicit_inheritance(self):
         for engine in self.browsers:

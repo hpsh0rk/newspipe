@@ -777,7 +777,7 @@ def ops_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
         p = e.get("payload") or {}
         title = str(p.get("title") or p.get("item_id") or "（无标题）")
         qrows.append(
-            "<tr>"
+            f'<tr data-feedback-anchor="queue:{html.escape(str(e.get("id") or ""))}">'
             f'<td><code>{html.escape(str(e.get("ts") or ""))}</code></td>'
             f'<td>{html.escape(str(e.get("source") or ""))}</td>'
             f'<td>{_link(title, str(p.get("url") or ""))}</td>'
@@ -802,7 +802,7 @@ def ops_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
             bits.append(_form("flush", token, {"name": src["name"]},
                               f"现在发 {src['pending_total']}", danger=True))
         rows.append(
-            "<tr>"
+            f'<tr data-source="{html.escape(src["name"])}">'
             f"<td><code>{html.escape(src['name'])}</code></td>"
             f"<td>{_pill(str(src['status_tone']), label)}</td>"
             f'<td class="actions">{"".join(bits)}</td>'
@@ -824,7 +824,7 @@ def ops_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
             f'<td>{html.escape(str(it.get("score") or ""))}</td>'
             "</tr>" for it in items)
         pend_blocks.append(
-            f'<h3><code>{html.escape(str(name))}</code> · 显示 {len(items)} 条 '
+            f'<h3 data-feedback-anchor="pending:{html.escape(str(name))}"><code>{html.escape(str(name))}</code> · 显示 {len(items)} 条 '
             + _form("flush", token, {"name": str(name)}, "现在发", danger=True)
             + "</h3><table><thead><tr><th>标题</th><th>来源</th><th>分</th></tr></thead>"
             + f"<tbody>{prows}</tbody></table>")
