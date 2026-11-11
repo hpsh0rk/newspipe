@@ -8,6 +8,7 @@ from newspipe.policy import human_summary as rule_summary
 from newspipe.webconfirmation import delete_link, delete_dialog
 
 E = lambda value: html.escape(str(value), quote=True)
+ADAPTER_LABELS = {"rsshub": "RSS / RSSHub"}
 
 
 def _hidden(name, value):
@@ -16,7 +17,7 @@ def _hidden(name, value):
 
 def _start(action, token, base_hash, route, *, cls="editor", confirm=""):
     validation = ' novalidate data-server-validation' if action in {
-        "source-save", "source-patch", "source-copy", "policy-save", "global-save"} else ""
+        "source-save", "source-patch", "source-copy", "policy-save", "global-save", "rsshub-save"} else ""
     return (f'<form method="post" action="/api/actions/{E(action)}" class="{E(cls)}"'
             + validation + (f' data-confirm="{E(confirm)}"' if confirm else "") + ">"
             + _hidden("token", token) + _hidden("base_hash", base_hash) + _hidden("return_to", route)
@@ -44,7 +45,7 @@ def _field(field, value, *, prefix, scope, slots):
     if kind == "bool":
         control = _hidden(name, "0") + f'<input type="checkbox" {attr} value="1"' + (" checked" if value else "") + ">"
     elif kind == "enum":
-        labels = {"immediate": "有新内容即通知", "digest": "按槽位汇总", "collect": "只采集，不通知", "card": "每批新卡", "append_card": "追加已有卡片"}
+        labels = {**ADAPTER_LABELS, "immediate": "有新内容即通知", "digest": "按槽位汇总", "collect": "只采集，不通知", "card": "每批新卡", "append_card": "追加已有卡片"}
         options = "".join(f'<option value="{E(c)}"' + (" selected" if str(c) == str(value) else "") + f'>{E(labels.get(c, c))}</option>'
                           for c in field.get("choices", []))
         control = f'<select {attr}>{options}</select>'
@@ -69,13 +70,13 @@ def _field(field, value, *, prefix, scope, slots):
 def _rss(page):
     rows = []
     for index, item in enumerate(page.get("catalog") or []):
-        rows.append(f'<div class="feed-result"><b>{E(item["name"])}</b><span>{E(item.get("verified", ""))} 本机实测</span>'
+        rows.append(f'<div class="feed-result"><b>{E(item["name"])}</b><span>历史验证 · {E(item.get("verified", ""))}</span>'
                     f'<code>{E(item.get("feed", ""))}</code><a href="/config?use={index}#new">用这个新建信源</a></div>')
     for item in (page.get("discover") or {}).get("candidates", []):
         rows.append(f'<div class="feed-result"><code>{E(item.get("url", ""))}</code><small>{E(item.get("how", ""))}</small>'
                     f'<a href="/config?feed={quote(str(item.get("url", "")), safe="")}#new">用这个新建信源</a></div>')
     return ('<details class="rss-panel"' + (" open" if page.get("q") or page.get("discover") else "") + '><summary>RSS 搜索 / 订阅</summary>'
-            '<p class="note">目录条目已在本机 RSSHub 实测；支持直接填写 RSS 地址，不承诺全网搜索。</p>'
+            '<p class="note">目录是历史验证记录，不代表当前实例可用。支持直接填写 RSS 地址；相对路由需配置 RSSHub 后测试，不承诺全网搜索。</p>'
             '<form method="get" action="/config" class="toolbar"><label>关键词 '
             f'<input name="q" value="{E(page.get("q", ""))}" placeholder="少数派 / AI"></label>'
             '<button class="btn">搜目录</button></form>'
@@ -84,6 +85,51 @@ def _rss(page):
             '<button class="btn">发现 feed</button></form>'
             + (f'<p class="banner err">{E(page["discover_error"])}</p>' if page.get("discover_error") else "")
             + "".join(rows) + '</details>')
+
+
+def _rsshub_settings(payload, schema, token, page):
+    hub = payload.get("rsshub") or {}
+    origin = {"config": "显式配置 · sources.yaml", "env:RSSHub_BASE": "环境变量 · RSSHub_BASE", "default": "本地默认"}.get(hub.get("origin"), "未知")
+    dependencies = hub.get("dependent_sources") or []
+    body = '<section class="rsshub-panel"><div data-read-region="rsshub"><h2>RSSHub · 可选连接</h2>'
+    body += '<p class="note">完整 RSS 地址直接访问，不依赖 RSSHub；只有相对路由需要它。支持本地、远端和反向代理路径前缀。</p>'
+    body += '<dl class="receipt"><dt>生效地址</dt><dd><code>' + E(hub.get("effective_url") or "地址不可用") + '</code></dd>'
+    body += f'<dt>配置来源</dt><dd>{E(origin)}</dd><dt>启用且依赖的信源</dt><dd>'
+    body += ("、".join(f'<code>{E(name)}</code>' for name in dependencies) if dependencies else "无 · 当前启用信源不依赖 RSSHub") + '</dd></dl>'
+    if hub.get("error"):
+        body += f'<p class="notice">{E(hub["error"])}。修正环境变量或保存显式地址；完整 RSS 地址仍可独立使用。</p>'
+    body += '<p class="note">页面加载时尚未检测连接；不会自动发现或部署 RSSHub。手动测试的结果仅代表本次请求。</p></div>'
+    if token:
+        body += '<details id="rsshub-settings"' + (" open" if page.get("rsshub") else "") + '><summary>设置地址与测试订阅</summary>'
+        body += _start("rsshub-save", token, payload["sources_hash"], "/config")
+        body += "".join(_field(field, hub.get("configured_url", field.get("default")), prefix="r.", scope="rsshub", slots=payload["slots"])
+                        for field in schema.get("rsshub_fields", []))
+        body += '<p class="note">填写地址可覆盖环境变量；留空并保存恢复继承。地址会在保存后供后续采集使用，无需重启。</p>'
+        body += '<fieldset><legend>只读检测 · 不保存、不采集、不通知</legend><label class="field" for="rsshub-probe-feed">订阅地址 / 相对路由'
+        body += '<input id="rsshub-probe-feed" name="probe_feed" aria-describedby="rsshub-probe-feed-help" placeholder="https://example.com/feed.xml 或 /sspai/matrix"></label>'
+        body += '<p class="note" id="rsshub-probe-feed-help">使用上面的候选基础地址测试；留空则按环境变量 / 本地默认解析。完整 RSS 地址忽略基础地址。连接测试仅验证端点可达，不保证是 RSSHub 或所有路由可用。</p>'
+        body += '<div class="row-actions"><button class="btn" type="submit" formaction="/api/actions/rsshub-probe" name="probe_kind" value="connection">测试连接</button>'
+        body += '<button class="btn" type="submit" formaction="/api/actions/rsshub-probe" name="probe_kind" value="feed">测试订阅</button></div>'
+        body += '<p class="note">单次请求、无自动重试；响应最多 1 MiB、套接字超时 5 秒，DNS / TLS / 跳转可能增加总耗时。仅支持 RSS 2.0。</p></fieldset>'
+        body += _buttons(preview=False) + '</form></details>'
+    return body + '</section>'
+
+
+def probe_result(envelope):
+    """Escaped no-JS feedback, kept beside the retained settings draft."""
+    ok = bool(envelope.get("ok"))
+    error = envelope.get("error") or {}
+    data = envelope.get("data") or error.get("details") or {}
+    lines = [data.get("message") if ok else error.get("message"), error.get("hint"),
+             "只读检测，没有保存地址、采集入队或发送通知；草稿和版本保持不变。"]
+    if data.get("checked_url"):
+        lines.append("检测地址：" + str(data["checked_url"]))
+    if data.get("http_status") is not None:
+        lines.append("HTTP 状态：" + str(data["http_status"]))
+    if data.get("items") is not None:
+        lines.append("RSS 条目：" + str(data["items"]))
+    return (f'<div class="banner {"ok" if ok else "err"}" data-action-feedback role="status" aria-live="polite" tabindex="-1">'
+            f'<h3>只读检测 · {"完成" if ok else "失败"}</h3>' + "".join(f'<p>{E(line)}</p>' for line in lines if line) + '</div>')
 
 
 def _source_editor(payload, schema, token, page):
@@ -182,7 +228,7 @@ def sources_body(payload, schema, actions, page):
             links += f'<button class="btn">{"停用" if src["enabled"] else "启用"}</button></form>'
             links += delete_link(payload, token, "source", src["name"])
         cards.append(f'<article class="source-row" data-source="{E(src["name"])}"><div><h3>{E(src["card_title"])}</h3>'
-                     f'<p class="note"><code>{E(src["name"])}</code> · {E(src["adapter"])} · {E(cadence)}</p>'
+                     f'<p class="note"><code>{E(src["name"])}</code> · {E(ADAPTER_LABELS.get(src["adapter"], src["adapter"]))} · {E(cadence)}</p>'
                      f'<p data-effective="{E(src["name"])}">{E(rule_summary(row["after"], payload["slots"]))}</p></div>'
                      f'<div class="source-state"><span class="pill {E(src["status_tone"] or "muted") if src["enabled"] else "warn"}">{E(src["status_label"] if src["enabled"] else "已停用")}</span>'
                      f'<span data-pending="{E(src["name"])}">{row["pending"]} 条待通知</span></div><div class="row-actions">{links}</div></article>')
@@ -190,12 +236,12 @@ def sources_body(payload, schema, actions, page):
     filter_form += f'<input name="search" value="{E(page.get("search", ""))}" placeholder="名称、标题、适配器"></label>'
     for key, label, choices in (("policy_filter", "通知策略", [("legacy", "旧式策略"), *[(n, p["values"].get("label") or n) for n, p in snapshot["policies"].items()]]),
                                  ("enabled_filter", "启用状态", [("on", "已启用"), ("off", "已停用")]),
-                                 ("adapter_filter", "适配器", [(a, a) for a in schema["adapters"]])):
+                                 ("adapter_filter", "适配器", [(a, ADAPTER_LABELS.get(a, a)) for a in schema["adapters"]])):
         filter_form += f'<label>{label}<select name="{key}"><option value="">全部</option>' + "".join(
             f'<option value="{E(value)}"' + (" selected" if page.get(key) == value else "") + f'>{E(text)}</option>' for value, text in choices) + '</select></label>'
     filter_form += '<button class="btn">筛选</button><a href="/config">清除</a></form>'
     body = ('<div class="page-intro"><div><p class="eyebrow">SOURCE LIBRARY</p><p class="lead">采集什么，与何时打扰你，是两件事。</p></div>'
-            '<a class="btn primary" href="/config?new=1#new">添加消息源</a></div>' + filter_form
+            '<a class="btn primary" href="/config?new=1#new">添加消息源</a></div>' + _rsshub_settings(payload, schema, token, page) + filter_form
             + '<h2>信源清单</h2><div class="source-list" data-read-region="sources">' + ("".join(cards) or '<p class="empty">还没有匹配的消息源。先创建通知策略，再添加消息源。</p>') + '</div>')
     if page.get("copy") and token:
         body += '<h2 id="source-copy">复制消息源 · 新源默认停用</h2>' + _start("source-copy", token, payload["sources_hash"], "/config")

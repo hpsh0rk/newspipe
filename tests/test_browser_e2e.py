@@ -11,10 +11,12 @@ from pathlib import Path
 import sys
 import unittest
 from urllib.parse import urlsplit
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from newspipe import cli, config
+from newspipe import cli, config, rssconnect
 from preview_workbench import offline_workbench
+from test_rsshub_web import synthetic_probe
 
 ENABLED = os.environ.get("NEWSPIPE_BROWSER_TESTS") == "1"
 ARTIFACTS = Path(__file__).resolve().parents[1] / "test-results/browser"
@@ -89,9 +91,78 @@ class WorkbenchBrowserTests(unittest.TestCase):
     def source_label(self, fixture):
         return config.source_values(config.load(fixture.news_dir).sources["research"])["feed_label"]
 
+    def test_rsshub_candidate_probes_preserve_draft_and_hash_with_and_without_js(self):
+        for engine in self.browsers:
+            for javascript in (True, False):
+                with self.subTest(engine=engine, javascript=javascript), self.scenario(engine, javascript=javascript) as (fixture, page), \
+                        patch.object(rssconnect, "_probe_request", side_effect=synthetic_probe) as transport:
+                    page.goto(fixture.url + "/config?rsshub=1#rsshub-settings")
+                    form = page.locator('form[action="/api/actions/rsshub-save"]')
+                    field = form.locator('[name="r.base_url"]')
+                    field.fill("https://hub.example.invalid/prefix")
+                    form.locator('[name="probe_feed"]').fill("/rss")
+                    old_hash = form.locator('[name="base_hash"]').input_value()
+                    before = (fixture.news_dir / "sources.yaml").read_bytes()
+                    for button in ("测试连接", "测试订阅"):
+                        if javascript:
+                            out = self.submit(page, form, button)
+                            self.assertTrue(out["ok"], out)
+                            self.expect(page.locator("#action-result")).to_contain_text("只读检测")
+                            self.expect(page.locator("#action-result")).to_be_in_viewport()
+                        else:
+                            with page.expect_navigation():
+                                form.get_by_role("button", name=button, exact=True).click()
+                            self.assertIn("/config?draft=", page.url)
+                        self.expect(field).to_have_value("https://hub.example.invalid/prefix")
+                        self.assertEqual(form.locator('[name="base_hash"]').input_value(), old_hash)
+                        self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
+                    self.assertEqual([call.args[0] for call in transport.call_args_list],
+                        ["https://hub.example.invalid/prefix", "https://hub.example.invalid/prefix/rss"])
+                    if not javascript:
+                        page.reload()
+                        self.assertEqual(transport.call_count, 2)
+
+    def test_rsshub_save_updates_metadata_and_keeps_sibling_draft_stale(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                source = self.editor(fixture, page)
+                source.locator('[name="f.feed_label"]').fill("Keep sibling draft")
+                old_hash = source.locator('[name="base_hash"]').input_value()
+                page.get_by_text("设置地址与测试订阅", exact=True).click()
+                form = page.locator('form[action="/api/actions/rsshub-save"]')
+                form.locator('[name="r.base_url"]').fill("https://hub.example.invalid/prefix")
+                self.assertTrue(self.submit(page, form)["ok"])
+                self.assertEqual(config.load(fixture.news_dir).rsshub["base_url"], "")
+                form.locator('[name="dry"]').uncheck()
+                self.assertTrue(self.submit(page, form)["ok"])
+                self.expect(page.locator('[data-read-region="rsshub"]')).to_contain_text("https://hub.example.invalid/prefix")
+                self.expect(source.locator('[name="f.feed_label"]')).to_have_value("Keep sibling draft")
+                self.assertEqual(source.locator('[name="base_hash"]').input_value(), old_hash)
+                form.locator('[name="r.base_url"]').fill("")
+                self.assertTrue(self.submit(page, form)["ok"])
+                self.expect(page.locator('[data-read-region="rsshub"]')).to_contain_text("本地默认")
+
+    def test_rsshub_probe_failure_is_visible_read_only_and_does_not_retry(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                page.goto(fixture.url + "/config?rsshub=1#rsshub-settings")
+                form = page.locator('form[action="/api/actions/rsshub-save"]')
+                before = (fixture.news_dir / "sources.yaml").read_bytes()
+                form.locator('[name="r.base_url"]').fill("https://hub.example.invalid/prefix")
+                attempts = []
+                def abort(route):
+                    attempts.append(route.request.url)
+                    route.abort()
+                page.route("**/api/actions/rsshub-probe", abort)
+                form.get_by_role("button", name="测试连接", exact=True).click()
+                self.expect(page.locator("#action-result")).to_contain_text("检测结果未确认")
+                self.expect(page.locator("#action-result")).to_be_in_viewport()
+                self.assertEqual(len(attempts), 1)
+                self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
+
     def test_routes_editors_responsive_labels_keyboard_and_reduced_motion(self):
         routes = ("/", "/config", "/notifications", "/items", "/ops",
-                  "/config?edit=research#new", "/notifications?edit=live#policy-editor")
+                  "/config?edit=research#new", "/config?rsshub=1#rsshub-settings", "/notifications?edit=live#policy-editor")
         for engine in self.browsers:
             for width in (360, 768, 1440):
                 with self.subTest(engine=engine, width=width), self.scenario(engine, width=width) as (fixture, page):

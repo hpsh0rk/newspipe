@@ -206,6 +206,8 @@ def _flash_of(envelope: dict[str, Any]) -> dict[str, Any]:
         bits = [f"{k}: {data[k]}" for k in ("summary", "message", "changed", "note")
                 if data.get(k)]
         summary = " · ".join(bits) or "完成"
+        if action.get("name") == "rsshub-save" and data.get("dry_run"):
+            summary = "校验通过 · 尚未应用；取消“仅校验，不应用”后保存才会写入地址。"
     return {
         "ok": ok,
         "label": str(action.get("label") or envelope.get("command") or "操作"),
@@ -347,7 +349,7 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                 page["prefill"] = prefill
                 page["prefill_name"] = hint
             page.update({key: (query.get(key) or [""])[0] for key in
-                         ("new", "copy", "search", "policy_filter", "enabled_filter", "adapter_filter")})
+                         ("new", "copy", "search", "policy_filter", "enabled_filter", "adapter_filter", "rsshub")})
             if query.get("edit"):
                 name = (query["edit"] or [""])[0]
                 try:
@@ -408,7 +410,7 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                         act = None
                     flash = view_mod.flash_decode((query.get("r") or [""])[0])
                     if draft:
-                        flash = draft["flash"]
+                        flash = None if draft.get("probe") else draft["flash"]
                 if is_batch:
                     parts = route.split("/")
                     if len(parts) == 4 and parts[2] and parts[3]:
@@ -441,8 +443,10 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                     page = view_mod.cockpit_html(payload, flash=flash, page=self._recent_page())
                 if draft and draft.get("form"):
                     from newspipe.webdrafts import restore
+                    from newspipe.workbench import probe_result
                     page = restore(page, draft["action"], draft["form"],
-                                   reveal=not (draft.get("flash") or {}).get("ok"))
+                                   reveal=not (draft.get("flash") or {}).get("ok"),
+                                   feedback=probe_result(draft["probe"]) if draft.get("probe") else "")
                 if draft and draft.get("preview"):
                     from newspipe.workbench import preview_result
                     page = page.replace('<div id="action-result"', preview_result(draft["preview"]) + '<div id="action-result"', 1)
@@ -503,24 +507,29 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
             if "application/json" in (self.headers.get("Accept") or ""):
                 self._send(200, envelope)
                 return
-            # PRG（Post/Redirect/Get）：结果编码进 URL，刷新页面不会重放写操作
+            # PRG: opaque one-use handle; refresh never repeats a write or probe.
             return_to = (form.get("return_to") or ["/"])[0]
             if return_to not in {"/", "/config", "/notifications", "/items", "/ops"}:
                 return_to = "/"
             # One-use PRG memory: neither raw input nor CLI argv belongs in URLs.
             data = envelope.get("data") or {}
-            retain = not envelope.get("ok") or data.get("dry_run") or name == "notification-preview"
+            retain = not envelope.get("ok") or data.get("dry_run") or name in {"notification-preview", "rsshub-probe"}
             action = name
             if name == "notification-preview":
                 kind = (form.get("preview_kind") or ["source"])[0]
                 action = {"global": "global-save", "policy": "policy-save"}.get(kind, "source-save" if form.get("create_only") else "source-patch")
+            elif name == "rsshub-probe":
+                action = "rsshub-save"
             query = {}
             if action in {"source-patch", "policy-save", "source-save"}:
                 query = {"new": ["1"]} if form.get("create_only") or action == "source-save" else {"edit": form.get("name", [])}
             elif action == "source-copy":
                 query = {"copy": form.get("name", [])}
-            key = drafts.put({"action": action, "query": query if retain else {}, "flash": _flash_of(envelope),
+            elif action == "rsshub-save":
+                query = {"rsshub": ["1"]}
+            key = drafts.put({"action": action, "query": query if retain or action == "rsshub-save" else {}, "flash": _flash_of(envelope),
                               "form": {k: v for k, v in form.items() if k != "token"} if retain else None,
+                              "probe": envelope if name == "rsshub-probe" else None,
                               "preview": data if name == "notification-preview" and envelope.get("ok") else None})
             self.send_response(303)
             self.send_header("Location", f"{return_to}?draft={key}")

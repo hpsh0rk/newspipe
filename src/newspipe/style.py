@@ -341,6 +341,13 @@ dialog .row-actions{margin-top:20px}
 .global-panel{padding:24px;background:linear-gradient(130deg,var(--accent-soft),var(--surface));border:1px solid var(--border);border-radius:var(--radius);margin-top:28px}
 .global-panel h2{margin-top:0}
 .global-panel .editor{background:var(--surface);margin-top:16px}
+.rsshub-panel{padding:20px 24px;margin:24px 0;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)}
+.rsshub-panel h2{margin-top:0}
+.rsshub-panel .receipt{margin:16px 0}
+.rsshub-panel details{margin-top:16px}
+.rsshub-panel summary{font-weight:600;color:var(--accent)}
+.rsshub-panel .editor{margin-top:16px;background:var(--surface-2)}
+.rsshub-panel .banner{overflow-wrap:anywhere}
 .policy-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
 .policy-card{padding:24px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)}
 .policy-card h3{font-size:16px;margin-top:0}
@@ -370,7 +377,7 @@ dialog .row-actions{margin-top:20px}
  .source-row{grid-template-columns:minmax(0,1fr);padding:16px;gap:8px}
  .source-state{justify-items:start;display:flex;align-items:center}
  .page-intro,.section-heading{align-items:start;flex-wrap:wrap}
- .editor,.global-panel,.policy-card{padding:16px}
+ .editor,.global-panel,.policy-card,.rsshub-panel{padding:16px}
  .field-grid{grid-template-columns:1fr}
  .policy-grid{grid-template-columns:minmax(0,1fr)}
  .override>label{align-items:start;flex-direction:column}

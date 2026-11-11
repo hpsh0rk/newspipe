@@ -30,6 +30,9 @@ services:
       NEWSPIPE_BIND_HOST: 0.0.0.0
       NEWSPIPE_PROXY: http://host.docker.internal:7890
       NEWSPIPE_LOOPBACK_ALIAS: host.docker.internal
+      # 可选：仅相对 RSSHub 路由需要；sources.yaml 的 rsshub.base_url 优先。
+      # 宿主本地 RSSHub 示例 http://host.docker.internal:1200，或填远端 / 服务名地址。
+      RSSHub_BASE: ${RSSHub_BASE:-}
       TZ: Asia/Shanghai
     extra_hosts:
       - "host.docker.internal:host-gateway"

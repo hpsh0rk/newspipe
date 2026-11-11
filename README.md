@@ -348,11 +348,44 @@ URL 只有随机句柄，不含草稿或令牌；服务重启/过期后草稿消
 - 表单默认勾选**先演练**（`--dry-run`），落盘前先看 diff；取消勾选才是真写。
 - 编辑使用合并补丁：未提交字段不动，`null` 删除字段，保留未知适配器扩展、卡片配置和显式覆盖。
   CLI `source set` 仍是整体替换。修改块内注释可能丢失，其他块保持原样；warning 原样显示。
-- RSS 搜索两条路：① **关键词搜目录**（`src/newspipe/rss.py` 里的 `CATALOG`，**只收录在本机
-  RSSHub 上实测过**的条目，带实测日期与状态码）；② **站点地址发现 feed**（抓页面里的
+- RSS 搜索两条路：① **关键词搜目录**（`src/newspipe/rss.py` 里的 `CATALOG`，收录历史
+  RSSHub 验证记录，带当时的日期与状态码，**不代表当前实例可用**）；② **站点地址发现 feed**（抓页面里的
   `<link rel=alternate>`，没有再探 `/feed`、`/atom.xml` 等常见路径）。
   本地 RSSHub 没有 `/routes` 目录（实测 404），所以不做「全网 RSS 搜索」这种吹牛功能。
 - 搜到的候选点「用这个新建信源」→ 跳到配置页并**预填**成 `rsshub` 适配器 + 该地址。
+
+### RSSHub 可选配置与检测
+
+`rsshub` 是兼容保留的适配器名称，后台显示为 **RSS / RSSHub**。完整 HTTP(S) RSS 地址
+直接访问，不需要部署 RSSHub；`/sspai/matrix` 这样的相对路由才需要一个可用的 RSSHub 实例。
+支持本机与远端 HTTP(S) 地址，也支持反向代理前缀，例如 `https://example.com/rsshub`。
+不会自动发现、安装或启动本机 RSSHub，因为进程存在不等于用户配置的实例 / 路由可用。
+
+基础地址优先级：`sources.yaml: rsshub.base_url` → 环境变量 `RSSHub_BASE` →
+`http://127.0.0.1:1200`。后台 `/config` 的“RSSHub · 可选连接”显示生效地址、来源和
+启用且依赖的信源。展开“设置地址与测试订阅”可保存覆盖地址；显式留空并保存恢复继承。
+默认仅校验，取消勾选才写入。保存由 CLI 原子校验和乐观并发保护，后续采集无需重启即可使用。
+
+```sh
+newspipe rsshub show --json
+newspipe rsshub set --base-url https://example.com/rsshub --dry-run --json
+newspipe rsshub set --base-url '' --json           # 清除显式覆盖，恢复继承
+newspipe rsshub probe --json                      # 只检测当前端点可达
+newspipe rsshub probe --base-url https://example.com/rsshub --feed /sspai/matrix --json
+newspipe rsshub probe --feed https://example.com/feed.xml --json
+```
+
+后台“测试连接”仅验证候选端点可达，不证明服务一定是 RSSHub，也不证明所有路由正常；
+“测试订阅”检查 RSS 2.0，包括合法的空订阅，Atom / RDF 会明确报暂不支持。
+测试不会保存、采集入队或发送通知，不清除未保存提示、不更新表单版本；无 JavaScript 时
+保留本次草稿并重定向，刷新不会再次检测。失败区分网络、鉴权、路由不存在与订阅格式问题，
+不显示上游响应正文、原始异常或 URL 查询参数。页面和 `doctor` 只读元信息，**不自动联网检测**。
+检测直接访问端点，不走配置的出网代理；单次请求无重试，响应上限 1 MiB、套接字超时
+5 秒，DNS / TLS / HTTP 跳转可能增加总耗时。
+
+容器中的 `localhost` 指容器自己。访问宿主 RSSHub 请用 `http://host.docker.internal:1200`，
+同一容器网络使用服务名，远端使用完整地址；不要把用户名、密码或密钥写进基础地址。
+`compose.yaml` 显式传递可选 `RSSHub_BASE`，但不启动 RSSHub；模型用的回环别名不会自动改写 RSSHub 地址。
 
 ### 页面写操作：仪表盘变控制台（`view.actions`）
 

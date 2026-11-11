@@ -148,7 +148,8 @@ docker compose up -d --build        # ① 容器（restart: unless-stopped 兜�
 
 | 类别 | 命令 |
 |---|---|
-| 自检 | `doctor` / `status` / `probe-model` / `probe-channel` |
+| 自检 | `doctor` / `status` / `probe-model` / `probe-channel` / `rsshub show\|probe` |
+| RSSHub | `rsshub set --base-url <地址>`（显式空字符串恢复继承；支持 `--dry-run` / `--base-hash`） |
 | 信源 | `source list\|show\|set\|patch\|copy\|enable\|disable\|remove`（写操作支持 `--dry-run` / `--base-hash`；新建可用 `--create-only`） |
 | 通知 | `policy list\|show\|set\|remove` / `global set` / `notification preview` / `notification retry <源> --operation-id <ID>` |
 | 分阶段运行 | `collect <源>`（只采集）/ `notify <源>`（只通知待处理；`--bypass-clock` 只越过时钟，不越过限制） |
@@ -210,8 +211,19 @@ docker compose up -d --build        # ① 容器（restart: unless-stopped 兜�
 CLI `source set` 仍是整体替换，新建/复制用 `--create-only` 拒绝 ID 碰撞，新源默认停用。
 修改块内注释可能丢失；CLI warning 显示在横幅上。唯一同源脚本 `/assets/workbench.js` 是渐进增强，
 无 JS 仍能提交/预览：失败草稿只存进程内存（32 份/10 分钟/一次性），不进 URL/磁盘/浏览器存储。
-表单默认 `--dry-run`，取消勾选才真写。RSS 目录只收录在**本机 RSSHub 上实测过**的条目
-（本地无 `/routes`，实测 404）—— 不做「全网 RSS 搜索」这种吹牛功能。
+表单默认 `--dry-run`，取消勾选才真写。RSS 目录是历史验证记录，**不是当前实例可用性的证明**
+（当时本地无 `/routes`，实测 404）—— 不做「全网 RSS 搜索」这种吹牛功能。
+
+**RSSHub 不是强依赖。** `rsshub` 适配器兼容完整 RSS 地址与相对路由；仅相对路由依赖 RSSHub。
+基础地址按 `sources.yaml: rsshub.base_url` → `RSSHub_BASE` → `http://127.0.0.1:1200` 解析，
+支持本地 / 远端 HTTP(S) 和反向代理前缀。容器中的 localhost 是容器自身；宿主地址显式使用
+`http://host.docker.internal:1200`，不会跟随模型回环别名自动改写，也不自动发现 / 部署 RSSHub。
+`doctor` / `view` / `rsshub show` 只描述地址、来源与启用的依赖信源，**不联网检测**。
+需要测试时显式执行 `rsshub probe [--base-url <候选>] [--feed <完整地址或相对路由>] --json`，
+或用 `/config` 的“测试连接 / 测试订阅”：同样走动作三道门禁，**只检测、不保存、不采集、不发卡**。
+检测结果不确认草稿已保存，也不推进表单哈希。端点可达不等于路由可用；订阅暂只支持 RSS 2.0，
+Atom / RDF 明确报错。直接访问端点、不走出网代理，单次请求无重试、套接字超时 5 秒、响应上限
+1 MiB，DNS / TLS / 跳转可能增加总耗时。诊断不得暴露上游正文、原始异常或 URL 查询值。
 
 ### 2.3 策略与安全重试
 

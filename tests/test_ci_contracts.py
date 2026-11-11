@@ -54,7 +54,8 @@ class CIContractTests(unittest.TestCase):
     def test_optional_javascript_tests_can_skip_without_node(self):
         result = self.javascript_suite_without_node(required=False)
         self.assertTrue(result.wasSuccessful())
-        self.assertEqual(len(result.skipped), 4)
+        self.assertGreaterEqual(result.testsRun, 4, "Do not allow an empty JavaScript gate")
+        self.assertEqual(len(result.skipped), result.testsRun)
 
     def test_browser_gate_is_explicit_and_installs_both_engines(self):
         job = self.workflow()["jobs"].get("browser")

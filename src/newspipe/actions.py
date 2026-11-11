@@ -345,8 +345,20 @@ def _argv_retry(form):
 
 
 def _argv_rsshub_probe(form):
+    feed = (form.get("probe_feed") or [""])[0].strip()
+    kind = (form.get("probe_kind") or ["feed" if feed else "connection"])[0]
+    if kind not in {"connection", "feed"}:
+        raise ActionInputError("检测类型必须是 connection 或 feed")
+    if kind == "feed" and not feed:
+        raise ActionInputError("测试订阅前请填写 probe_feed：完整 RSS 地址或 RSSHub 相对路由")
     return ["rsshub", "probe", "--base-url", (form.get("r.base_url") or [""])[0],
-            *(["--feed", form["probe_feed"][0]] if (form.get("probe_feed") or [""])[0].strip() else [])]
+            *(["--feed", feed] if kind == "feed" else [])]
+
+
+def _argv_rsshub_save(form):
+    if "r.base_url" not in form:
+        raise ActionInputError("缺少 RSSHub 基础地址字段；显式留空才会恢复继承")
+    return _write_flags(["rsshub", "set", "--base-url", form["r.base_url"][0]], form)
 
 
 ACTIONS: dict[str, Action] = {
@@ -360,6 +372,7 @@ ACTIONS: dict[str, Action] = {
         Action("policy-remove", "删除通知策略", _argv_policy_remove, danger=True),
         Action("global-save", "保存全局通知设置", _argv_globals, danger=True),
         Action("notification-preview", "预览有效通知规则", _argv_preview),
+        Action("rsshub-save", "保存 RSSHub 地址", _argv_rsshub_save, danger=True),
         Action("rsshub-probe", "只读检测 RSSHub / RSS 订阅", _argv_rsshub_probe),
         Action("collect", "只采集一次", lambda f: ["collect", _one(f, "name"), *(["--dry"] if _flag(f, "dry") else [])]),
         Action("notify", "通知现有待处理", _argv_notify, danger=True),

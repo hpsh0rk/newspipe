@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from newspipe import actions, channel, cli, credentials, llm, net, pipeline, rss
+from newspipe import actions, channel, cli, credentials, llm, net, pipeline, rss, rssconnect
 from preview_workbench import offline_workbench
 
 
@@ -22,10 +22,11 @@ class BrowserFixtureTests(unittest.TestCase):
             self.assertEqual(payload["chat"], "oc_offline_preview")
             self.assertEqual(len(payload["sources"]), 3)
             for effect in (lambda: credentials.resolve_feishu(), lambda: llm.chat_json("fake"),
-                           lambda: channel.create_entity({}), lambda: pipeline._enrich_new()):
+                           lambda: channel.create_entity({}), lambda: pipeline._enrich_new(),
+                           lambda: rssconnect._probe_request("https://example.invalid")):
                 with self.assertRaisesRegex(RuntimeError, "offline fixture"):
                     effect()
-            self.assertGreaterEqual(len(fixture.blocked_effects), 4)
+            self.assertGreaterEqual(len(fixture.blocked_effects), 5)
 
     def test_collect_action_uses_fake_adapter_and_temporary_state(self):
         with offline_workbench() as fixture:

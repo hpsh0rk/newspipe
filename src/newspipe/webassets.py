@@ -155,7 +155,7 @@ JAVASCRIPT = r"""'use strict';
       row.querySelector('input').focus();
     }
   });
-  const regionNames = new Set(['sources', 'policies', 'operations', 'legacy-sources', 'legacy-pending', 'queue']);
+  const regionNames = new Set(['sources', 'policies', 'operations', 'legacy-sources', 'legacy-pending', 'queue', 'rsshub']);
   let readRevision = 0;
   const refreshReads = async owner => {
     const revision = ++readRevision;
@@ -206,8 +206,11 @@ JAVASCRIPT = r"""'use strict';
     if (!form.reportValidity()) return;
     if (form.dataset.confirm && !window.confirm(form.dataset.confirm)) return;
     const target = event.submitter?.getAttribute('formaction') || form.action;
+    const probe = target.endsWith('/rsshub-probe');
     const submittedRevision = revisions.get(form) || 0;
     const data = new URLSearchParams(new FormData(form));
+    // FormData(form) excludes the clicked submitter; native POST includes it.
+    if (event.submitter?.name) data.append(event.submitter.name, event.submitter.value);
     const deletion = form.hasAttribute('data-delete-form');
     let invalidField = null;
     let feedback = deletion ? dialog.querySelector('[data-delete-feedback]') : feedbackFor(form);
@@ -219,6 +222,11 @@ JAVASCRIPT = r"""'use strict';
       addText('h3', title);
       lines.filter(Boolean).forEach(line => addText('p', line));
     };
+    const probeDetails = payload => {
+      if (payload.checked_url) addText('p', `检测地址：${payload.checked_url}`);
+      if (payload.http_status != null) addText('p', `HTTP 状态：${payload.http_status}`);
+      if (payload.items != null) addText('p', `RSS 条目：${payload.items}`);
+    };
     const buttons = [...form.querySelectorAll('button[type="submit"], button:not([type])')];
     busy.add(form);
     form.setAttribute('aria-busy', 'true');
@@ -229,10 +237,12 @@ JAVASCRIPT = r"""'use strict';
       const envelope = await response.json();
       if (!envelope.ok) {
         const error = envelope.error || {};
-        show(false, `未应用 · ${error.code || response.status}`, [error.message, error.hint,
+        show(false, `${probe ? '只读检测失败' : '未应用'} · ${error.code || response.status}`, [error.message, error.hint,
+          probe ? '没有保存、采集或通知。草稿与版本保持不变；不会自动重试检测。' :
           error.code === 'E_CONFLICT' ? '编辑内容已保留。对照最新配置后手动刷新；不会自动覆盖或重试。' : '输入已保留，可修正后重新提交。']);
+        if (probe) probeDetails(error.details || {});
         const field = [...form.querySelectorAll('input, select')].find(input =>
-          input.type !== 'hidden' && error.message?.includes(input.name.replace(/^[fpng]\./, '')));
+          input.type !== 'hidden' && error.message?.includes(input.name.replace(/^[fpngr]\./, '')));
         if (field) {
           fieldError(field, error.message);
           invalidField = field;
@@ -243,6 +253,12 @@ JAVASCRIPT = r"""'use strict';
       form.querySelectorAll('[aria-invalid]').forEach(input => input.removeAttribute('aria-invalid'));
       form.querySelectorAll('.field-error').forEach(node => { node.textContent = ''; });
       const payload = envelope.data || {};
+      if (probe) {
+        show(true, '只读检测 · 完成', [payload.message,
+          '没有保存地址、采集入队或发送通知；草稿和版本保持不变。', ...(envelope.warnings || [])]);
+        probeDetails(payload);
+        return;
+      }
       const preview = target.includes('notification-preview');
       const dry = payload.dry_run || data.get('dry') === '1';
       show(true, preview ? '只读预览 · 没有应用或发送' : dry ? '校验通过 · 尚未应用' : envelope.changed ? '已应用' : '没有变化',
@@ -283,7 +299,8 @@ JAVASCRIPT = r"""'use strict';
         (await refreshReads(form)).forEach(line => addText('p', line));
       }
     } catch (_) {
-      show(false, '结果未确认', ['连接中断或服务响应不可用。输入已保留，不会自动重试写操作。',
+      if (probe) show(false, '检测结果未确认', ['连接中断或服务响应不可用。没有保存、采集或通知；输入与版本已保留，不会自动重试检测。']);
+      else show(false, '结果未确认', ['连接中断或服务响应不可用。输入已保留，不会自动重试写操作。',
         '先读取最新配置/操作状态核对是否已生效；不要直接重复未知结果的写入。']);
     } finally {
       busy.delete(form);
