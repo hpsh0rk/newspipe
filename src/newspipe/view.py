@@ -48,6 +48,8 @@ DEFAULT_STALE_AFTER = timedelta(hours=30)
 
 #: 心跳词表：状态码 → (人可读标签, 语气)。语气取值 = 面板 Pill 的 tone 集合。
 STATUS_LABELS: dict[str, tuple[str, str]] = {
+    "never": ("从未运行", "muted"),
+    "collected": ("已采集", "ok"),
     "ok": ("已运行", "ok"),
     "nothing_new": ("无新内容", "ok"),
     "state_only": ("只落 state", "ok"),
@@ -64,7 +66,7 @@ STATUS_LABELS: dict[str, tuple[str, str]] = {
     "error": ("故障", "danger"),
 }
 #: 这些状态是「健康但安静」，超期检查只对它们生效（故障状态本来就该红，不必再标超期）。
-HEALTHY = {"ok", "nothing_new", "state_only", "baseline"}
+HEALTHY = {"ok", "nothing_new", "state_only", "baseline", "collected"}
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -102,9 +104,12 @@ def _is_stale(status: str, ts: Any, trigger: str, now: datetime) -> bool:
 
 
 def _source_row(src: config.SourceConfig, store: state.Store, *, now: datetime) -> dict[str, Any]:
+    from newspipe.notification_view import REASONS
     hb = store.status(src.name)
     status = str(hb.get("status") or "never")
-    label, tone = STATUS_LABELS.get(status, (status or "未知", ""))
+    notification_tone = ("danger" if status in {"retry_exhausted", "send_result_unknown"} else
+                         "warn" if status in {"global_budget_exceeded", "budget_attribution_incomplete", "receipt_repair"} else "muted")
+    label, tone = STATUS_LABELS.get(status, (REASONS.get(status, f"未知状态（{status}）"), notification_tone))
     ts = hb.get("ts")
     trigger = src.fetch.trigger
     stale = _is_stale(status, ts, trigger, now)

@@ -184,7 +184,7 @@ def sources_body(payload, schema, actions, page):
         cards.append(f'<article class="source-row" data-source="{E(src["name"])}"><div><h3>{E(src["card_title"])}</h3>'
                      f'<p class="note"><code>{E(src["name"])}</code> · {E(src["adapter"])} · {E(cadence)}</p>'
                      f'<p data-effective="{E(src["name"])}">{E(rule_summary(row["after"], payload["slots"]))}</p></div>'
-                     f'<div class="source-state"><span class="pill {"ok" if src["enabled"] else "warn"}">{E(src["status_label"] if src["enabled"] else "已停用")}</span>'
+                     f'<div class="source-state"><span class="pill {E(src["status_tone"] or "muted") if src["enabled"] else "warn"}">{E(src["status_label"] if src["enabled"] else "已停用")}</span>'
                      f'<span data-pending="{E(src["name"])}">{row["pending"]} 条待通知</span></div><div class="row-actions">{links}</div></article>')
     filter_form = '<form method="get" action="/config" class="source-filters"><label>搜索消息源 '
     filter_form += f'<input name="search" value="{E(page.get("search", ""))}" placeholder="名称、标题、适配器"></label>'

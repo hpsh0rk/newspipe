@@ -53,6 +53,31 @@ class WorkbenchTests(unittest.TestCase):
         self.assertIn('data-source="src"', page)
         self.assertNotIn('data-source="other"', page)
 
+    def test_source_card_uses_health_tone_independently_of_enabled(self):
+        from newspipe import state
+        state.Store(self.news).heartbeat("src", status="send_failed")
+        page = view.config_html(view.build(self.news), schema=config.describe_schema(), actions=self.actions)
+        from html.parser import HTMLParser
+        class Pills(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.pills = []
+                self.active = None
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                if tag == "span" and "pill" in attrs.get("class", "").split():
+                    self.active = attrs["class"]
+            def handle_data(self, data):
+                if self.active:
+                    self.pills.append((self.active, data))
+            def handle_endtag(self, tag):
+                if tag == "span":
+                    self.active = None
+        parsed = Pills()
+        parsed.feed(page)
+        self.assertIn(("pill danger", "发送失败"), parsed.pills)
+        self.assertIn(("pill warn", "已停用"), parsed.pills)
+
     def test_notifications_page_separates_hard_globals_and_editable_templates(self):
         renderer = getattr(view, "notifications_html", None)
         self.assertIsNotNone(renderer, "new notification route must have a focused renderer")
