@@ -36,12 +36,12 @@
 
 **Interfaces:** `notification_binding(form: dict[str, list[str]]) -> dict | None` remains the common source-save/patch/preview translator. Numeric custom values must not become merge-patch deletion markers.
 
-- [ ] Add failing tests: custom `max_cards_per_day` and `min_gap_min` with empty, whitespace or missing values reject before writing (also preview/create); explicit zero persists, explicit inherit removes only its override, empty quiet hours/slots remain meaningful.
-- [ ] Run TARGET. Expected: new empty-custom tests fail because the current action succeeds.
-- [ ] In `notification_binding`, reject a coerced `None` in the custom branch with the field path and an explicit inherit hint. Add schema-derived UI guidance for custom numbers; keep server validation authoritative and inherited controls optional.
-- [ ] Add browser regression: zero save, empty custom rejection with input/selector preserved, then explicit inherit restores template. Both engines, JS and no-JS.
-- [ ] Run UNIT and BROWSER. Expected: all enabled tests pass, no provider effects.
-- [ ] Commit `fix: reject empty custom notification budgets`.
+- [x] Add failing tests: custom `max_cards_per_day` and `min_gap_min` with empty, whitespace or missing values reject before writing (also preview/create); explicit zero persists, explicit inherit removes only its override, empty quiet hours/slots remain meaningful.
+- [x] Run TARGET. Expected: new empty-custom tests fail because the current action succeeds.
+- [x] In `notification_binding`, reject a coerced `None` in the custom branch with the field path and an explicit inherit hint. Add schema-derived UI guidance for custom numbers; keep server validation authoritative and inherited controls optional.
+- [x] Add browser regression: zero save, empty custom rejection with input/selector preserved, then explicit inherit restores template. Both engines, JS and no-JS.
+- [x] Run UNIT and BROWSER. Expected: all enabled tests pass, no provider effects.
+- [x] Commit `fix: reject empty custom notification budgets`.
 
 ## Task 2: Restore Defaults On Explicit Source Numeric Clearing
 
@@ -49,12 +49,12 @@
 
 **Interfaces:** `build_source_body(form, schema=None, *, patch=False) -> dict[str, Any]` preserves existing create behavior. `_source_patch_body` opts into patch semantics and remains shared by preview/save.
 
-- [ ] Add failing tests: existing numeric values clear to defaults (`fetch.interval_min=0.0`, `filter.min_items=1`, `filter.max_items=13`, `enrich.max_body_chars=6000`, legacy cap=12, legacy gap=0.0). Missing preserves, zero stays explicit, create blank omits. Dry/conflict retain bytes; unknown keys, advanced values and other blocks survive.
-- [ ] Run TARGET. Expected: clearing tests fail because old keys remain.
-- [ ] Preserve `None` only for explicit blank numeric fields in patch mode; use patch mode for source preview/save. Update builder docstrings and show blank/default help using each schema field's default, not duplicate constants.
-- [ ] Add browser regression: clear max_items and interval, preview without writing, save and reload shows defaults. Verify independent advanced values survive. Both engines.
-- [ ] Run UNIT and BROWSER. Expected: all enabled tests pass, no provider effects.
-- [ ] Commit `fix: apply explicit numeric clearing in source patches`.
+- [x] Add failing tests: existing numeric values clear to defaults (`fetch.interval_min=0.0`, `filter.min_items=1`, `filter.max_items=13`, `enrich.max_body_chars=6000`, legacy cap=12, legacy gap=0.0). Missing preserves, zero stays explicit, create blank omits. Dry/conflict retain bytes; unknown keys, advanced values and other blocks survive.
+- [x] Run TARGET. Expected: clearing tests fail because old keys remain.
+- [x] Preserve `None` only for explicit blank numeric fields in patch mode; use patch mode for source preview/save. Update builder docstrings and show blank/default help using each schema field's default, not duplicate constants.
+- [x] Add browser regression: clear max_items and interval, preview without writing, save and reload shows defaults. Verify independent advanced values survive. Both engines.
+- [x] Run UNIT and BROWSER. Expected: all enabled tests pass, no provider effects.
+- [x] Commit `fix: apply explicit numeric clearing in source patches`.
 
 ## Task 3: Require Server-Side Web Deletion Confirmation
 
@@ -62,17 +62,17 @@
 
 **Interfaces:** A shared confirmation guard accepts exactly `confirm_delete: ["1"]` before translating source-remove and policy-remove. Direct CLI deletion remains unchanged.
 
-- [ ] Add failing action and HTTP tests: absent/empty/false/arbitrary/repeated confirmation rejects and retains bytes; valid confirmation permits dry-run, still enforces hash conflicts and referenced-policy protection, and allows deletion.
-- [ ] Run TARGET. Expected: unconfirmed deletion tests fail because current handlers delete.
-- [ ] Add shared confirmation helper; route policy removal through a named argv builder. Update previously confirmed-deletion test inputs, not their assertions.
-- [ ] Add browser regression: unchecked delete produces no request, confirmed source and unreferenced policy deletion works in JS/no-JS; PRG refresh never replays.
-- [ ] Record clearing and deletion semantics in the design contract.
-- [ ] Run UNIT and BROWSER. Expected: all enabled tests pass, no provider effects.
-- [ ] Commit `fix: enforce Web deletion confirmation on the server`.
+- [x] Add failing action and HTTP tests: absent/empty/false/arbitrary/repeated confirmation rejects and retains bytes; valid confirmation permits dry-run, still enforces hash conflicts and referenced-policy protection, and allows deletion.
+- [x] Run TARGET. Expected: unconfirmed deletion tests fail because current handlers delete.
+- [x] Add shared confirmation helper; route policy removal through a named argv builder. Update previously confirmed-deletion test inputs, not their assertions.
+- [x] Add browser regression: unchecked delete produces no request, confirmed source and unreferenced policy deletion works in JS/no-JS; PRG refresh never replays.
+- [x] Record clearing and deletion semantics in the design contract.
+- [x] Run UNIT and BROWSER. Expected: all enabled tests pass, no provider effects.
+- [x] Commit `fix: enforce Web deletion confirmation on the server`.
 
 ## Final Acceptance
 
-- [ ] One fresh scoped review of `8cc94ad..HEAD`, then one TDD fix pass for Important/Critical findings if any.
-- [ ] Repeat UNIT for Python 3.11 and 3.12; run integrated Python 3.13 with `NEWSPIPE_BROWSER_TESTS=1 NEWSPIPE_REQUIRE_JS_TESTS=1` and extras `.[all,browser-test]`. Expected: all enabled tests pass with zero integrated skips.
-- [ ] Run `python3 scripts/scan_secrets.py` and `git diff --check`. Expected: clean.
-- [ ] Record acceptance evidence, commit documentation, clean only this plan's scratch workspace, report local commits and live-validation limitations.
+- [x] One fresh scoped review of `8cc94ad..HEAD`, then one TDD fix pass for Important/Critical findings if any.
+- [x] Repeat UNIT for Python 3.11 and 3.12; run integrated Python 3.13 with `NEWSPIPE_BROWSER_TESTS=1 NEWSPIPE_REQUIRE_JS_TESTS=1` and extras `.[all,browser-test]`. Expected: all enabled tests pass with zero integrated skips.
+- [x] Run `python3 scripts/scan_secrets.py` and `git diff --check`. Expected: clean.
+- [x] Record acceptance evidence, commit documentation, clean only this plan's scratch workspace, report local commits and live-validation limitations.
