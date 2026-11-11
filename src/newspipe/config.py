@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import os
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,22 @@ from typing import Any
 import yaml  # noqa: E402
 
 from newspipe import hooks as hooks_lib
+from newspipe import policy as policy_lib
 from newspipe.errors import ConfigError  # noqa: E402
+
+
+class _UniqueLoader(yaml.SafeLoader):
+    def construct_mapping(self, node, deep=False):
+        keys = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            try:
+                if key in keys:
+                    raise ConfigError(f"sources.yaml: 重复 YAML 键 {key!r}，请保留唯一声明")
+                keys.add(key)
+            except TypeError as exc:
+                raise ConfigError("sources.yaml: 映射键必须是标量") from exc
+        return super().construct_mapping(node, deep=deep)
 
 def data_root() -> Path:
     """数据根目录。
@@ -114,6 +130,8 @@ def _num(value: Any, *, where: str, default: float) -> float:
         return default
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ConfigError(f"{where} 需要数字，得到 {value!r}")
+    if not math.isfinite(value):
+        raise ConfigError(f"{where} 需要有限数字，得到 {value!r}")
     return float(value)
 
 
@@ -229,13 +247,16 @@ class DeliverCfg:
         budget = raw.get("budget") or {}
         if not isinstance(budget, dict):
             raise ConfigError(f"{where}.budget 需要映射")
+        quiet = policy_lib.quiet_window(raw.get("quiet_hours", ""), where=f"{where}.quiet_hours")
+        maximum = _int(budget.get("max_cards_per_day"),
+                       where=f"{where}.budget.max_cards_per_day", default=12)
+        gap = _num(budget.get("min_gap_min"), where=f"{where}.budget.min_gap_min", default=0.0)
+        if maximum < 0 or gap < 0:
+            raise ConfigError(f"{where}.budget: 上限和间隔不能为负")
         return cls(
             form=_enum(raw.get("form"), FORMS, where=f"{where}.form", default="card"),
             priority=_enum(raw.get("priority"), PRIORITIES, where=f"{where}.priority", default="normal"),
-            quiet_hours=str(raw.get("quiet_hours") or ""),
-            max_cards_per_day=_int(budget.get("max_cards_per_day"),
-                                   where=f"{where}.budget.max_cards_per_day", default=12),
-            min_gap_min=_num(budget.get("min_gap_min"), where=f"{where}.budget.min_gap_min", default=0.0),
+            quiet_hours=quiet, max_cards_per_day=maximum, min_gap_min=gap,
         )
 
 
@@ -252,6 +273,7 @@ class SourceConfig:
     deliver: DeliverCfg
     card: dict[str, Any] = field(default_factory=dict)
     extra: dict[str, Any] = field(default_factory=dict)
+    notify: policy_lib.NotifyBinding | None = None
 
     @property
     def card_title(self) -> str:
@@ -408,7 +430,12 @@ def describe_schema(news_dir: Path | None = None) -> dict[str, Any]:
         {"path": "card.group_by", "axis": "card", "label": "分组字段", "type": "str", "default": "",
          "advanced": True, "help": "如 category；留空 = 不分组"},
     ]
+    policy_fields, notification_fields = policy_lib.describe_fields()
+    for entry in policy_fields:
+        if entry["type"] == "slots":
+            entry["choices"] = slots
     return {"contract_version": 1, "axes": axes, "fields": f, "adapters": adapter_names(),
+            "policy_fields": policy_fields, "notification_fields": notification_fields,
             "slots": slots,
             "globals": {"note": "chat 与 slots 是全局设置，不是某个源的字段；CLI 目前没有写这条路径",
                         "editable": False}}
@@ -500,6 +527,8 @@ class Config:
     #: 第三方卡片 hook（`hooks.yaml`）。缺失 = 空集合 = 行为与没有 hook 时逐字节一致。
     #: `hooks.problems` 里是被跳过的声明（doctor 会报出来，不静默）。
     hooks: hooks_lib.HookSet = field(default_factory=hooks_lib.HookSet)
+    policies: dict[str, policy_lib.NotificationPolicy] = field(default_factory=dict)
+    notifications: policy_lib.NotificationGlobals | None = None
 
     def enabled_sources(self) -> list[SourceConfig]:
         return [s for s in self.sources.values() if s.enabled]
@@ -518,8 +547,8 @@ class Config:
 
 
 def _parse_sources(raw: Any, *, news_dir: Path) -> dict[str, SourceConfig]:
-    if not isinstance(raw, dict) or not raw:
-        raise ConfigError(f"{news_dir / 'sources.yaml'}: sources 段为空")
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{news_dir / 'sources.yaml'}: sources 需要映射（空集合请用 {{}}）")
     known = available_adapters()
     out: dict[str, SourceConfig] = {}
     for name, body in raw.items():
@@ -532,7 +561,7 @@ def _parse_sources(raw: Any, *, news_dir: Path) -> dict[str, SourceConfig]:
         if known and adapter not in known:
             raise ConfigError(f"{where}: 未知适配器 {adapter!r}，可用：{', '.join(known)}")
         reserved = {"adapter", "enabled", "tier", "first_party", "fetch", "filter",
-                    "enrich", "deliver", "card"}
+                    "enrich", "deliver", "card", "notify"}
         out[name] = SourceConfig(
             name=name,
             adapter=adapter,
@@ -545,6 +574,8 @@ def _parse_sources(raw: Any, *, news_dir: Path) -> dict[str, SourceConfig]:
             deliver=DeliverCfg.parse(body.get("deliver"), where=f"{where}.deliver"),
             card=dict(body.get("card") or {}),
             extra={k: v for k, v in body.items() if k not in reserved},
+            notify=(policy_lib.NotifyBinding.parse(body["notify"], where=f"{where}.notify")
+                    if "notify" in body else None),
         )
     return out
 
@@ -562,8 +593,8 @@ def load(news_dir: Path | None = None, *, sources_text: str | None = None,
     if sources_text is None and not sources_path.is_file():
         raise ConfigError(f"缺少 {sources_path}")
     try:
-        raw = (yaml.safe_load(sources_text) if sources_text is not None
-               else yaml.safe_load(sources_path.read_text(encoding="utf-8"))) or {}
+        text = sources_text if sources_text is not None else sources_path.read_text(encoding="utf-8")
+        raw = yaml.load(text, Loader=_UniqueLoader) or {}
     except yaml.YAMLError as exc:
         raise ConfigError(f"{sources_path} 解析失败：{exc}") from exc
     if not isinstance(raw, dict):
@@ -573,10 +604,21 @@ def load(news_dir: Path | None = None, *, sources_text: str | None = None,
     if not isinstance(chat, str) or not chat.startswith("oc_"):
         raise ConfigError(f"{sources_path}: chat 必须是 oc_ 开头的群 ID")
 
-    slots_raw = raw.get("slots") or {}
-    if not isinstance(slots_raw, dict) or not slots_raw:
-        raise ConfigError(f"{sources_path}: slots 段为空")
-    slots = {str(k): str(v) for k, v in slots_raw.items()}
+    slots_raw = raw.get("slots")
+    if not isinstance(slots_raw, dict):
+        raise ConfigError(f"{sources_path}: slots 需要映射（空集合请用 {{}}）")
+    slots = {policy_lib.identifier(k, where="slots"): policy_lib.clock(v, where=f"slots.{k}")
+             for k, v in slots_raw.items()}
+
+    policies_raw = raw.get("policies", {})
+    if not isinstance(policies_raw, dict):
+        raise ConfigError("policies 需要映射")
+    policies = {policy_lib.identifier(k, where="policies"): policy_lib.NotificationPolicy.parse(
+        v, where=f"policies.{k}") for k, v in policies_raw.items()}
+    for name, template in policies.items():
+        template.validate(where=f"policies.{name}", slots=slots)
+    notifications = (policy_lib.NotificationGlobals.parse(raw["notifications"])
+                     if "notifications" in raw else None)
 
     sources = _parse_sources(raw.get("sources"), news_dir=news_dir)
     for src in sources.values():
@@ -593,9 +635,13 @@ def load(news_dir: Path | None = None, *, sources_text: str | None = None,
         if not isinstance(models, dict):
             raise ConfigError(f"{models_path}: 顶层需要映射")
 
-    return Config(chat=chat, slots=slots, sources=sources, models=models,
+    result = Config(chat=chat, slots=slots, sources=sources, models=models,
+                  policies=policies, notifications=notifications,
                   service=load_service(news_dir),
                   hooks=hooks_lib.load_from(news_dir / "hooks.yaml", text=hooks_text))
+    for src in sources.values():
+        policy_lib.resolve(result, src)
+    return result
 
 
 def summarize(cfg: Config) -> list[dict[str, Any]]:
