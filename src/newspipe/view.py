@@ -809,7 +809,7 @@ def ops_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
             "</tr>")
     sources_section = (
         '<h2>信源 <span class="hint">启停与手动补跑；「为什么是这样」回驾驶舱点开信源行</span></h2>'
-        '<table><thead><tr><th>源</th><th>心跳</th><th>操作</th></tr></thead><tbody>'
+        '<table data-read-region="legacy-sources"><thead><tr><th>源</th><th>心跳</th><th>操作</th></tr></thead><tbody>'
         + ("".join(rows) or '<tr><td colspan="3" class="empty">注册表里还没有信源</td></tr>')
         + "</tbody></table>")
 
@@ -835,7 +835,9 @@ def ops_html(view: dict[str, Any], *, actions: dict[str, Any] | None = None,
             + "".join(pend_blocks) + "</details>")
 
     from newspipe.workbench import operation_controls
-    body = _banner(flash) + operation_controls(view, token) + '<details><summary>兼容操作 · 旧式跑一轮</summary>' + toolbar + sources_section + pending_section + '</details>' + queue_section
+    body = (_banner(flash) + operation_controls(view, token) + '<details><summary>兼容操作 · 旧式跑一轮</summary>'
+            + toolbar + sources_section + '<div data-read-region="legacy-pending">' + pending_section + '</div></details>'
+            + '<section data-read-region="queue">' + queue_section + '</section>')
     return _page(tab="ops", sub_meta=view, svc=svc, body=body)
 
 

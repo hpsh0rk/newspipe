@@ -196,7 +196,7 @@ def sources_body(payload, schema, actions, page):
     filter_form += '<button class="btn">筛选</button><a href="/config">清除</a></form>'
     body = ('<div class="page-intro"><div><p class="eyebrow">SOURCE LIBRARY</p><p class="lead">采集什么，与何时打扰你，是两件事。</p></div>'
             '<a class="btn primary" href="/config?new=1#new">添加消息源</a></div>' + filter_form
-            + '<h2>信源清单</h2><div class="source-list">' + ("".join(cards) or '<p class="empty">还没有匹配的消息源。先创建通知策略，再添加消息源。</p>') + '</div>')
+            + '<h2>信源清单</h2><div class="source-list" data-read-region="sources">' + ("".join(cards) or '<p class="empty">还没有匹配的消息源。先创建通知策略，再添加消息源。</p>') + '</div>')
     if page.get("copy") and token:
         body += '<h2 id="source-copy">复制消息源 · 新源默认停用</h2>' + _start("source-copy", token, payload["sources_hash"], "/config")
         body += _hidden("name", page["copy"]) + '<label class="field">新的稳定 ID<input name="new_name" required pattern="[A-Za-z0-9_][A-Za-z0-9_-]*"></label>' + _buttons(preview=False) + '</form>'
@@ -230,7 +230,7 @@ def notifications_body(payload, schema, actions, page):
         body += '</div><button class="btn" type="button" data-add-slot>添加槽位行</button><p class="note">移除仍被引用的槽位会被拒绝；先改信源采集槽位及策略。</p></details>' + _buttons() + '</form>'
     else:
         body += '<p class="notice">写操作未开启，配置表单不渲染。</p>'
-    body += '</section><div class="section-heading"><h2>通知策略模板</h2><a class="btn primary" href="/notifications?new=1#policy-editor">创建策略</a></div><div class="policy-grid">'
+    body += '</section><div class="section-heading"><h2>通知策略模板</h2><a class="btn primary" href="/notifications?new=1#policy-editor">创建策略</a></div><div class="policy-grid" data-read-region="policies">'
     for ident, template in snap["policies"].items():
         values = template["values"]
         rule = {"policy_id": ident, "values": values}
@@ -289,7 +289,7 @@ def notification_status(payload):
 
 
 def operation_controls(payload, token):
-    body = '<section><h2>采集与通知</h2><p class="note">采集只入待处理队列；通知只读取队列，不抓取。两者都保留当前策略。手动越过汇总时钟仍不能越过暂停或预算。</p>'
+    body = '<section data-read-region="operations"><h2>采集与通知</h2><p class="note">采集只入待处理队列；通知只读取队列，不抓取。两者都保留当前策略。手动越过汇总时钟仍不能越过暂停或预算。</p>'
     for row in payload.get("notification", {}).get("sources", []):
         name = row["source"]
         body += f'<article class="operation-row" id="source-{E(name)}"><h3>{E(name)}</h3><p>{E(row["reason_label"])} · {row["pending"]} 条待处理</p>'

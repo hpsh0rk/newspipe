@@ -9,21 +9,57 @@ JAVASCRIPT = r"""'use strict';
     dirty.add(form);
     revisions.set(form, (revisions.get(form) || 0) + 1);
   };
-  const result = document.getElementById('action-result');
-  let feedback = result;
-  const addText = (tag, content, parent = feedback) => {
+  const appendText = (tag, content, parent) => {
     const node = document.createElement(tag);
     node.textContent = content;
     parent.append(node);
     return node;
   };
-  const show = (ok, title, lines) => {
-    feedback.replaceChildren();
-    feedback.className = `banner ${ok ? 'ok' : 'err'}`;
-    feedback.hidden = false;
-    addText('h3', title);
-    lines.filter(Boolean).forEach(line => addText('p', line));
-    feedback.focus({preventScroll: true});
+  const feedbackNodes = new WeakMap();
+  const placements = new WeakMap();
+  const placeFeedback = (feedback, region, placement) => {
+    const cards = [...region.querySelectorAll('.source-row, .policy-card, .operation-row, tr')];
+    const target = cards.find(card => placement.key && card.getAttribute(placement.key) === placement.value)
+      || cards[Math.min(placement.index, cards.length - 1)];
+    if (target?.tagName === 'TR') {
+      const row = document.createElement('tr');
+      const cell = document.createElement('td');
+      cell.colSpan = target.children.length;
+      cell.append(feedback);
+      row.append(cell);
+      target.after(row);
+    } else if (target) target.after(feedback);
+    else region.append(feedback);
+  };
+  const feedbackFor = context => {
+    let feedback = feedbackNodes.get(context);
+    if (!feedback?.isConnected) {
+      feedback = document.createElement('div');
+      feedback.setAttribute('data-action-feedback', '');
+      feedback.setAttribute('role', 'status');
+      feedback.setAttribute('aria-live', 'polite');
+      feedback.tabIndex = -1;
+      feedbackNodes.set(context, feedback);
+      const card = context.closest('.source-row, .policy-card, .operation-row, tr');
+      const region = card?.closest('[data-read-region]');
+      if (region) {
+        const key = ['data-source', 'data-policy', 'id'].find(key => card.hasAttribute(key));
+        const cards = [...region.querySelectorAll('.source-row, .policy-card, .operation-row, tr')];
+        const placement = {key, value: key ? card.getAttribute(key) : '', index: cards.indexOf(card)};
+        placements.set(feedback, placement);
+        placeFeedback(feedback, region, placement);
+      } else context.append(feedback);
+    }
+    return feedback;
+  };
+  const expose = (feedback, focus = true) => {
+    const old = document.getElementById('action-result');
+    if (old && old !== feedback) old.removeAttribute('id');
+    feedback.id = 'action-result';
+    if (focus) feedback.focus({preventScroll: true});
+    const rect = feedback.getBoundingClientRect();
+    const top = document.querySelector('nav')?.getBoundingClientRect().bottom || 0;
+    if (rect.top < top || rect.bottom > window.innerHeight) feedback.scrollIntoView({block: 'nearest', behavior: 'instant'});
   };
   const override = node => {
     const select = node.querySelector('select[name^="inherit."]');
@@ -114,28 +150,47 @@ JAVASCRIPT = r"""'use strict';
       row.querySelector('input').focus();
     }
   });
-  const refreshReads = async () => {
+  const regionNames = new Set(['sources', 'policies', 'operations', 'legacy-sources', 'legacy-pending', 'queue']);
+  let readRevision = 0;
+  const refreshReads = async owner => {
+    const revision = ++readRevision;
+    const warnings = [];
     try {
-      const response = await fetch(document.body.dataset.viewPath, {headers: {'Accept': 'application/json'}, cache: 'no-store'});
-      if (!response.ok) throw new Error('read failed');
-      const data = await response.json();
-      const rows = data.notification?.sources || [];
-      document.querySelectorAll('[data-pending]').forEach(node => {
-        const row = rows.find(item => item.source === node.dataset.pending);
-        if (row) node.textContent = `${row.pending} 条待通知`;
+      const response = await fetch(location.pathname + location.search, {headers: {'Accept': 'text/html'}, cache: 'no-store', credentials: 'same-origin'});
+      if (!response.ok || !response.headers.get('Content-Type')?.includes('text/html')) throw new Error('read failed');
+      const page = new DOMParser().parseFromString(await response.text(), 'text/html');
+      if (revision !== readRevision) return warnings;
+      document.querySelectorAll('[data-read-region]').forEach(region => {
+        const name = region.dataset.readRegion;
+        if (!regionNames.has(name)) return;
+        const fresh = [...page.querySelectorAll('[data-read-region]')].filter(node => node.dataset.readRegion === name);
+        if (fresh.length !== 1) throw new Error('missing region');
+        // Check after the read: controls may become dirty while it is in flight.
+        if ([...region.querySelectorAll('form')].some(form => dirty.has(form) || (busy.has(form) && form !== owner))) {
+          warnings.push('部分列表含未保存或进行中的操作，已保留原值和版本；核对后手动刷新。');
+          return;
+        }
+        const next = fresh[0];
+        if (next.querySelector('script, iframe, object, embed, link, style, meta, base, template') ||
+            [next, ...next.querySelectorAll('*')].some(node => node.getAttributeNames().some(attr => /^on/i.test(attr) || attr === 'srcdoc'))) {
+          throw new Error('unsafe region');
+        }
+        const messages = [...region.querySelectorAll('[data-action-feedback]')];
+        const replacement = document.importNode(next, true);
+        const opened = [...region.querySelectorAll('details')].map(node => node.open);
+        replacement.querySelectorAll('details').forEach((node, index) => { if (opened[index]) node.open = true; });
+        region.replaceWith(replacement);
+        messages.forEach(message => placeFeedback(message, replacement, placements.get(message)));
       });
-      document.querySelectorAll('[data-effective]').forEach(node => {
-        const row = rows.find(item => item.source === node.dataset.effective);
-        if (row) node.textContent = row.summary;
-      });
-      document.querySelectorAll('[data-policy-summary]').forEach(node => {
-        const row = data.notification?.policies[node.dataset.policySummary];
-        if (row) node.textContent = row.summary;
-      });
-      document.querySelectorAll('[data-global-count]').forEach(node => {
-        node.textContent = data.notification?.global_budget.cards ?? 0;
-      });
-    } catch (_) { addText('p', '写入已确认，但看板刷新失败；可手动刷新读取最新状态。'); }
+      for (const selector of ['[data-effective]', '[data-policy-summary]', '[data-global-count]']) {
+        document.querySelectorAll(selector).forEach(node => {
+          const match = [...page.querySelectorAll(selector)].find(fresh =>
+            fresh.dataset.effective === node.dataset.effective && fresh.dataset.policySummary === node.dataset.policySummary);
+          if (match) node.textContent = match.textContent;
+        });
+      }
+    } catch (_) { warnings.push('写入已确认，但看板刷新失败；可手动刷新读取最新状态。不要重复已确认的写操作。'); }
+    return [...new Set(warnings)];
   };
   document.addEventListener('submit', async event => {
     const form = event.target;
@@ -148,8 +203,17 @@ JAVASCRIPT = r"""'use strict';
     const target = event.submitter?.getAttribute('formaction') || form.action;
     const submittedRevision = revisions.get(form) || 0;
     const data = new URLSearchParams(new FormData(form));
-    feedback = form.hasAttribute('data-delete-form') ? dialog.querySelector('[data-delete-feedback]') : result;
-    const scroll = window.scrollY;
+    const deletion = form.hasAttribute('data-delete-form');
+    let invalidField = null;
+    let feedback = deletion ? dialog.querySelector('[data-delete-feedback]') : feedbackFor(form);
+    const addText = (tag, content) => appendText(tag, content, feedback);
+    const show = (ok, title, lines) => {
+      feedback.replaceChildren();
+      feedback.className = `banner ${ok ? 'ok' : 'err'}`;
+      feedback.hidden = false;
+      addText('h3', title);
+      lines.filter(Boolean).forEach(line => addText('p', line));
+    };
     const buttons = [...form.querySelectorAll('button[type="submit"], button:not([type])')];
     busy.add(form);
     form.setAttribute('aria-busy', 'true');
@@ -166,6 +230,7 @@ JAVASCRIPT = r"""'use strict';
           input.type !== 'hidden' && error.message?.includes(input.name.replace(/^[fpng]\./, '')));
         if (field) {
           fieldError(field, error.message);
+          invalidField = field;
           field.focus({preventScroll: true});
         }
         return;
@@ -203,8 +268,14 @@ JAVASCRIPT = r"""'use strict';
         // Only this reconciled form gets a new hash; stale sibling editors keep theirs.
         const hash = form.elements.namedItem('base_hash');
         if (hash && payload.hash) hash.value = payload.hash;
-        await refreshReads();
-        if (form.hasAttribute('data-delete-form')) dialog.close();
+        if (deletion) {
+          const outside = feedbackFor(deleteTrigger);
+          outside.className = feedback.className;
+          outside.replaceChildren(...feedback.childNodes);
+          feedback = outside;
+          dialog.close();
+        }
+        (await refreshReads(form)).forEach(line => addText('p', line));
       }
     } catch (_) {
       show(false, '结果未确认', ['连接中断或服务响应不可用。输入已保留，不会自动重试写操作。',
@@ -213,7 +284,8 @@ JAVASCRIPT = r"""'use strict';
       busy.delete(form);
       form.removeAttribute('aria-busy');
       buttons.forEach(button => { button.disabled = form.dataset.created === '1'; });
-      window.scrollTo({top: scroll, behavior: 'instant'});
+      if (deletion && dialog.open) feedback.focus({preventScroll: true});
+      else expose(feedback, !invalidField);
     }
   });
 })();

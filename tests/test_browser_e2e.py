@@ -143,6 +143,8 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 sources = config.load(fixture.news_dir).sources
                 self.assertFalse(sources["research_copy"].enabled)
                 self.assertEqual(sources["research_copy"].notify.policy, "digest")
+                self.expect(page.locator('[data-source="research_copy"]')).to_be_visible()
+                self.expect(page.locator("#action-result")).to_be_in_viewport()
                 self.expect(form.get_by_role("button", name="验证 / 保存")).to_be_disabled()
 
     def test_policy_save_copy_and_grouped_validation_feedback(self):
@@ -154,12 +156,14 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 saved = self.submit(page, form)
                 self.assertTrue(saved["ok"], saved)
                 self.assertEqual(config.load(fixture.news_dir).policies["live"].label, "Custom live policy")
+                self.expect(page.locator('[data-policy="live"] h3')).to_have_text("Custom live policy")
                 page.goto(fixture.url + "/notifications?copy=live#policy-editor")
                 form = page.locator('form[action="/api/actions/policy-save"]')
                 form.locator('[name="name"]').fill("live_copy")
                 form.locator('[name="dry"]').uncheck()
                 self.assertTrue(self.submit(page, form)["ok"])
                 self.assertIn("live_copy", config.load(fixture.news_dir).policies)
+                self.expect(page.locator('[data-policy="live_copy"]')).to_be_visible()
                 page.goto(fixture.url + "/notifications?edit=live#policy-editor")
                 form = page.locator('form[action="/api/actions/policy-save"]')
                 form.locator('[name="p.mode"]').select_option("digest")
@@ -216,13 +220,12 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 self.assertTrue(result.ok, result.as_dict())
                 button = form.get_by_role("button", name="验证 / 保存")
                 button.scroll_into_view_if_needed()
-                scroll = page.evaluate("scrollY")
                 stale_hash = form.locator('[name="base_hash"]').input_value()
                 failed = self.submit(page, form)
                 self.assertEqual(failed["error"]["code"], "E_CONFLICT")
                 self.expect(field).to_have_value("Keep this edit")
                 self.assertEqual(form.locator('[name="base_hash"]').input_value(), stale_hash)
-                self.assertAlmostEqual(page.evaluate("scrollY"), scroll, delta=2)
+                self.expect(page.locator("#action-result")).to_be_in_viewport()
                 self.expect(form.locator("details").filter(has=page.get_by_text("自定义覆盖 · 每个字段可独立继承", exact=True))).to_have_attribute("open", "")
                 attempts = []
                 def abort(route):
@@ -233,9 +236,112 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 self.expect(page.locator("#action-result")).to_contain_text("结果未确认")
                 self.expect(form).not_to_have_attribute("aria-busy", "true")
                 self.expect(field).to_have_value("Keep this edit")
-                self.assertAlmostEqual(page.evaluate("scrollY"), scroll, delta=2)
+                self.expect(page.locator("#action-result")).to_be_in_viewport()
                 self.assertEqual(len(attempts), 1)
                 self.assertEqual(self.source_label(fixture), "研究与论文")
+
+    def test_consecutive_toggles_refresh_cards_without_rebasing_dirty_editor(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                form = self.editor(fixture, page)
+                field = form.locator('[name="f.feed_label"]')
+                field.fill("Unsaved draft")
+                old_hash = form.locator('[name="base_hash"]').input_value()
+                row = page.locator('[data-source="reading"]')
+                with page.expect_response(lambda r: "/api/actions/source-toggle" in r.url):
+                    row.get_by_role("button", name="启用", exact=True).click()
+                self.expect(row.get_by_role("button", name="停用", exact=True)).to_be_visible()
+                self.expect(page.locator("#action-result")).to_be_in_viewport()
+                with page.expect_response(lambda r: "/api/actions/source-toggle" in r.url) as response:
+                    row.get_by_role("button", name="停用", exact=True).click()
+                self.assertTrue(response.value.json()["ok"])
+                self.expect(row.locator(".pill")).to_have_text("已停用")
+                self.expect(field).to_have_value("Unsaved draft")
+                self.assertEqual(form.locator('[name="base_hash"]').input_value(), old_hash)
+
+    def test_confirmed_write_read_failure_is_visible_without_write_retry(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                form = self.editor(fixture, page)
+                form.locator('[name="f.feed_label"]').fill("Saved despite read failure")
+                form.locator('[name="dry"]').uncheck()
+                attempts = []
+                page.on("request", lambda r: attempts.append(r.url) if r.method == "POST" else None)
+                page.route("**/config?edit=research", lambda route: route.abort())
+                self.assertTrue(self.submit(page, form)["ok"])
+                self.expect(page.locator("#action-result")).to_contain_text("写入已确认")
+                self.expect(page.locator("#action-result")).to_be_in_viewport()
+                self.assertEqual(self.source_label(fixture), "Saved despite read failure")
+                self.assertEqual(len(attempts), 1)
+
+    def test_read_reconciliation_preserves_dirty_controls_inside_operations(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                page.goto(fixture.url + "/ops")
+                notify = page.locator('#source-research form[action="/api/actions/notify"]')
+                notify.locator('[name="bypass_clock"]').check()
+                old_hash = notify.locator('[name="base_hash"]').input_value()
+                collect = page.locator('#source-reading form[action="/api/actions/collect"]')
+                self.assertTrue(self.submit(page, collect, "只采集一次")["ok"])
+                self.expect(notify.locator('[name="bypass_clock"]')).to_be_checked()
+                self.assertEqual(notify.locator('[name="base_hash"]').input_value(), old_hash)
+                self.expect(page.locator("#action-result")).to_contain_text("未保存")
+
+    def test_delete_pending_blocks_escape_cancel_and_duplicate_post(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                page.goto(fixture.url + "/config")
+                held = []
+                def hold(route):
+                    held.append((route, route.fetch()))
+                    page.evaluate("document.body.dataset.readHeld = '1'")
+                page.route("**/api/actions/source-remove", hold)
+                page.locator('[data-source="reading"]').get_by_role("link", name="删除", exact=True).click()
+                dialog = page.get_by_role("dialog")
+                dialog.get_by_role("button", name="确认删除", exact=True).click()
+                self.expect(page.locator("body")).to_have_attribute("data-read-held", "1")
+                self.expect(dialog.get_by_role("button", name="确认删除", exact=True)).to_be_disabled()
+                page.keyboard.press("Escape")
+                dialog.get_by_role("button", name="取消", exact=True).click()
+                self.expect(dialog).to_be_visible()
+                dialog.locator("form").evaluate("form => form.dispatchEvent(new Event('submit', {bubbles:true, cancelable:true}))")
+                self.assertEqual(len(held), 1)
+                held[0][0].fulfill(response=held[0][1])
+                self.expect(dialog).not_to_be_visible()
+                self.expect(page.locator('[data-source="reading"]')).to_have_count(0)
+
+    def test_dirty_during_read_is_preserved_and_active_content_is_rejected(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                page.goto(fixture.url + "/ops")
+                held = []
+                def hold(route):
+                    held.append((route, route.fetch()))
+                    page.evaluate("document.body.dataset.readHeld = '1'")
+                page.route("**/ops", hold)
+                collect = page.locator('#source-reading form[action="/api/actions/collect"]')
+                collect.get_by_role("button", name="只采集一次", exact=True).click()
+                notify = page.locator('#source-research form[action="/api/actions/notify"]')
+                self.expect(collect).to_have_attribute("aria-busy", "true")
+                self.expect(page.locator("body")).to_have_attribute("data-read-held", "1")
+                notify.locator('[name="bypass_clock"]').check()
+                self.assertEqual(len(held), 1)
+                held[0][0].fulfill(response=held[0][1])
+                self.expect(collect).not_to_have_attribute("aria-busy", "true")
+                self.expect(notify.locator('[name="bypass_clock"]')).to_be_checked()
+                page.unroute("**/ops")
+                page.goto(fixture.url + "/config")
+                def inject(route):
+                    response = route.fetch()
+                    text = response.text().replace('data-read-region="sources">',
+                        'data-read-region="sources" onclick="window.injected=true">')
+                    route.fulfill(response=response, body=text)
+                page.route("**/config", inject)
+                row = page.locator('[data-source="reading"]')
+                row.get_by_role("button", name="启用", exact=True).click()
+                self.expect(page.locator("#action-result")).to_contain_text("刷新失败")
+                self.assertFalse(page.evaluate("Boolean(window.injected)"))
+                self.assertTrue(config.load(fixture.news_dir).sources["reading"].enabled)
 
     def test_custom_budget_blank_is_rejected_until_explicit_inheritance(self):
         for engine in self.browsers:
@@ -490,6 +596,8 @@ class WorkbenchBrowserTests(unittest.TestCase):
                         form = page.locator(f'form[action="/api/actions/{action}"]')
                         if javascript:
                             self.assertTrue(self.submit(page, form, "确认删除")["ok"])
+                            self.expect(card).to_have_count(0)
+                            self.expect(page.locator("#action-result")).to_be_in_viewport()
                         else:
                             with page.expect_navigation():
                                 form.get_by_role("button", name="确认删除", exact=True).click()
