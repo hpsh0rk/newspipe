@@ -240,7 +240,7 @@ newspipe view --json     # 契约：每源心跳（原始状态+中文标签+语
 newspipe view --html     # 同一份数据的服务端渲染页（无前端构建链）
 ```
 
-`GET /view` 是只读 JSON 契约；**页面**分四个 Tab（同一个 builder + 同一份数据，服务端路由，
+`GET /view` 是只读 JSON 契约；**页面**分五个 Tab（同一个 builder + 同一份数据，服务端路由，
 可深链、可加书签、无前端构建）：
 
 | 路由 | Tab | 内容 |
@@ -248,18 +248,21 @@ newspipe view --html     # 同一份数据的服务端渲染页（无前端构�
 | `GET /` | 驾驶舱 | 全局总览：KPI、**近 14 天趋势**、**最近入库**（最新 8 条标题）、信源心跳表、**诊断抽屉**、今日批次。**只读**，一个表单都没有 |
 | `GET /items` | 条目 | **内容浏览**：近 3/7/14 天所有条目 + 服务端筛选（关键词/源/状态），批次列可点进详情 |
 | `GET /batch/<日期>/<文件>` | 条目 | **批次详情**：一个批次里到底有哪些条目（标题/发布者/分类/分数/摘要/原文链接/状态） |
-| `GET /config` | 配置 | 信源增删改（表单由引擎 schema 生成）+ RSS 搜索/订阅 |
-| `GET /ops` | 运维 | 管理动作：跑一轮、启停信源、⭐标记已入库（回执/兜底）、事件已消费、现在发队列 |
+| `GET /config` | 消息源 | 搜索/筛选、增删改/复制、采集配置、策略绑定与单字段覆盖、RSS 目录/订阅 |
+| `GET /notifications` | 通知 | 唯一通知目标、槽位、全局硬限制、可复用策略模板与只读前后预览 |
+| `GET /ops` | 运维 | 分开采集/通知待处理、安全重试原操作、旧式补跑、⭐标记已入库（回执/兜底） |
 
-四个路由都需 `service.yaml: view.enabled`；写操作额外需 `view.actions`。
+全部页面都需 `service.yaml: view.enabled`；写操作额外需 `view.actions`。
 自带 `contract_version`。**宿主不要解析 `<news_dir>/state/**`**：那是本项目的私有布局，
 改一次布局就会让宿主静默读空（页面显示成「从未运行」，看着像没跑，其实是读错了地方）。
 
-### 界面与样式：零 JS、零外部请求
+### 界面与样式：本地渐进增强、零外部资源
 
-样式在 `src/newspipe/style.py`（纯 CSS，内联进页面）。三条硬约束由测试钉死：
-**不许出现 `<script`、不许出现 `url(`、不许加载外部资源** —— 所以没有外部字体、没有图标字体、
-没有 CDN、没有构建链；断网和境内网络都能看，`curl` 也能读。
+样式在 `src/newspipe/style.py`，表单由 Python 服务端渲染。唯一脚本是同源
+`/assets/workbench.js`：防重复提交、就地反馈、保留失败输入、未保存导航提示；无脚本仍能提交和预览。
+不加载 CDN、外部字体、图标字体或遥测，没有构建链。配置/schema 和 CLI 校验才是事实来源。
+失败、演练或预览的普通表单用 PRG 返回本页，草稿仅保留于服务内存（最多 32 份、10 分钟、一次性），
+URL 只有随机句柄，不含草稿或令牌；服务重启/过期后草稿消失。冲突不会自动换哈希或重试写入。
 
 动效全部走**平台原生能力**，且一律是渐进增强（不支持的浏览器只是没动画，不会坏）：
 
@@ -336,12 +339,15 @@ newspipe view --html     # 同一份数据的服务端渲染页（无前端构�
 
 | 动作 | 落盘路径 |
 |---|---|
-| 新增/修改信源 | `newspipe source set <名> --from-json '<整段配置>'`（+ `--dry-run` / `--base-hash`） |
+| 新增信源 | `newspipe source set <名> --from-json '<整段配置>' --create-only` |
+| 修改信源 | `newspipe source patch <名> --from-json '<合并补丁>'`（+ `--dry-run` / `--base-hash`） |
+| 复制信源 | `newspipe source copy <名> --new-name <新 ID>`（保留扩展，默认停用） |
 | 删除信源 | `newspipe source remove <名>` |
 | 启用/停用 | `newspipe source enable\|disable <名>` |
 
 - 表单默认勾选**先演练**（`--dry-run`），落盘前先看 diff；取消勾选才是真写。
-- 保存 = **整体替换**该源的配置块，块内注释会丢 —— CLI 的 warning 会原样显示在页面横幅上。
+- 编辑使用合并补丁：未提交字段不动，`null` 删除字段，保留未知适配器扩展、卡片配置和显式覆盖。
+  CLI `source set` 仍是整体替换。修改块内注释可能丢失，其他块保持原样；warning 原样显示。
 - RSS 搜索两条路：① **关键词搜目录**（`src/newspipe/rss.py` 里的 `CATALOG`，**只收录在本机
   RSSHub 上实测过**的条目，带实测日期与状态码）；② **站点地址发现 feed**（抓页面里的
   `<link rel=alternate>`，没有再探 `/feed`、`/atom.xml` 等常见路径）。
@@ -350,7 +356,7 @@ newspipe view --html     # 同一份数据的服务端渲染页（无前端构�
 
 ### 页面写操作：仪表盘变控制台（`view.actions`）
 
-打开 `service.yaml: view.actions` 后，`/ops` 与 `/config` 上会出现按钮与表单。机制：
+打开 `service.yaml: view.actions` 后，`/ops`、`/config` 与 `/notifications` 上出现按钮与表单。机制：
 
 ```
 页面表单 → POST /api/actions/<动作> → src/newspipe/actions.py（表单 → argv）→ CLI 的同一份 handler
@@ -365,9 +371,67 @@ newspipe view --html     # 同一份数据的服务端渲染页（无前端构�
   **任何网页**都能 POST 过来触发发卡。
 - **结果就是 CLI 信封**：成功显示 `changed`/摘要，失败显示 `error.message` + `hint` +
   可直接复现的 CLI 命令。不是「操作成功」四个字。
-- 默认是**试运行**（`--dry` 复选框默认勾选）；真发卡要显式取消勾选。
+- 配置保存、安全重试和旧式跑一轮默认只校验/试运行；采集与通知待处理按钮是明确的即时操作。
+  “通知待处理”只读队列；越过汇总时钟需要勾选确认，仍不能越过暂停或预算。
 - **没开 `view.actions` 就不渲染按钮** —— 给一个按下去只会 403 的按钮是骗人。
-- 只读契约 `GET /view` 不含令牌，形状不变（只多一个 `sources_hash`，供页面做乐观并发）。
+- 只读契约 `GET /view` 不含令牌；新增 `notification`（有效规则、来源、待处理原因、预算和安全回执）
+  与同一字节快照的 `source_values` / `sources_hash`，供页面乐观并发。宿主继续读契约，不读私有状态。
+
+### 可复用通知策略（单用户、单目标）
+
+采集决定“收什么”，策略决定“何时打扰”。同一策略绑定多个源，但**每个源独立计数**；
+顶层 `notifications` 是全部源共同受限的硬门禁，含旧式源和源级例外。更新已有卡片也计一次操作。
+计数按确认成功的日期归属；新策略/全局最小间隔从最近确认时间跨日连续计算，不在午夜清零。
+已确认远端成功但本地回执未完成的操作仍占用预算，防止另一源在修复之前穿透总上限。
+
+```yaml
+chat: oc_example
+slots: {am: '08:15', pm: '18:35'}
+notifications:
+  paused: false
+  quiet_hours: '23:00-07:30'
+  max_cards_per_day: 24
+  min_gap_min: 0
+policies:
+  reading:
+    label: 早晚读报
+    mode: digest
+    slots: [am, pm]
+    form: card
+    max_cards_per_day: 4
+sources:
+  my_feed:
+    adapter: rsshub
+    feeds: [https://example.com/feed.xml]
+    fetch: {trigger: poll, interval_min: 10}
+    notify:
+      policy: reading
+      overrides: {min_gap_min: 0}
+```
+
+策略 `mode` 可选 `immediate`（有待处理即评估）、`digest`（指定槽位）或 `collect`（本地批次，不发送）。
+`card` 每批新卡，`append_card` 更新稳定卡片。未填覆盖字段继承模板，`0`/空字符串是明确覆盖。
+全局上限未配置是不加硬上限，`0` 是不发送；源级例外只跳过该源的静默/上限/间隔，不能越过全局或时钟。
+暂停通知继续采集；停用源停止新采集与新通知，队列保留。已确认远端成功的本地回执仍可修复。
+
+既有源不会自动迁移。绑定/解绑先预览并确认：旧式预算是全局计数，模板预算是每源计数，转换不清零。
+旧字段保留用于回退。切到 `collect` 后待处理内容消费为本地批次，切回通知不会重发这些内容。
+历史总计缺少源归属时，当天模板的源级限制保护性阻塞，不编造计数；次日或核对留存回执后再处理。
+删除策略前先解除所有引用（含停用源）；ID 稳定不可改名，复制必须使用新 ID，新源默认停用。
+
+```sh
+newspipe policy set reading --from-json '{"mode":"immediate","form":"append_card"}' --create-only --dry-run --json
+newspipe global set --from-json '{"notifications":{"paused":true}}' --dry-run --json
+newspipe notification preview --source my_feed --json
+newspipe collect my_feed --json       # 只采集，不强制发送
+newspipe notify my_feed --dry --json   # 只评估已有待处理，不抓取
+```
+
+失败重试最多三次、至少间隔一分钟，新内容、配置修改和解绑不会重置未完成原操作。
+发送 JSON 载荷持久化并精确复用；新增内容、标题/按钮配置不会偷偷改变该操作的重试载荷。
+`notification retry <源> --operation-id <ID>` 仅在安全幂等窗口或明确未发送时重置同一身份的次数，不立刻发送。
+远端结果未知且超过窗口时，按 `/ops` / `notification preview` 的目标、卡片 ID、操作 ID 和时间核对平台回执；
+保持阻塞，不提供强制重发、不伪造成功、不建议编辑私有状态。本版本不含远端回执对账写入器。
 
 ### 环境变量
 

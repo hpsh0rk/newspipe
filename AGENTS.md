@@ -149,7 +149,9 @@ docker compose up -d --build        # ① 容器（restart: unless-stopped 兜�
 | 类别 | 命令 |
 |---|---|
 | 自检 | `doctor` / `status` / `probe-model` / `probe-channel` |
-| 信源 | `source list\|show\|set\|enable\|remove`（写操作支持 `--dry-run` / `--base-hash`） |
+| 信源 | `source list\|show\|set\|patch\|copy\|enable\|disable\|remove`（写操作支持 `--dry-run` / `--base-hash`；新建可用 `--create-only`） |
+| 通知 | `policy list\|show\|set\|remove` / `global set` / `notification preview` / `notification retry <源> --operation-id <ID>` |
+| 分阶段运行 | `collect <源>`（只采集）/ `notify <源>`（只通知待处理；`--bypass-clock` 只越过时钟，不越过限制） |
 | 卡片按钮 | `hooks list\|add\|remove` |
 | 事件 | `events list --unconsumed` / `events ack <id> --by <who>` / `events prune` |
 | 队列 | `queue list` / `queue ack <id>` |
@@ -165,25 +167,28 @@ docker compose up -d --build        # ① 容器（restart: unless-stopped 兜�
 
 `newspipe view --json`、`GET /view`（需 `service.yaml: view.enabled`）、`newspipe view --html`
 三条出口用的是**同一份** builder，自带 `contract_version`。内容：每个源的心跳（原始状态 +
-中文标签 + 语气 + 是否超期）、今日批次、去重台账、AI 调用与降级计数、通道与入站方式。
+中文标签 + 语气 + 是否超期）、今日批次、去重台账、AI 调用与降级计数、通道与入站方式；
+`notification` 提供策略有效值/来源、待通知原因、全局/每源预算和未完成操作身份。配置值与哈希来自同一字节快照。
 
 **不要**去读 `<news_dir>/state/**` —— 那是本项目的私有布局。宿主一旦解析它，改一次布局就会让
 宿主**静默读空**：页面显示成「从未运行」，看着像没跑，其实是读错了地方，全程不报错。要展示就读契约。
 
-`GET /view` 是只读 JSON 契约；**页面**按职责分三个 Tab（同一个 builder、服务端路由、无前端构建、
+`GET /view` 是只读 JSON 契约；**页面**按职责分五个 Tab（同一个 builder、服务端路由、无前端构建、
 可深链）：
 
 | 路由 | Tab | 内容 | 写操作 |
 |---|---|---|---|
 | `GET /` | 驾驶舱 | KPI + 信源心跳 + 今日批次 | 无（只读） |
-| `GET /config` | 配置 | 信源增删改 + RSS 搜索订阅 | 有 |
-| `GET /ops` | 运维 | 跑一轮/启停/⭐入库/事件已消费/现在发队列 | 有 |
+| `GET /config` | 消息源 | 搜索筛选/增删改/复制 + 策略绑定覆盖 + RSS 目录/订阅 | 有 |
+| `GET /notifications` | 通知 | 唯一目标/槽位/全局硬限制 + 可复用模板与前后预览 | 有 |
+| `GET /items` | 条目 | 条目/批次内容浏览与服务端筛选 | 无 |
+| `GET /ops` | 运维 | 分开采集/通知/安全重试原操作 + 旧式补跑/启停/⭐入库回执 | 有 |
 
 宿主读不到时应当显示「服务不可达 + 地址」，不要退化成空看板（空看板与「真的没数据」无法区分）。
 
 ### 2.2 页面写操作：三条铁律
 
-打开 `service.yaml: view.actions` 后，`/ops` 与 `/config` 上出现按钮与表单。
+打开 `service.yaml: view.actions` 后，`/ops`、`/config` 与 `/notifications` 上出现按钮与表单。
 
 **铁律一：写路径只有一条。** 页面表单 → `POST /api/actions/<动作>` → `src/newspipe/actions.py`
 （表单翻成 argv）→ CLI 的同一份 handler。校验、原子写、乐观并发、审计都在 CLI 里，页面只做翻译。
@@ -201,9 +206,30 @@ docker compose up -d --build        # ① 容器（restart: unless-stopped 兜�
 加配置字段只改 `config.py` 一处。漏一个字段的后果不是报错，而是**编辑表单把那个字段按默认值
 静默写回去** —— 有测试钉住「schema 的每个 path 都能取到当前值」。
 
-保存 = 用 `source set` **整体替换**该源的配置块，块内注释会丢；CLI 的 warning 会显示在页面横幅上。
+编辑 = 用 `source patch` 合并补丁，未提交字段不动，`null` 删除字段；扩展/高级字段和显式继承保留。
+CLI `source set` 仍是整体替换，新建/复制用 `--create-only` 拒绝 ID 碰撞，新源默认停用。
+修改块内注释可能丢失；CLI warning 显示在横幅上。唯一同源脚本 `/assets/workbench.js` 是渐进增强，
+无 JS 仍能提交/预览：失败草稿只存进程内存（32 份/10 分钟/一次性），不进 URL/磁盘/浏览器存储。
 表单默认 `--dry-run`，取消勾选才真写。RSS 目录只收录在**本机 RSSHub 上实测过**的条目
 （本地无 `/routes`，实测 404）—— 不做「全网 RSS 搜索」这种吹牛功能。
+
+### 2.3 策略与安全重试
+
+单用户/单目标，不加账户或任意规则引擎。`sources.yaml` 的 `policies` 保存模板，信源用
+`notify.policy` 绑定、`notify.overrides` 显式覆盖单字段。缺省覆盖继承，空字符串/0/false 是明确值。
+`immediate` 有待处理即评估、`digest` 指定槽位汇总、`collect` 消费为本地批次不发送。
+模板预算按每源独立计数，顶层 `notifications` 是包含旧式源在内的全局硬门禁；更新卡片也计一次。
+0 上限是不发送。源级例外不能越过全局、时钟、停用或卡片容量。
+
+旧式源不会自动迁移。绑定/解绑需先预览并确认预算范围变化，不清零计数；旧字段保留用于回退。
+切到 collect 后本地已消费内容不会在切回通知时重发。暂停通知不暂停采集；停用源保留队列。
+策略删除必须先解除全部引用（含停用源），槽位修改必须通过全部采集/通知引用校验。
+
+未完成远端操作固定身份/目标/载荷。安全重试只重置原操作的三次尝试计数，不立即发送、不换身份。
+解绑也不解除原操作的保护。确认时间独立于尝试时间：按确认日计数，新全局/每源间隔跨日连续；
+已确认但未完成本地回执的操作仍占用预算。所有重试复用持久化的完整卡片 JSON，不随新内容/hooks 漂移。
+未知结果超过幂等窗口保持阻塞；用 `notification preview` 或 `/ops` 的目标、卡片、操作 ID 与时间
+核对平台回执。本版没有远端回执对账写入器：禁止强制重发、伪造回执或改私有状态绕过保护。
 
 ---
 
