@@ -31,23 +31,23 @@ INTEGRATED: `NEWSPIPE_REQUIRE_JS_TESTS=1 NEWSPIPE_BROWSER_TESTS=1 uv run --pytho
 **Files:** create `src/newspipe/webui.py`, `tests/test_webeditors.py`; modify `workbench.py`, `webassets.py`, `style.py`, `inbound.py`, SSR/browser tests.
 **Interfaces:** `editor_link(href, label, primary=False)`; `editor_panel(kind, title, body, route, key)` produces a code-owned `data-editor-panel` with stable draft key; `editor_dialog()` produces one shared shell. Links target existing explicit queries. JS imports only validated panel content and retains dirty panels in process/page memory.
 
-- [ ] Write SSR/browser RED tests: normal pages lack editor forms; create/edit/copy opens a dialog without page navigation; correct values; close/cancel/Escape/busy/focus; dirty reopening and sibling hash; visible failed/unsafe GET; real save closes, dry/preview/probe/error stays; no-JS save/PRG stays in the requested editor.
-- [ ] Run targeted tests. Expected: missing panels/dialogs and permanent forms fail.
-- [ ] Implement primitives, explicit rendering, guarded import/lifecycle and PRG global context; preserve old tests' business assertions while adapting intentional UI lifecycle changes.
-- [ ] Run UNIT and browser suite, expected green. Commit `feat: unify workbench editing in progressive dialogs`.
+- [x] Write SSR/browser RED tests: normal pages lack editor forms; create/edit/copy opens a dialog without page navigation; correct values; close/cancel/Escape/busy/focus; dirty reopening and sibling hash; visible failed/unsafe GET; real save closes, dry/preview/probe/error stays; no-JS save/PRG stays in the requested editor.
+- [x] Run targeted tests. Expected: missing panels/dialogs and permanent forms fail.
+- [x] Implement primitives, explicit rendering, guarded import/lifecycle and PRG global context; preserve old tests' business assertions while adapting intentional UI lifecycle changes.
+- [x] Run UNIT and browser suite, expected green. Commit `feat: unify workbench editing in progressive dialogs`.
 
 ## Task 2: Focused Summaries and Help
 
 **Files:** modify `webui.py`, `workbench.py`, `webassets.py`, `style.py`, `view.py`, `README.md`, browser/SSR tests.
 **Interfaces:** `help_tip(text, ident, label)` escapes a focus/touch-capable help widget; schema help uses existing IDs. Summary strips are read regions separate from cached editors; their updates never alter editor hashes.
 
-- [ ] Write RED tests for tooltip hover/focus/pinned touch/Escape, edge fit, visible inline errors; compact ordinary pages and advanced policy fields; clear dry/save labels; source/global/RSSHub summary updates preserve cached drafts.
-- [ ] Run targeted tests. Expected: missing tips/density/labels fail.
-- [ ] Render focused summaries and folded fields, enhance positioned help and save labels, move secondary operational explanations into help without hiding confirmations/errors.
-- [ ] Run INTEGRATED, expected all enabled tests pass. Commit `feat: focus workbench summaries and contextual help`.
+- [x] Write RED tests for tooltip hover/focus/pinned touch/Escape, edge fit, visible inline errors; compact ordinary pages and advanced policy fields; clear dry/save labels; source/global/RSSHub summary updates preserve cached drafts.
+- [x] Run targeted tests. Expected: missing tips/density/labels fail.
+- [x] Render focused summaries and folded fields, enhance positioned help and save labels, move secondary operational explanations into help without hiding confirmations/errors.
+- [x] Run INTEGRATED, expected all enabled tests pass. Commit `feat: focus workbench summaries and contextual help`.
 
 ## Final Acceptance
 
-- [ ] One fresh read-only review of `a93f48d..HEAD`; one TDD fix pass for Important/Critical issues.
-- [ ] Python 3.11/3.12 UNIT and 3.13 INTEGRATED, zero integrated skips; secret/diff scans.
-- [ ] Inspect desktop/mobile screenshots; document acceptance, commit and restart/open guarded offline preview. Keep the branch unmerged/unpushed.
+- [x] One fresh read-only review of `a93f48d..HEAD`; one TDD fix pass for Important/Critical issues.
+- [x] Python 3.11/3.12 UNIT and 3.13 INTEGRATED, zero integrated skips; secret/diff scans.
+- [x] Inspect desktop/mobile screenshots; document acceptance, commit and restart/open guarded offline preview. Keep the branch unmerged/unpushed.
