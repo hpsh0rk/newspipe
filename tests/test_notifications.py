@@ -289,6 +289,45 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(after["delivery_chat"], "oc_test")
         self.assertEqual(self.send.call_args.args[0], "oc_test")
 
+    def test_destination_change_rotates_completed_append_card_and_keeps_old_callbacks(self):
+        self.cfg = replace(self.cfg, policies={"p": policy.NotificationPolicy(form="append_card")})
+        self.store.append_pending("src", [_item(1)])
+        self.notify()
+        original = self.store.read_batch(DAY, "src", "live")
+        self.cfg = replace(self.cfg, chat="oc_new")
+        self.store.append_pending("src", [_item(2)])
+        self.assertEqual(self.notify(now=NOW + timedelta(minutes=1)).card, "sent")
+        self.assertEqual(self.send.call_args.args[0], "oc_new")
+        self.assertEqual(self.store.read_batch(DAY, "src", "live"), original)
+        self.assertEqual(self.store.load_batch_by_rel(original["batch"])[1], original)
+        self.update.assert_not_called()
+        new_card = self.send.call_args.args[1]
+        self.store.append_pending("src", [_item(3)])
+        self.assertEqual(self.notify(now=NOW + timedelta(minutes=2)).card, "updated")
+        self.assertEqual(self.update.call_args.args[0], new_card)
+        self.assertEqual(self.send.call_count, 2)
+        self.assertEqual(self.store.budget_state(DAY)["cards"], 3)
+
+    def test_rotated_digest_local_repair_completes_original_scheduled_slot(self):
+        self.cfg = replace(self.cfg, policies={"p": policy.NotificationPolicy(mode="digest", slots=("am",), form="append_card")})
+        self.store.set_cursor("src", NOW.timestamp(), at=NOW)
+        self.store.append_pending("src", [_item(1)])
+        self.notify(bypass_clock=True, slot="am")
+        self.cfg = replace(self.cfg, chat="oc_new")
+        self.store.append_pending("src", [_item(2)])
+        with patch.object(events, "append", side_effect=OSError("receipt interrupted")):
+            service.run_once(self.cfg, self.store, now=NOW, logger=lambda _: None)
+        self.assertEqual(self.send.call_count, 2)
+        unfinished = self.store.unfinished_batch("src")
+        self.assertEqual(unfinished["notification_slot"], "am")
+        self.store.append_pending("src", [_item(3)])
+        service.run_once(self.cfg, self.store, now=NOW + timedelta(minutes=1), logger=lambda _: None)
+        service.run_once(self.cfg, self.store, now=NOW + timedelta(minutes=2), logger=lambda _: None)
+        self.assertTrue(self.store.notification_slot_complete(DAY, "src", "am"))
+        self.assertTrue(service.load_runs(self.store.news_dir)["notification_slots"][DAY]["am"]["src"]["complete"])
+        self.assertEqual(self.send.call_count, 2)
+        self.assertEqual(self.store.pending_count("src"), 1)
+
     def test_digest_confirmed_repair_completes_notification_slot_without_resending_new_content(self):
         self.cfg = replace(self.cfg, policies={"p": policy.NotificationPolicy(mode="digest", slots=("am",))})
         self.store.set_cursor("src", NOW.timestamp(), at=NOW)

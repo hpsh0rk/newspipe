@@ -220,7 +220,8 @@ def _run_notifications(cfg: config.Config, store: state.Store, last_runs: dict, 
             if not dry and unfinished.get("notification_scheduled") and result.status == "ok":
                 entry = (last_runs.setdefault("notification_slots", {})
                          .setdefault(unfinished["delivery_date"], {})
-                         .setdefault(unfinished["slot"], {}).setdefault(source.name, {}))
+                         .setdefault(unfinished.get("notification_slot") or unfinished["slot"], {})
+                         .setdefault(source.name, {}))
                 entry.update(complete=True, status="ok")
                 _save_runs(news_dir, last_runs)
             continue

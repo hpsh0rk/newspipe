@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import importlib
+import hashlib
 import json
 import time
 import uuid
@@ -153,6 +154,13 @@ def _prepare_batch(cfg: Any, store: state.Store, scfg: Any, digest: str, slot: s
     卡上，多出来的顺延下一批）。不返回它们就会把批次撑到元素上限之外，整张卡被飞书拒收。
     """
     existing = store.unfinished_batch(scfg.name) or store.read_batch(digest, scfg.name, slot)
+    if (existing and not existing.get("delivery_pending") and scfg.sends_card
+            and (existing.get("delivery_chat") or existing.get("chat_id")) != cfg.chat):
+        # Old cards retain their callback paths; a different destination owns a different card.
+        slot = f"{slot}-to-{hashlib.sha256(cfg.chat.encode()).hexdigest()[:16]}"
+        existing = store.read_batch(digest, scfg.name, slot)
+        if existing and (existing.get("delivery_chat") or existing.get("chat_id")) != cfg.chat:
+            raise DeliveryError("通知目标与已有卡片目标不一致，拒绝复用卡片")
     is_append = bool(existing and existing.get("message_id"))
     if existing:
         batch = dict(existing)
@@ -317,9 +325,11 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
             if scfg.notify is not None:
                 batch["notification_mode"] = policy.resolve(cfg, scfg).values["mode"]
                 batch["notification_scheduled"] = scheduled_slot
+                batch["notification_slot"] = slot
             else:
                 batch.pop("notification_mode", None)
                 batch.pop("notification_scheduled", None)
+                batch.pop("notification_slot", None)
         _begin_delivery(batch, cfg, digest, now)
         if scfg.notify is not None or "notification_mode" in batch:
             batch["notification_attempts"] = int(batch.get("notification_attempts") or 0) + 1
@@ -471,7 +481,8 @@ def _complete_delivery(store: state.Store, batch: dict, run: SourceRun) -> Sourc
         current = store.cursor(source)
         store.set_cursor(source, max(float(current or 0), batch["delivery_cursor"]), at=delivered_at)
     if batch.get("notification_scheduled"):
-        store.complete_notification_slot(batch["delivery_date"], source, slot, status="ok")
+        store.complete_notification_slot(batch["delivery_date"], source,
+                                         batch.get("notification_slot") or slot, status="ok")
     batch["delivery_pending"] = False
     store.write_batch(batch)
     return run
