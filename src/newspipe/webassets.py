@@ -26,9 +26,33 @@ JAVASCRIPT = r"""'use strict';
   };
   const override = node => {
     const select = node.querySelector('select[name^="inherit."]');
-    node.querySelector('[data-custom]').hidden = select.value === 'inherit';
+    const custom = node.querySelector('[data-custom]');
+    custom.hidden = select.value === 'inherit';
+    custom.querySelectorAll('input, select').forEach(field => { field.disabled = custom.hidden; });
+  };
+  const reveal = field => {
+    for (let parent = field.parentElement; parent; parent = parent.parentElement) {
+      if (parent.tagName === 'DETAILS') parent.open = true;
+    }
+  };
+  const fieldError = (field, message) => {
+    field.setAttribute('aria-invalid', 'true');
+    const detail = document.getElementById(field.getAttribute('aria-errormessage') || `${field.id}-error`);
+    if (detail) detail.textContent = message;
+    reveal(field);
   };
   document.querySelectorAll('[data-override]').forEach(override);
+  // Native validation precedes submit and does not bubble. Reveal before the
+  // browser tries to focus an invalid control inside a closed details element.
+  document.addEventListener('invalid', event => {
+    const form = event.target.closest('form[action*="/api/actions/"]');
+    if (form) {
+      fieldError(event.target, event.target.validationMessage);
+      if (event.target === form.querySelector('input:invalid, select:invalid')) {
+        requestAnimationFrame(() => event.target.focus());
+      }
+    }
+  }, true);
   document.addEventListener('input', event => {
     const form = event.target.closest('form[method="post"]');
     if (form) markDirty(form);
@@ -108,10 +132,7 @@ JAVASCRIPT = r"""'use strict';
         const field = [...form.querySelectorAll('input, select')].find(input =>
           input.type !== 'hidden' && error.message?.includes(input.name.replace(/^[fpng]\./, '')));
         if (field) {
-          field.setAttribute('aria-invalid', 'true');
-          const detail = document.getElementById(`${field.id}-error`);
-          if (detail) detail.textContent = error.message;
-          field.closest('details')?.setAttribute('open', '');
+          fieldError(field, error.message);
           field.focus({preventScroll: true});
         }
         return;

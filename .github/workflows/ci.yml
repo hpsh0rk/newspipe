@@ -33,3 +33,26 @@ jobs:
         run: python -m unittest discover -s tests
       - name: 密钥扫描（0 = 干净）
         run: python3 scripts/scan_secrets.py
+
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NEWSPIPE_BROWSER_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install test-only browser tooling
+        run: pip install -e '.[browser-test]'
+      - name: Install real browser engines
+        run: python -m playwright install --with-deps chromium webkit
+      - name: Workbench browser acceptance
+        run: python -m unittest discover -s tests -p test_browser_e2e.py
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-failure-artifacts
+          path: test-results/browser
+          retention-days: 7

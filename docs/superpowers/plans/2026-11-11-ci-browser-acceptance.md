@@ -37,9 +37,9 @@
 **Files:** Modify `pyproject.toml`, `.gitignore`, `tests/preview_workbench.py`, `.github/workflows/ci.yml`; create `tests/test_browser_e2e.py`, `tests/test_browser_fixture.py`; correct existing workbench UI files only for reproduced failures.
 **Interfaces:** `offline_workbench()` yields news directory, URL and temporary Store; `NEWSPIPE_BROWSER_TESTS=1` enables mandatory Chromium/WebKit tests; `test-results/browser` holds failure artifacts. Default unit runs skip browser tests deliberately; CI has a separate mandatory browser job.
 
-- [ ] Add fixture lifecycle/isolation and mandatory browser-job tests; observe missing fixture/job fail RED, then implement the fixture and optional dependency/job.
-- [ ] Add and execute real-engine responsive/keyboard/reduced-motion/preview/save/conflict/network/pending-edit/no-JS scenarios. Watch any concrete UI defects fail before correcting their root cause.
-- [ ] Run the complete browser matrix, unit suite, scanner and diff checks; commit `test: add isolated Chromium and WebKit workbench acceptance`.
+- [x] Add fixture lifecycle/isolation and mandatory browser-job tests; observe missing fixture/job fail RED, then implement the fixture and optional dependency/job.
+- [x] Add and execute real-engine responsive/keyboard/reduced-motion/preview/save/conflict/network/pending-edit/no-JS scenarios. Watch any concrete UI defects fail before correcting their root cause.
+- [x] Run the complete browser matrix, unit suite, scanner and diff checks; commit `test: add isolated Chromium and WebKit workbench acceptance`.
 
 ### Task 3: Operational Acceptance Record
 

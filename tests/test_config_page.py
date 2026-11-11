@@ -15,6 +15,7 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from html.parser import HTMLParser
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
@@ -309,7 +310,17 @@ class ConfigPageTests(unittest.TestCase):
         page = self._page({"edit": "aihot", "values": config.source_values(cfg.sources["aihot"])})
         self.assertIn("编辑 <code>aihot</code>", page)
         self.assertIn('<option value="aihot" selected>', page)         # 适配器预选
-        self.assertIn('name="f.fetch.slots" value="am" checked', page)  # 槽位预勾
+        class SlotControls(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.checked = []
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                if tag == "input" and attrs.get("name") == "f.fetch.slots" and "checked" in attrs:
+                    self.checked.append(attrs.get("value"))
+        slots = SlotControls()
+        slots.feed(page)
+        self.assertEqual(slots.checked, ["am"])
         self.assertIn('name="name" value="aihot"', page)                # 名字锁定（改名 = 新建）
 
     def test_catalog_hits_offer_a_subscribe_link(self) -> None:

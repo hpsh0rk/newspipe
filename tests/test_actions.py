@@ -28,7 +28,7 @@ for _p in (str(SRC_ROOT), str(REPO_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from newspipe import actions, events, inbound, view  # noqa: E402
+from newspipe import actions, config, events, inbound, view  # noqa: E402
 
 from test_contract import SOURCES_YAML  # noqa: E402
 
@@ -258,6 +258,15 @@ class ActionGateTests(unittest.TestCase):
             payload = json.loads(resp.read().decode("utf-8"))
         self.assertNotIn("token", json.dumps(payload))
         self.assertIn("sources_hash", payload)          # 面板要用的并发令牌（不是秘密）
+
+    def test_empty_form_value_clears_a_field_instead_of_preserving_old_value(self) -> None:
+        base = self._serve(view_actions=True)
+        for candidate in ("Custom label", ""):
+            code, body = self._post(base, "source-patch", {"token": TOKEN, "name": "aihot", "f.feed_label": candidate},
+                                    headers={"Origin": base, "Accept": "application/json"})
+            self.assertEqual(code, 200)
+            self.assertTrue(json.loads(body)["ok"], body)
+            self.assertEqual(config.source_values(config.load(self.news).sources["aihot"])["feed_label"], candidate)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):

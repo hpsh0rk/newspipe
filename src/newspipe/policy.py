@@ -104,7 +104,7 @@ class NotificationPolicy:
 
     def validate(self, *, where: str, slots: dict | None = None) -> None:
         if self.mode == "digest" and not self.slots:
-            raise ConfigError(f"{where}: digest 必须选择至少一个通知槽位")
+            raise ConfigError(f"{where}.slots: digest 必须选择至少一个通知槽位")
         if slots is not None:
             for slot in self.slots:
                 if slot not in slots:

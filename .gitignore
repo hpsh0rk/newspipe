@@ -31,6 +31,7 @@ llm/
 
 # 生成物
 com.newspipe.service.plist
+test-results/
 
 # 个人交接单（含私人路径；scan_secrets.py 会拦，这里双保险）
 handoff.md

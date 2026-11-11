@@ -2,19 +2,33 @@
 from __future__ import annotations
 
 import sys
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+import threading
 from unittest.mock import patch
 
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from newspipe import channel, inbound, pipeline, runtime, state
+from newspipe import channel, credentials, inbound, llm, net, pipeline, runtime, state
 
 
-def main():
+@dataclass
+class WorkbenchFixture:
+    news_dir: Path
+    url: str
+    store: state.Store
+    server: object
+    thread: threading.Thread
+    blocked_effects: list[str]
+
+
+@contextmanager
+def offline_workbench():
     with TemporaryDirectory(prefix="newspipe-workbench-") as tmp, ExitStack() as stack:
         news = Path(tmp)
         raw = {"chat": "oc_offline_preview", "slots": {"am": "08:15", "pm": "18:35"},
@@ -31,25 +45,54 @@ def main():
                            "reading": {"adapter": "rsshub", "feeds": ["https://example.invalid/feed.xml"],
                                        "enabled": False, "card": {"title": "个人阅读清单"}, "fetch": {"trigger": "manual"},
                                        "notify": {"policy": "archive"}}}}
+        for source in raw["sources"].values():
+            source["enrich"] = {"summary": "off"}
         (news / "sources.yaml").write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False))
         (news / "service.yaml").write_text("inbound: {mode: none}\nview: {enabled: true, actions: true}\n")
         store = state.Store(news)
         store.append_pending("research", [{"ext_id": "preview-1", "title": "A small, verifiable research update",
                                            "url": "https://example.invalid/article", "source": "Preview"}])
         store.heartbeat("research", status="collected", note="离线预览数据", queued=1)
+        item = {"id": "a01", "ext_id": "preview-old", "title": "A browsable offline article",
+                "url": "https://example.invalid/article", "source": "Preview", "status": "unread"}
+        store.write_batch({"source": "research", "digest": datetime.now().date().isoformat(),
+                           "slot": "sample", "form": "state_only", "title": "Offline reading",
+                           "items": [item], "view": "list", "archived": [], "overflow": 0})
+        blocked = []
+        def deny(effect):
+            def fail(*args, **kwargs):
+                blocked.append(effect)
+                raise RuntimeError(f"offline fixture blocks {effect}")
+            return fail
         stack.enter_context(patch.object(runtime, "activate", side_effect=lambda *_: nullcontext()))
-        stack.enter_context(patch.object(pipeline, "_adapter", return_value=SimpleNamespace(fetch=lambda *a, **k: [])))
+        stack.enter_context(patch.object(pipeline, "_adapter", return_value=SimpleNamespace(fetch=lambda *a, **k: [
+            {"ext_id": "preview-collected", "title": "A deterministic collected item",
+             "url": "https://example.invalid/collected", "source": "Preview"}])))
+        stack.enter_context(patch.object(credentials, "resolve_feishu", side_effect=deny("credentials")))
+        stack.enter_context(patch.object(net, "request", side_effect=deny("network")))
+        stack.enter_context(patch.object(llm, "chat_json", side_effect=deny("model")))
+        stack.enter_context(patch.object(pipeline, "_enrich_new", side_effect=deny("enrichment")))
         for method in ("create_entity", "send_card", "update_entity"):
-            stack.enter_context(patch.object(channel, method, side_effect=RuntimeError("offline preview blocks remote effects")))
+            stack.enter_context(patch.object(channel, method, side_effect=deny(method)))
         server, _ = inbound.start_http(service_cfg={"http": {"host": "127.0.0.1", "port": 0}}, creds=None,
-                                       news_dir=news, accept_events=False, view_actions=True)
-        print(f"http://127.0.0.1:{server.server_address[1]}", flush=True)
+                                       news_dir=news, accept_events=False, view_actions=True, logger=lambda _: None)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
         try:
-            server.serve_forever()
+            yield WorkbenchFixture(news, f"http://127.0.0.1:{server.server_address[1]}", store, server, thread, blocked)
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
+
+def main():
+    with offline_workbench() as fixture:
+        print(fixture.url, flush=True)
+        try:
+            fixture.thread.join()
         except KeyboardInterrupt:
             pass
-        finally:
-            server.server_close()
 
 
 if __name__ == "__main__":

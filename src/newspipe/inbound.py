@@ -474,7 +474,8 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                 reject(413, "E_USAGE", "表单最多 64 KiB")
                 return
             body = self.rfile.read(length) if length else b""
-            form = parse_qs(body.decode("utf-8", "replace"))
+            # An explicit empty edit is different from an omitted patch field.
+            form = parse_qs(body.decode("utf-8", "replace"), keep_blank_values=True)
             given = (form.get("token") or [""])[0]
             if not secrets.compare_digest(given, token):
                 logger("写操作：令牌不匹配，已拒绝")

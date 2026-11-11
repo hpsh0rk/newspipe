@@ -20,6 +20,7 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Internet :: WWW/HTTP",
     "Topic :: Text Processing :: Filters",
 ]
@@ -36,6 +37,7 @@ feishu = ["lark-oapi>=1.7"]
 # 仅当 IM 应用配置了 Encrypt Key（事件体 AES 加密）才需要
 crypto = ["pycryptodome>=3.20"]
 all = ["httpx[http2]>=0.28", "lark-oapi>=1.7", "pycryptodome>=3.20"]
+browser-test = ["playwright==1.65.0"]
 
 [project.scripts]
 newspipe = "newspipe.cli:main"

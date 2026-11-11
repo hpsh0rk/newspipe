@@ -32,7 +32,8 @@ def _field(field, value, *, prefix, scope, slots):
     name = prefix + path
     ident = scope + "-" + name.replace(".", "-")
     help_text = field.get("help", "")
-    attr = f'id="{E(ident)}" name="{E(name)}" aria-describedby="{E(ident)}-help {E(ident)}-error"'
+    described = f'aria-describedby="{E(ident)}-help {E(ident)}-error" aria-errormessage="{E(ident)}-error"'
+    attr = f'id="{E(ident)}" name="{E(name)}" {described}'
     if kind == "bool":
         control = _hidden(name, "0") + f'<input type="checkbox" {attr} value="1"' + (" checked" if value else "") + ">"
     elif kind == "enum":
@@ -41,9 +42,9 @@ def _field(field, value, *, prefix, scope, slots):
                           for c in field.get("choices", []))
         control = f'<select {attr}>{options}</select>'
     elif kind == "slots":
-        control = _hidden(name, "") + '<div class="slot-options">' + "".join(
-            f'<label class="check"><input type="checkbox" name="{E(name)}" value="{E(c)}"'
-            + (" checked" if c in (value or []) else "") + f'> {E(c)} · {E(slots.get(c, ""))}</label>' for c in slots) + "</div>"
+        control = _hidden(name, "") + f'<div class="slot-options" role="group" aria-labelledby="{E(ident)}-label">' + "".join(
+            f'<label class="check"><input type="checkbox" id="{E(ident)}-{index}" name="{E(name)}" {described} value="{E(c)}"'
+            + (" checked" if c in (value or []) else "") + f'> {E(c)} · {E(slots.get(c, ""))}</label>' for index, c in enumerate(slots)) + "</div>"
     else:
         shown = ", ".join(str(v) for v in (value or [])) if kind == "list" else "" if value is None else str(value)
         numeric = kind in ("int", "float")
@@ -53,7 +54,7 @@ def _field(field, value, *, prefix, scope, slots):
         if path == "quiet_hours" or path.endswith(".quiet_hours"):
             extra += ' placeholder="23:00-07:30 或留空" pattern="([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]"'
         control = f'<input type="{"number" if numeric else "text"}" {attr} value="{E(shown)}"{extra}>'
-    label = f'<label for="{E(ident)}">{E(field["label"])}</label>' if kind != "slots" else f'<span>{E(field["label"])}</span>'
+    label = f'<label for="{E(ident)}">{E(field["label"])}</label>' if kind != "slots" else f'<span id="{E(ident)}-label">{E(field["label"])}</span>'
     return (f'<div class="field">{label}{control}<small id="{E(ident)}-help">{E(help_text)}</small>'
             f'<small class="field-error" id="{E(ident)}-error"></small></div>')
 
