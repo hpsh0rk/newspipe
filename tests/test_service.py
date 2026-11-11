@@ -139,6 +139,10 @@ class RunRecordTests(unittest.TestCase):
 
 class RunOnceTests(unittest.TestCase):
     def setUp(self) -> None:
+        # Exact injected schedule instants must not acquire real subsecond jitter.
+        timer = mock.patch("time.monotonic", return_value=0.0)
+        timer.start()
+        self.addCleanup(timer.stop)
         self._tmp = TemporaryDirectory()
         self.news_dir = Path(self._tmp.name)
         self.store = state.Store(self.news_dir)

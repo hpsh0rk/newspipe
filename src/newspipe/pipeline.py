@@ -295,7 +295,7 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
                         candidates: list[dict], *, digest: str, slot: str, dry: bool,
                         now: datetime, mode: str, since: float | None = None,
                         kept: list[dict] | None = None, raw: list[dict] | None = None,
-                        scheduled_slot: bool = False) -> SourceRun:
+                        scheduled_slot: bool = False, clock_slot: str | None = None) -> SourceRun:
     kept, raw = kept or [], raw or []
     acquisition_now = now
     now = clock.now()
@@ -324,7 +324,7 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
     # Persist every candidate first, and enrich only the final display set after merging.
     _queue(store, scfg.name, candidates)
     batch, is_append, excess = _prepare_batch(cfg, store, scfg, digest, slot, plan.items, cap)
-    pinned = batch.get("delivery_payload")
+    pinned = batch.get("delivery_payload") if batch.get("delivery_pending") else None
     if not pinned and (scfg.notify is None or scfg.sends_card):
         batch["items"], run.enrich = _enrich_new(cfg, store, scfg, batch["items"], now)
     if not pinned:
@@ -353,8 +353,7 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
             return defer(current_plan.reason)
         if scheduled_slot:
             from newspipe.service import SLOT_TOLERANCE, slot_datetime
-            logical_slot = (batch.get("notification_slot") or slot) if batch.get("delivery_pending") else slot
-            when = slot_datetime(cfg, logical_slot, current)
+            when = slot_datetime(cfg, clock_slot or slot, current)
             if current.date().isoformat() != digest or not when <= current <= when + SLOT_TOLERANCE:
                 return defer("waiting_slot")
         started = batch.get("remote_attempt_started_at") or batch.get("send_started_at")
@@ -371,7 +370,7 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
         if scfg.notify is not None:
             batch["notification_mode"] = policy.resolve(cfg, scfg).values["mode"]
             batch["notification_scheduled"] = scheduled_slot
-            batch["notification_slot"] = slot
+            batch["notification_slot"] = clock_slot or slot
         else:
             batch.pop("notification_mode", None)
             batch.pop("notification_scheduled", None)
@@ -736,7 +735,8 @@ def notify_source(cfg: Any, store: state.Store, name: str, *, now: datetime | No
         try:
             outcome = _deliver_candidates(cfg, store, effective, run, candidates, digest=digest, slot=use,
                                          dry=dry, now=now, mode="notify",
-                                         scheduled_slot=mode == "digest" and not bypass_clock)
+                                         scheduled_slot=mode == "digest" and not bypass_clock,
+                                         clock_slot=slot)
             if (not dry and mode == "digest" and not bypass_clock and
                     outcome.status not in {"error", "config_missing", "send_failed", "overflow"}):
                 store.complete_notification_slot(digest, name, slot, status=outcome.status)

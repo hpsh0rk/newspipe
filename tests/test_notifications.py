@@ -129,6 +129,39 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(self.update.call_count, 1)
         self.assertEqual(self.store.source_budget_state(DAY, "src")["cards"], 2)
 
+    def test_completed_append_operation_renders_new_content_before_consuming_it(self):
+        self.cfg = replace(self.cfg, policies={"p": policy.NotificationPolicy(form="append_card")})
+        self.store.append_pending("src", [_item(1)])
+        self.notify()
+        original_payload = self.create.call_args.args[0]
+        self.store.append_pending("src", [_item(2)])
+        self.assertEqual(self.notify(now=NOW + timedelta(minutes=1)).status, "ok")
+        updated_payload = self.update.call_args.args[2]
+        self.assertNotEqual(updated_payload, original_payload)
+        self.assertIn("Title 2", json.dumps(updated_payload))
+        self.assertEqual(self.store.pending_count("src"), 0)
+
+    def test_pending_retry_uses_current_digest_clock_without_changing_original_receipt_slot(self):
+        for original in ("immediate", "manual_digest", "removed_slot"):
+            with self.subTest(original=original):
+                self.store = state.Store(Path(self.tmp.name) / original)
+                self.cfg = replace(self.cfg, slots={"am": "08:15", "old": "08:15"},
+                    policies={"p": policy.NotificationPolicy(mode="immediate") if original == "immediate"
+                        else policy.NotificationPolicy(mode="digest", slots=("old",))})
+                self.store.append_pending("src", [_item(1)])
+                self.send.side_effect = [OSError("lost response"), "message"]
+                kw = {"bypass_clock": True} if original == "manual_digest" else {"slot": "old"} if original == "removed_slot" else {}
+                self.assertEqual(self.notify(**kw).status, "send_failed")
+                before = self.store.unfinished_batch("src")
+                self.cfg = replace(self.cfg, slots={"am": "08:15"},
+                                   policies={"p": policy.NotificationPolicy(mode="digest", slots=("am",))})
+                self.assertEqual(self.notify(slot="am", now=NOW + timedelta(minutes=1)).status, "ok")
+                after = self.store.read_batch(DAY, "src", before["slot"])
+                self.assertEqual(after["delivery_id"], before["delivery_id"])
+                self.assertEqual(after["notification_slot"], before["notification_slot"])
+                self.assertEqual(after["delivery_payload"], before["delivery_payload"])
+                self.assertTrue(self.store.notification_slot_complete(DAY, "src", "am"))
+
     def test_collect_mode_consumes_locally_without_model_or_send(self):
         self.cfg = replace(self.cfg, policies={"p": policy.NotificationPolicy(mode="collect")})
         with patch.object(pipeline, "_enrich_new", side_effect=AssertionError("local collection enriched")):
