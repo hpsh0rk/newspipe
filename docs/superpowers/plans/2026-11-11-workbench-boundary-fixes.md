@@ -58,7 +58,31 @@
 **Files:** Modify `src/newspipe/webassets.py`; create `tests/test_workbench_javascript.py`; update this plan's execution record.
 **Interfaces:** Input/change events increment a per-form revision. Success clears dirty state only for the submitted revision. No-JS behavior and action envelopes remain unchanged.
 
-- [ ] Add Node behavioral tests using the actual code-owned asset and controlled pending responses; test edited/unchanged saves, failed saves and dry previews. Observe the in-flight edit regression fail.
-- [ ] Keep new edits dirty after an old request succeeds; run behavioral and SSR tests, expected PASS.
-- [ ] Run full suite on Python 3.11/3.12/3.13, secret scan, diff and JS syntax checks; dispatch one fresh scoped whole-change reviewer and correct Important findings with RED/GREEN.
-- [ ] Record evidence and remaining browser/live-platform limitations; commit `fix: preserve edits made while configuration saves are pending`.
+- [x] Add Node behavioral tests using the actual code-owned asset and controlled pending responses; test edited/unchanged saves, failed saves and dry previews. Observe the in-flight edit regression fail.
+- [x] Keep new edits dirty after an old request succeeds; run behavioral and SSR tests, expected PASS.
+- [x] Run full suite on Python 3.11/3.12/3.13, secret scan, diff and JS syntax checks; dispatch one fresh scoped whole-change reviewer and correct Important findings with RED/GREEN.
+- [x] Record evidence and remaining browser/live-platform limitations; commit `fix: preserve edits made while configuration saves are pending`.
+
+## Execution Record
+
+| Stage | Commit | Evidence |
+|---|---|---|
+| Destination lifetime | `b320ab6` | Two RED regressions, then 534 full-suite tests passed |
+| Advancing clocks | `96dccc2` | Collection/enrichment/lock/slot/midnight tests, then 543 full-suite tests passed |
+| Collect-only projection | `e3abc85` | Two RED regressions, then 545 full-suite tests passed; legacy quiet behavior retained |
+| Review corrections | `f058695` | Stale append payload and three protected policy-transition scenarios reproduced RED, then GREEN |
+| Revision-safe feedback | This commit | Actual local asset executed with controlled Node responses; new-edit failure reproduced RED, then all four behavioral cases passed |
+
+Final verification on Python 3.11, 3.12 and 3.13: **551 tests each, exit 0**. The four Node
+behavioral tests ran (Node present); scanner clean (138 files), local asset syntax and diff checks
+passed. The suite includes temporary fake-credential doctor/card-budget checks and protected Web
+actions; no real credentials, API calls, IM clients or notification side effects were used.
+
+One fresh independent review found two Important regressions introduced by moving the operation
+clock boundary. Both were corrected with RED/GREEN tests and full-suite verification; the corrections
+are not claimed to have had a second independent review. Exact-minute scheduler fixtures now freeze
+monotonic time to remove real microsecond jitter; explicit delay tests still advance it.
+
+No deployment, merge or push. The prior incomplete 768px/keyboard/reduced-motion browser matrix and
+live Feishu SDK/API/platform-receipt verification remain uncompleted. Unknown remote results beyond
+the idempotency horizon remain blocked; no reconciliation writer or force resend was added.

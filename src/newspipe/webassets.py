@@ -3,7 +3,12 @@
 JAVASCRIPT = r"""'use strict';
 (() => {
   const dirty = new Set();
+  const revisions = new WeakMap();
   const busy = new WeakSet();
+  const markDirty = form => {
+    dirty.add(form);
+    revisions.set(form, (revisions.get(form) || 0) + 1);
+  };
   const result = document.getElementById('action-result');
   const addText = (tag, content, parent = result) => {
     const node = document.createElement(tag);
@@ -26,11 +31,11 @@ JAVASCRIPT = r"""'use strict';
   document.querySelectorAll('[data-override]').forEach(override);
   document.addEventListener('input', event => {
     const form = event.target.closest('form[method="post"]');
-    if (form) dirty.add(form);
+    if (form) markDirty(form);
   });
   document.addEventListener('change', event => {
     const form = event.target.closest('form[method="post"]');
-    if (form) dirty.add(form);
+    if (form) markDirty(form);
     const node = event.target.closest('[data-override]');
     if (node) override(node);
   });
@@ -85,6 +90,7 @@ JAVASCRIPT = r"""'use strict';
     if (!form.reportValidity()) return;
     if (form.dataset.confirm && !window.confirm(form.dataset.confirm)) return;
     const target = event.submitter?.getAttribute('formaction') || form.action;
+    const submittedRevision = revisions.get(form) || 0;
     const data = new URLSearchParams(new FormData(form));
     const scroll = window.scrollY;
     const buttons = [...form.querySelectorAll('button[type="submit"], button:not([type])')];
@@ -126,7 +132,8 @@ JAVASCRIPT = r"""'use strict';
           addText('p', row.consequence_label);
         });
       } else if (!dry) {
-        dirty.delete(form);
+        if ((revisions.get(form) || 0) === submittedRevision) dirty.delete(form);
+        else addText('p', '提交的版本已保存；等待期间的新编辑尚未保存。');
         const latest = document.createElement('a');
         latest.href = form.elements.namedItem('return_to')?.value || location.pathname;
         latest.textContent = '查看最新页面（其他未保存的编辑仍保留）';
