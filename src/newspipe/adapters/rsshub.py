@@ -8,8 +8,10 @@
 from __future__ import annotations
 
 import email.utils
+import logging
 import re
 import time
+from urllib.parse import urlsplit
 
 from newspipe import net, rssconnect
 from newspipe.errors import ConfigError
@@ -30,19 +32,25 @@ def fetch(cfg: dict | None = None, since: float | None = None) -> list[dict]:
     ok_feeds = 0
     for entry in cfg.get("feeds") or []:
         url = rssconnect.feed_url(entry, cfg.get("rsshub_base_url", ""))
-        label = cfg.get("feed_label") or (url.split("/")[2] if entry.startswith("http") else entry.strip("/").split("/")[0])
+        parts = urlsplit(entry)
+        label = cfg.get("feed_label") or (parts.hostname if parts.scheme else parts.path.strip("/").split("/")[0]) or "RSS"
         root = None
+        parse_error = ""
         last_err: Exception | None = None
         for _ in range(3):  # RSSHub 冷路由首发常见 503（内部重试后），退避再试
             try:
                 root = rssconnect.parse_rss(net.request(url, timeout=40, http2=h2))
                 break
             except rssconnect.ProbeError as exc:
-                raise ConfigError(rssconnect.MESSAGES[exc.reason][0]) from None
+                parse_error = rssconnect.MESSAGES[exc.reason][0]
+                break
             except Exception as exc:
                 last_err = exc
                 time.sleep(3)
         if root is None:
+            if parse_error:
+                failed.append(f"{label}: {parse_error}")
+                continue
             import urllib.error
             code = last_err.code if isinstance(last_err, urllib.error.HTTPError) else None
             msg = f"HTTP {code}" if code else "连接失败；请在后台测试订阅以检查地址和网络"
@@ -81,4 +89,6 @@ def fetch(cfg: dict | None = None, since: float | None = None) -> list[dict]:
     # （fetched:0/status:quiet），单 feed 信源被上游持续拒绝后永远无声。
     if failed and not ok_feeds:
         raise RuntimeError("; ".join(failed)[:300])
+    if failed:
+        logging.getLogger(__name__).warning("RSS 订阅部分失败：%s", "; ".join(failed)[:300])
     return items
