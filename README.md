@@ -490,9 +490,25 @@ newspipe queue list --json                                # 待入库台账（�
 ## 测试
 
 ```bash
-python -m unittest discover -s tests        # 无第三方测试框架依赖
+python -m pip install -e '.[all]'
+NEWSPIPE_REQUIRE_JS_TESTS=1 python -m unittest discover -s tests  # Node 24，缺少即失败
 python3 scripts/scan_secrets.py             # 与 CI 使用同一密钥门禁
 ```
+
+CI 对全部分支 push / PR 验证 Python 3.11/3.12/3.13，显式安装 Node 24。
+浏览器测试是可选开发依赖、独立强制 CI job，不引入前端构建链：
+
+```bash
+python -m pip install -e '.[browser-test]'
+python -m playwright install chromium webkit  # Linux 用 install --with-deps
+NEWSPIPE_BROWSER_TESTS=1 python -m unittest discover -s tests -p test_browser_e2e.py
+```
+
+使用临时离线状态，覆盖两种引擎、手机/平板/桌面、保存失败及无 JS 表单；
+未启用浏览器标志时单元测试有意跳过，启用后缺工具或引擎会失败。
+失败截图/trace 写入被忽略的 `test-results/browser/`。
+真实应用权限、消息回执和点击闭环仍需[受控飞书验收](docs/live-feishu-acceptance.md)，
+离线通过不代表已实机通过，不能自动发卡或另起 WS 来补验收。
 
 覆盖：四轴配置与校验、采集与去重、预算熔断与回执复用、卡片渲染与元素预算、
 卡片交互（翻页/收藏/屏蔽）、**两种入站方式的装配**（含「handler 没注册到 SDK 上」这类
@@ -509,6 +525,7 @@ python3 scripts/scan_secrets.py             # 与 CI 使用同一密钥门禁
 |---|---|
 | [`AGENTS.md`](AGENTS.md) | 给 Agent 的使用说明：两种入站方式、CLI 契约、事件流、硬规则、排障 |
 | [`docs/host-integration.md`](docs/host-integration.md) | 宿主接入协议 v1 + 两份参考实现（通用宿主 / 插件式宿主） |
+| [`docs/live-feishu-acceptance.md`](docs/live-feishu-acceptance.md) | 离线验收命令、证据边界、受控实机验收与停止条件 |
 | `examples/news/*.yaml` | 配置示例（信源 / 模型 / 服务 / 卡片按钮） |
 | `newspipe api describe --json` | 命令面契约（运行时自取） |
 

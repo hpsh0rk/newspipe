@@ -46,6 +46,6 @@
 **Files:** Create `docs/live-feishu-acceptance.md`; update README.md, AGENTS.md and this plan.
 **Interfaces:** Document exact local/CI test commands and live acceptance stop conditions; no automatic live probe or outcome-reconciliation writer.
 
-- [ ] Record browser evidence, limits and a dedicated-app/exclusive-owner live checklist; verify documented commands against the implemented test gates.
-- [ ] Dispatch one fresh scoped whole-change reviewer; correct Important findings with RED/GREEN. Run Python 3.11/3.12/3.13 suites, real browser matrix, scanner and diff checks, expected PASS.
-- [ ] Commit `docs: record browser acceptance and controlled Feishu validation`; report commits and outstanding live acceptance honestly.
+- [x] Record browser evidence, limits and a dedicated-app/exclusive-owner live checklist; verify documented commands against the implemented test gates.
+- [x] Dispatch one fresh scoped whole-change reviewer; correct Important findings with RED/GREEN. Run Python 3.11/3.12/3.13 suites, real browser matrix, scanner and diff checks, expected PASS.
+- [x] Commit `docs: record browser acceptance and controlled Feishu validation`; report commits and outstanding live acceptance honestly.

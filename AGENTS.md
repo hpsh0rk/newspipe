@@ -376,5 +376,14 @@ Hermes 是「宿主协议」的一个具体实现，上面 §4.1–4.4 的步骤
 - **失败要出声**：入站、投递、hook 的失败都必须留痕（事件流 / 日志），
   「静默 + 重试」是最贵的故障形态。
 - **发布前跑一次**：`python3 scripts/scan_secrets.py`（0 = 干净）与
-  `python -m unittest discover -s tests`。
+  `NEWSPIPE_REQUIRE_JS_TESTS=1 python -m unittest discover -s tests`（Node 24；缺 Node 必须失败）。
+  CI 对全部分支 push / PR 验证 Python 3.11/3.12/3.13。
+- **前端改动还要真浏览器验收**：安装 `python -m pip install -e '.[browser-test]'`，
+  `python -m playwright install chromium webkit`（Linux 加 `--with-deps`），再运行
+  `NEWSPIPE_BROWSER_TESTS=1 python -m unittest discover -s tests -p test_browser_e2e.py`。
+  默认单元测试跳过浏览器用例；显式启用时缺 Playwright/任一引擎必须失败。
+  临时离线夹具不使用生产凭据、调度或消息，失败证据在被忽略的 `test-results/browser/`。
+- **离线通过不等于飞书实机通过**：按 `docs/live-feishu-acceptance.md` 先确认专用应用/群
+  或独占窗口、唯一 WS 所有者和 runner，再由用户明确批准有外部副作用的步骤。
+  Agent 不得擅自发探针卡、新增 WS、消费真实收藏、伪造回执或部署。
 - **发卡相关改动**：跑 `newspipe doctor --json` 确认元素预算没被顶破。
