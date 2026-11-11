@@ -189,6 +189,7 @@ input:not([type]),input[type=text],input[type=number],select,textarea{
 input[type=text]:hover,select:hover{border-color:var(--faint)}
 input[type=text]:focus,select:focus,textarea:focus{border-color:var(--accent); outline:0;
   box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 15%,transparent)}
+select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 input[type=checkbox]{accent-color:var(--accent); width:15px; height:15px}
 .toolbar{
   display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:0 0 16px;
@@ -314,6 +315,14 @@ dialog::backdrop{background:rgb(0 0 0 / .4)}
 dialog h2{margin-top:0}
 dialog p{overflow-wrap:anywhere}
 dialog .row-actions{margin-top:20px}
+#editor-dialog{width:min(1040px,calc(100vw - 40px));max-width:1040px;max-height:calc(100dvh - 40px);padding:0;overflow:auto}
+.editor-panel{margin:20px 0;min-width:0}
+#editor-dialog .editor-panel{margin:0;padding:20px 24px}
+.editor-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px;position:sticky;top:0;background:var(--surface);z-index:2;padding:8px 0}
+.editor-heading h2{margin:0;font-size:20px}
+.editor-cancel{margin-top:16px}
+#editor-dialog .workbench-grid{grid-template-columns:minmax(0,3fr) minmax(210px,1fr)}
+#editor-dialog .rule-aside{top:70px}
 .source-editor,.policy-editor,.rss-panel{margin-top:28px}
 .source-editor>summary,.policy-editor>summary,.rss-panel>summary{font-size:16px;font-weight:600}
 .workbench-grid{display:grid;grid-template-columns:minmax(0,3fr) minmax(240px,1fr);gap:24px;margin-top:20px}
@@ -369,9 +378,11 @@ dialog .row-actions{margin-top:20px}
 .receipt dd{margin:0;overflow-wrap:anywhere}
 .receipt code{white-space:normal}
 .preview-result article{border-top:1px solid var(--border);padding:12px 0}
-@media(max-width:900px){.workbench-grid{grid-template-columns:1fr}.rule-aside{position:static}}
+@media(max-width:900px){.workbench-grid,#editor-dialog .workbench-grid{grid-template-columns:1fr}.rule-aside{position:static}}
 @media(max-width:640px){
  .btn{min-height:44px}
+ #editor-dialog{width:calc(100vw - 16px);max-height:calc(100dvh - 16px)}
+ #editor-dialog .editor-panel{padding:12px}
  nav.tabs{padding:8px 8px 0;gap:0;overflow:visible}
  nav.tabs a.tab{font-size:12.5px;padding:8px;flex:1;text-align:center}
  .source-row{grid-template-columns:minmax(0,1fr);padding:16px;gap:8px}

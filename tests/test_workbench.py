@@ -82,7 +82,9 @@ class WorkbenchTests(unittest.TestCase):
         renderer = getattr(view, "notifications_html", None)
         self.assertIsNotNone(renderer, "new notification route must have a focused renderer")
         page = renderer(self.payload, schema=config.describe_schema(self.news), actions=self.actions, page={"edit": "p"})
-        self.assertIn('action="/api/actions/global-save"', page)
+        self.assertNotIn('action="/api/actions/global-save"', page)
+        global_page = renderer(self.payload, schema=config.describe_schema(self.news), actions=self.actions, page={"global": "1"})
+        self.assertIn('action="/api/actions/global-save"', global_page)
         self.assertIn('action="/api/actions/policy-save"', page)
         self.assertIn("全局硬限制", page)
         self.assertIn("更新已有卡片也计一次", page)
@@ -121,7 +123,7 @@ class WorkbenchTests(unittest.TestCase):
         self.assertNotIn('type="checkbox" name="confirm_delete"', page)
         policy_page = view.notifications_html(self.payload, schema=config.describe_schema(), actions=self.actions, page={"copy": "p"})
         self.assertIn('name="create_only" value="1"', policy_page)
-        self.assertIn('name="preview_kind" value="global"', policy_page)
+        self.assertIn('name="preview_kind" value="policy"', policy_page)
 
     def test_ops_has_separate_collection_notification_and_no_force_resend(self):
         from newspipe import state

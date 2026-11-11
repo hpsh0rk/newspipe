@@ -96,6 +96,115 @@ JAVASCRIPT = r"""'use strict';
     }
   }, true);
   document.querySelectorAll('form[data-server-validation]').forEach(form => { form.noValidate = false; });
+  const editorDialog = document.getElementById('editor-dialog');
+  const editorHost = editorDialog?.querySelector('[data-editor-host]');
+  const editorCache = document.getElementById('editor-cache');
+  const editors = new Map();
+  const editorURLs = new Map();
+  let editorTrigger = null;
+  let editorRead = 0;
+  const editorForms = panel => [...panel.querySelectorAll('form')];
+  const panelDirty = panel => editorForms(panel).some(form => dirty.has(form));
+  const panelBusy = panel => panel && editorForms(panel).some(form => busy.has(form));
+  const currentPanel = () => editorHost?.querySelector('[data-editor-panel]');
+  const updateDraftCount = () => {
+    const node = document.querySelector('[data-editor-drafts]');
+    const count = [...editors.values()].filter(panelDirty).length;
+    if (node) { node.hidden = !count; node.textContent = `${count} 个未保存草稿 · 重新打开对应编辑器可继续；离开页面后不保留。`; }
+  };
+  const parkPanel = panel => {
+    if (!panel) return;
+    if (panelDirty(panel)) editorCache.append(panel);
+    else { editors.delete(panel.dataset.editorKey); panel.remove(); }
+    updateDraftCount();
+  };
+  const closeEditor = (confirmed = false) => {
+    const panel = currentPanel();
+    if (panelBusy(panel)) return;
+    if (!confirmed && panel && panelDirty(panel) && !window.confirm('还有未保存的编辑，关闭弹窗？草稿仅在本页保留。')) return;
+    ++editorRead;
+    editorDialog.close();
+    parkPanel(panel);
+  };
+  const openPanel = (panel, trigger) => {
+    parkPanel(currentPanel());
+    editors.set(panel.dataset.editorKey, panel);
+    editorHost.append(panel);
+    editorTrigger = trigger;
+    panel.querySelectorAll('[data-override]').forEach(override);
+    panel.querySelectorAll('form[data-server-validation]').forEach(form => { form.noValidate = false; });
+    editorDialog.setAttribute('aria-labelledby', panel.getAttribute('aria-labelledby'));
+    if (!editorDialog.open) editorDialog.showModal();
+    const field = panel.querySelector('input:not([type="hidden"]), select');
+    if (field) { reveal(field); field.focus({preventScroll: true}); }
+    else panel.querySelector('[data-editor-close]')?.focus();
+    updateDraftCount();
+  };
+  const editorURL = href => {
+    const url = new URL(href, location.href);
+    if (url.origin !== location.origin || !['/config', '/notifications'].includes(url.pathname)) throw new Error('unsafe editor URL');
+    url.hash = '';
+    return url;
+  };
+  const safePanel = panel => {
+    const actions = new Set(['source-save', 'source-patch', 'source-copy', 'policy-save', 'global-save', 'rsshub-save', 'rsshub-probe', 'notification-preview']);
+    if (!panel.dataset.editorKey || !['source', 'source-copy', 'policy', 'global', 'rsshub'].includes(panel.dataset.editorPanel) ||
+        !panel.querySelector('h2') || panel.querySelector('script, iframe, object, embed, link, style, meta, base, template, img, svg, math')) return false;
+    return [panel, ...panel.querySelectorAll('*')].every(node => {
+      if (node.getAttributeNames().some(attr => /^on/i.test(attr) || ['srcdoc', 'src'].includes(attr.toLowerCase()))) return false;
+      for (const attr of ['action', 'formaction']) {
+        if (!node.hasAttribute(attr)) continue;
+        const url = new URL(node.getAttribute(attr), location.href);
+        if (url.origin !== location.origin || url.search || url.hash || !actions.has(url.pathname.replace('/api/actions/', '')) || !url.pathname.startsWith('/api/actions/')) return false;
+      }
+      if (node.tagName === 'FORM' && node.getAttribute('method')?.toLowerCase() !== 'post') return false;
+      if (node.hasAttribute('href')) {
+        try { editorURL(node.getAttribute('href')); } catch (_) { return false; }
+      }
+      return true;
+    });
+  };
+  const loadEditor = async link => {
+    if (panelBusy(currentPanel())) return;
+    const revision = ++editorRead;
+    try {
+      const url = editorURL(link.href);
+      const cached = editors.get(editorURLs.get(url.href));
+      if (cached && panelDirty(cached)) { openPanel(cached, link); return; }
+      const response = await fetch(url.href, {headers: {'Accept': 'text/html'}, cache: 'no-store', credentials: 'same-origin'});
+      if (!response.ok || !response.headers.get('Content-Type')?.includes('text/html') || editorURL(response.url).href !== url.href) throw new Error('editor read failed');
+      const page = new DOMParser().parseFromString(await response.text(), 'text/html');
+      const panels = page.querySelectorAll('[data-editor-panel]');
+      if (panels.length !== 1 || !safePanel(panels[0])) throw new Error('unsafe editor panel');
+      if (revision !== editorRead || panelBusy(currentPanel())) return;
+      const panel = editors.get(panels[0].dataset.editorKey);
+      const next = panel && panelDirty(panel) ? panel : document.importNode(panels[0], true);
+      editorURLs.set(url.href, next.dataset.editorKey);
+      openPanel(next, link);
+    } catch (_) {
+      if (revision !== editorRead) return;
+      const context = currentPanel() || document.querySelector('[data-editor-result]');
+      const feedback = feedbackFor(context);
+      feedback.className = 'banner err';
+      feedback.replaceChildren();
+      appendText('h3', '编辑器未加载', feedback);
+      appendText('p', '服务不可达或返回内容不可用。当前草稿保持不变；不会跳转或自动重试。', feedback);
+      expose(feedback);
+    }
+  };
+  if (editorDialog && typeof editorDialog.showModal === 'function') {
+    editorDialog.addEventListener('cancel', event => { event.preventDefault(); closeEditor(); });
+    editorDialog.addEventListener('close', () => {
+      const link = editorTrigger?.isConnected ? editorTrigger : [...document.querySelectorAll('[data-editor-open]')].find(link => link.href === editorTrigger?.href);
+      link?.focus({preventScroll: true});
+    });
+    const initial = document.querySelector('[data-editor-panel]');
+    if (initial) {
+      editorURLs.set(editorURL(location.href).href, initial.dataset.editorKey);
+      if (new URLSearchParams(location.search).has('draft')) editorForms(initial).forEach(form => dirty.add(form));
+      openPanel(initial, null);
+    }
+  }
   const dialog = document.getElementById('delete-dialog');
   let deleteTrigger = null;
   const closeDelete = () => {
@@ -111,17 +220,25 @@ JAVASCRIPT = r"""'use strict';
   document.addEventListener('input', event => {
     const form = event.target.closest('form[method="post"]');
     if (form) markDirty(form);
+    updateDraftCount();
   });
   document.addEventListener('change', event => {
     const form = event.target.closest('form[method="post"]');
     if (form) markDirty(form);
     const node = event.target.closest('[data-override]');
     if (node) override(node);
+    updateDraftCount();
   });
   window.addEventListener('beforeunload', event => {
     if (dirty.size) { event.preventDefault(); event.returnValue = ''; }
   });
   document.addEventListener('click', event => {
+    const editorLink = event.target.closest('[data-editor-open]');
+    const editorClose = event.target.closest('[data-editor-close]');
+    if (editorDialog && typeof editorDialog.showModal === 'function' && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) {
+      if (editorLink) { event.preventDefault(); loadEditor(editorLink); return; }
+      if (editorClose) { event.preventDefault(); closeEditor(); return; }
+    }
     const deletion = event.target.closest('a[data-delete]');
     if (deletion && dialog && typeof dialog.showModal === 'function') {
       event.preventDefault();
@@ -272,7 +389,8 @@ JAVASCRIPT = r"""'use strict';
           addText('p', row.consequence_label);
         });
       } else if (!dry) {
-        if ((revisions.get(form) || 0) === submittedRevision) dirty.delete(form);
+        const unchanged = (revisions.get(form) || 0) === submittedRevision;
+        if (unchanged) dirty.delete(form);
         else addText('p', '提交的版本已保存；等待期间的新编辑尚未保存。');
         const latest = document.createElement('a');
         latest.href = form.elements.namedItem('return_to')?.value || location.pathname;
@@ -289,6 +407,15 @@ JAVASCRIPT = r"""'use strict';
         // Only this reconciled form gets a new hash; stale sibling editors keep theirs.
         const hash = form.elements.namedItem('base_hash');
         if (hash && payload.hash) hash.value = payload.hash;
+        if (form.closest('[data-editor-panel]') && unchanged) {
+          const outside = feedbackFor(document.querySelector('[data-editor-result]'));
+          outside.className = feedback.className;
+          outside.replaceChildren(...feedback.childNodes);
+          feedback = outside;
+          // Closing is allowed only after the write is confirmed and reconciled.
+          busy.delete(form);
+          closeEditor(true);
+        }
         if (deletion) {
           const outside = feedbackFor(deleteTrigger);
           outside.className = feedback.className;
@@ -304,6 +431,7 @@ JAVASCRIPT = r"""'use strict';
         '先读取最新配置/操作状态核对是否已生效；不要直接重复未知结果的写入。']);
     } finally {
       busy.delete(form);
+      updateDraftCount();
       form.removeAttribute('aria-busy');
       buttons.forEach(button => { button.disabled = form.dataset.created === '1'; });
       if (deletion && dialog.open) feedback.focus({preventScroll: true});

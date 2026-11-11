@@ -297,7 +297,7 @@ class ConfigPageTests(unittest.TestCase):
                                 actions=act, page=page or {})
 
     def test_form_fields_come_from_the_schema(self) -> None:
-        page = self._page()
+        page = self._page({"new": "1"})
         for path in ("fetch.trigger", "filter.max_items", "enrich.summary", "deliver.form",
                      "deliver.budget.max_cards_per_day", "card.title"):
             self.assertIn(f'name="f.{path}"', page, path)
@@ -308,7 +308,8 @@ class ConfigPageTests(unittest.TestCase):
     def test_edit_form_is_prefilled_with_current_values(self) -> None:
         cfg = config.load(self.news)
         page = self._page({"edit": "aihot", "values": config.source_values(cfg.sources["aihot"])})
-        self.assertIn("编辑 <code>aihot</code>", page)
+        self.assertIn("编辑消息源", page)
+        self.assertIn("稳定 ID <code>aihot</code>", page)
         self.assertIn('<option value="aihot" selected>', page)         # 适配器预选
         class SlotControls(HTMLParser):
             def __init__(self):

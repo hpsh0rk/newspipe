@@ -77,19 +77,88 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 context.close()
 
     def editor(self, fixture, page, *, policy=False):
-        page.goto(fixture.url + ("/notifications?edit=live#policy-editor" if policy else "/config?edit=research#new"))
+        page.goto(fixture.url + ("/notifications?edit=live" if policy else "/config?edit=research"))
         action = "policy-save" if policy else "source-patch"
         return page.locator(f'form[action="/api/actions/{action}"]')
 
     def submit(self, page, form, button="验证 / 保存"):
+        handle = form.element_handle()
         with page.expect_response(lambda response: "/api/actions/" in response.url) as response:
             form.get_by_role("button", name=button, exact=True).click()
         envelope = response.value.json()
-        self.expect(form).not_to_have_attribute("aria-busy", "true")
+        page.wait_for_function("form => !form.hasAttribute('aria-busy')", arg=handle)
         return envelope
+
+    def close_editor(self, page, *, dirty=False):
+        if dirty:
+            page.once("dialog", lambda dialog: dialog.accept())
+        page.locator('#editor-dialog [data-editor-close]').first.click()
+        self.expect(page.locator('#editor-dialog')).not_to_be_visible()
 
     def source_label(self, fixture):
         return config.source_values(config.load(fixture.news_dir).sources["research"])["feed_label"]
+
+    def test_editor_links_open_dialogs_without_navigation_and_reopen_dirty_drafts(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                page.goto(fixture.url + "/notifications")
+                original = page.url
+                self.assertEqual(page.locator('form[action="/api/actions/policy-save"]').count(), 0)
+                page.get_by_role("link", name="创建策略", exact=True).click()
+                modal = page.locator("#editor-dialog")
+                self.expect(modal).to_be_visible()
+                self.assertEqual(page.url, original)
+                self.expect(modal.get_by_role("heading", name="创建策略", exact=True)).to_be_visible()
+                field = modal.locator('[name="p.label"]')
+                field.fill("Keep this draft")
+                old_hash = modal.locator('[name="base_hash"]').input_value()
+                page.once("dialog", lambda dialog: dialog.accept())
+                modal.locator('[data-editor-close]').first.click()
+                self.expect(modal).not_to_be_visible()
+                page.get_by_role("link", name="创建策略", exact=True).click()
+                self.expect(field).to_have_value("Keep this draft")
+                self.assertEqual(modal.locator('[name="base_hash"]').input_value(), old_hash)
+                page.once("dialog", lambda dialog: dialog.accept())
+                page.keyboard.press("Escape")
+                self.expect(modal).not_to_be_visible()
+                page.locator('[data-policy="live"]').get_by_role("link", name="编辑", exact=True).click()
+                self.expect(modal.get_by_role("heading", name="编辑策略", exact=True)).to_be_visible()
+                self.expect(modal.locator('[name="name"]')).to_have_value("live")
+                self.expect(modal.locator('[name="p.label"]')).to_have_value("值得及时知道")
+
+    def test_editor_dry_run_stays_open_and_confirmed_save_closes_and_refreshes(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                page.goto(fixture.url + "/notifications")
+                page.locator('[data-policy="live"]').get_by_role("link", name="编辑", exact=True).click()
+                modal = page.locator("#editor-dialog")
+                self.assertEqual(modal.count(), 1, "Missing shared editor dialog")
+                form = modal.locator('form[action="/api/actions/policy-save"]')
+                form.locator('[name="p.label"]').fill("Focused policy")
+                self.assertTrue(self.submit(page, form)["ok"])
+                self.expect(modal).to_be_visible()
+                form.locator('[name="dry"]').uncheck()
+                self.assertTrue(self.submit(page, form)["ok"])
+                self.expect(modal).not_to_be_visible()
+                self.expect(page.locator('[data-policy="live"]')).to_contain_text("Focused policy")
+                self.expect(page.locator("#action-result")).to_contain_text("已应用")
+                self.expect(page.locator("#action-result")).to_be_in_viewport()
+
+    def test_editor_read_failure_and_unsafe_markup_do_not_navigate_or_execute(self):
+        for engine in self.browsers:
+            for unsafe in (False, True):
+                with self.subTest(engine=engine, unsafe=unsafe), self.scenario(engine) as (fixture, page):
+                    page.goto(fixture.url + "/notifications")
+                    original = page.url
+                    if unsafe:
+                        page.route("**/notifications?new=1", lambda route: route.fulfill(content_type="text/html",
+                            body='<section data-editor-panel="policy"><script>window.unsafeExecuted=true</script></section>'))
+                    else:
+                        page.route("**/notifications?new=1", lambda route: route.abort())
+                    page.get_by_role("link", name="创建策略", exact=True).click()
+                    self.expect(page.locator("#action-result")).to_contain_text("编辑器未加载")
+                    self.assertEqual(page.url, original)
+                    self.assertIsNone(page.evaluate("window.unsafeExecuted"))
 
     def test_rsshub_candidate_probes_preserve_draft_and_hash_with_and_without_js(self):
         for engine in self.browsers:
@@ -128,6 +197,7 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 source = self.editor(fixture, page)
                 source.locator('[name="f.feed_label"]').fill("Keep sibling draft")
                 old_hash = source.locator('[name="base_hash"]').input_value()
+                self.close_editor(page, dirty=True)
                 page.get_by_text("设置地址与测试订阅", exact=True).click()
                 form = page.locator('form[action="/api/actions/rsshub-save"]')
                 form.locator('[name="r.base_url"]').fill("https://hub.example.invalid/prefix")
@@ -138,6 +208,8 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 self.expect(page.locator('[data-read-region="rsshub"]')).to_contain_text("https://hub.example.invalid/prefix")
                 self.expect(source.locator('[name="f.feed_label"]')).to_have_value("Keep sibling draft")
                 self.assertEqual(source.locator('[name="base_hash"]').input_value(), old_hash)
+                page.get_by_text("设置地址与测试订阅", exact=True).click()
+                form.locator('[name="dry"]').uncheck()
                 form.locator('[name="r.base_url"]').fill("")
                 self.assertTrue(self.submit(page, form)["ok"])
                 self.expect(page.locator('[data-read-region="rsshub"]')).to_contain_text("本地默认")
@@ -177,8 +249,11 @@ class WorkbenchBrowserTests(unittest.TestCase):
                         ).map(el => el.name)""")
                         self.assertEqual(unlabeled, [], route)
                         self.assertTrue(page.evaluate("matchMedia('(prefers-reduced-motion: reduce)').matches"))
-                        page.locator("body").click(position={"x": 1, "y": 1})
-                        page.keyboard.press("Tab")
+                        if page.locator('#editor-dialog[open]').count():
+                            page.locator('#editor-dialog [data-editor-close]').first.focus()
+                        else:
+                            page.locator("body").click(position={"x": 1, "y": 1})
+                        page.keyboard.press("Alt+Tab" if engine == "webkit" else "Tab")
                         focus = page.evaluate("""() => {const el = document.activeElement, style = getComputedStyle(el);
                             return {tag: el.tagName, html: el.outerHTML, visible: !!el.getClientRects().length,
                                 outline: parseFloat(style.outlineWidth), ring: style.boxShadow,
@@ -205,7 +280,7 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 saved = self.submit(page, form)
                 self.assertTrue(saved["ok"], saved)
                 self.assertEqual(self.source_label(fixture), "Candidate feed")
-                self.expect(label).to_have_value("Candidate feed")
+                self.expect(page.locator('#editor-dialog')).not_to_be_visible()
                 page.goto(fixture.url + "/config?copy=research")
                 form = page.locator('form[action="/api/actions/source-copy"]')
                 form.locator('[name="new_name"]').fill("research_copy")
@@ -217,7 +292,7 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 self.assertEqual(sources["research_copy"].notify.policy, "digest")
                 self.expect(page.locator('[data-source="research_copy"]')).to_be_visible()
                 self.expect(page.locator("#action-result")).to_be_in_viewport()
-                self.expect(form.get_by_role("button", name="验证 / 保存")).to_be_disabled()
+                self.expect(form).to_have_count(0)
 
     def test_policy_save_copy_and_grouped_validation_feedback(self):
         for engine in self.browsers:
@@ -247,7 +322,7 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 self.expect(slots).to_have_attribute("aria-invalid", "true")
                 described = slots.get_attribute("aria-describedby") or ""
                 self.assertIn("policy-p-slots-error", described)
-                self.expect(page.locator("#policy-p-slots-error")).not_to_be_empty()
+                self.expect(page.locator('[id="' + slots.get_attribute('aria-errormessage') + '"]')).not_to_be_empty()
                 self.expect(slots).to_be_focused()
 
     def test_native_invalid_collapsed_field_is_revealed_without_submission(self):
@@ -319,6 +394,7 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 field = form.locator('[name="f.feed_label"]')
                 field.fill("Unsaved draft")
                 old_hash = form.locator('[name="base_hash"]').input_value()
+                self.close_editor(page, dirty=True)
                 row = page.locator('[data-source="reading"]')
                 with page.expect_response(lambda r: "/api/actions/source-toggle" in r.url):
                     row.get_by_role("button", name="启用", exact=True).click()
@@ -447,7 +523,7 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 for name in ("digest", "live", "archive"):
                     self.assertTrue(cli.run_subcommand(["policy", "remove", name, "--json"], fixture.news_dir).ok)
                 page.goto(fixture.url + "/notifications?new=1#policy-editor")
-                empty = page.get_by_text("还没有模板。选择下面的起点，保存后才能绑定消息源。", exact=True)
+                empty = page.get_by_text("还没有模板。点击“创建策略”选择起点，保存后才能绑定消息源。", exact=True)
                 self.expect(empty).to_be_visible()
                 form = page.locator('form[action="/api/actions/policy-save"]')
                 form.locator('[name="name"]').fill("first_policy")
@@ -479,10 +555,9 @@ class WorkbenchBrowserTests(unittest.TestCase):
                     if javascript:
                         self.assertTrue(saved["ok"], saved)
                     self.assertEqual(config.load(fixture.news_dir).sources["research"].notify.overrides["max_cards_per_day"], 0)
-                    if not javascript:
-                        form = self.editor(fixture, page)
-                        form.get_by_text("自定义覆盖 · 每个字段可独立继承", exact=True).click()
-                        form.locator('[name="dry"]').uncheck()
+                    form = self.editor(fixture, page)
+                    form.get_by_text("自定义覆盖 · 每个字段可独立继承", exact=True).click()
+                    form.locator('[name="dry"]').uncheck()
                     field = form.locator('[name="n.max_cards_per_day"]')
                     field.fill("")
                     before = (fixture.news_dir / "sources.yaml").read_bytes()
@@ -520,6 +595,8 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 self.assertEqual(self.source_label(fixture), "Submitted version")
                 self.expect(field).to_have_value("Edited while waiting")
                 self.expect(page.locator("#action-result")).to_contain_text("新编辑尚未保存")
+                self.expect(page.locator('#editor-dialog')).to_be_visible()
+                self.close_editor(page, dirty=True)
                 dialogs = []
                 def stay(dialog):
                     dialogs.append(dialog.message)
@@ -687,7 +764,7 @@ class WorkbenchBrowserTests(unittest.TestCase):
         for engine in self.browsers:
             for javascript in (True, False):
                 with self.subTest(engine=engine, javascript=javascript), self.scenario(engine, javascript=javascript) as (fixture, page):
-                    for label, selector in (("编辑", "#new > summary"), ("复制", "#source-copy")):
+                    for label, selector in (("编辑", '[data-editor-panel="source"] h2'), ("复制", '[data-editor-panel="source-copy"] h2')):
                         page.goto(fixture.url + "/config")
                         page.locator('[data-source="research"]').get_by_role("link", name=label, exact=True).click()
                         self.expect(page.locator(selector)).to_be_in_viewport()

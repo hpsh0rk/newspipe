@@ -436,7 +436,7 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                 elif route == "/notifications":
                     from newspipe import config as config_mod
                     page = view_mod.notifications_html(payload, schema=config_mod.describe_schema(), actions=act, flash=flash,
-                           page={key: (query.get(key) or [""])[0] for key in ("edit", "copy", "new", "preset")})
+                           page={key: (query.get(key) or [""])[0] for key in ("edit", "copy", "new", "preset", "global")})
                 elif route == "/items":
                     page = self._items_page(payload, query)
                 else:
@@ -523,11 +523,15 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
             query = {}
             if action in {"source-patch", "policy-save", "source-save"}:
                 query = {"new": ["1"]} if form.get("create_only") or action == "source-save" else {"edit": form.get("name", [])}
+                if action == "policy-save" and form.get("copy_from"):
+                    query = {"copy": form["copy_from"]}
             elif action == "source-copy":
                 query = {"copy": form.get("name", [])}
             elif action == "rsshub-save":
                 query = {"rsshub": ["1"]}
-            key = drafts.put({"action": action, "query": query if retain or action == "rsshub-save" else {}, "flash": _flash_of(envelope),
+            elif action == "global-save":
+                query = {"global": ["1"]}
+            key = drafts.put({"action": action, "query": query if retain else {}, "flash": _flash_of(envelope),
                               "form": {k: v for k, v in form.items() if k != "token"} if retain else None,
                               "probe": envelope if name == "rsshub-probe" else None,
                               "preview": data if name == "notification-preview" and envelope.get("ok") else None})
