@@ -5,6 +5,30 @@ JAVASCRIPT = r"""'use strict';
   const dirty = new Set();
   const revisions = new WeakMap();
   const busy = new WeakSet();
+  const attribute = (node, name) => Element.prototype.getAttribute.call(node, name);
+  // SSR imports need inert markup, not a growing blacklist of loadable media.
+  // This only constrains the browser surface; CLI/actions remain the writer authority.
+  const inertTags = new Set('SECTION ARTICLE HEADER ASIDE DIV SPAN P SMALL B STRONG EM I A CODE PRE BR HR UL OL LI DL DT DD TABLE THEAD TBODY TFOOT TR TH TD H2 H3 H4 H5 FORM INPUT SELECT OPTION OPTGROUP BUTTON LABEL FIELDSET LEGEND DETAILS SUMMARY TEXTAREA'.split(' '));
+  const inertAttributes = new Set('class id role tabindex hidden title action formaction method name type value readonly required checked disabled selected multiple placeholder pattern min max step size rows cols for colspan rowspan open href target rel novalidate popover popovertarget'.split(' '));
+  const domProperties = new Set('action method elements reportValidity dataset querySelectorAll querySelector closest hasAttribute getAttribute setAttribute removeAttribute append remove noValidate classList'.toLowerCase().split(' '));
+  const actionNames = new Set('run source-toggle source-save source-patch source-copy policy-save policy-remove global-save notification-preview rsshub-save rsshub-probe collect notify notification-retry source-remove queue-ack events-ack flush'.split(' '));
+  const safeAction = value => {
+    const url = new URL(value, location.href || location.origin);
+    return url.origin === location.origin && !url.search && !url.hash &&
+      url.pathname.startsWith('/api/actions/') && actionNames.has(url.pathname.slice('/api/actions/'.length));
+  };
+  const safeMarkup = root => [root, ...root.querySelectorAll('*')].every(node => {
+    if (!inertTags.has(node.tagName) || node.getAttributeNames().some(attr =>
+        !inertAttributes.has(attr.toLowerCase()) && !/^(aria-|data-)/i.test(attr))) return false;
+    if (['INPUT', 'BUTTON', 'SELECT', 'TEXTAREA', 'FIELDSET'].includes(node.tagName) &&
+        ['name', 'id'].some(attr => domProperties.has((node.getAttribute(attr) || '').toLowerCase()))) return false;
+    if (node.tagName === 'FORM' && (node.getAttribute('method')?.toLowerCase() !== 'post' || !node.hasAttribute('action'))) return false;
+    for (const attr of ['action', 'formaction']) {
+      if (node.hasAttribute(attr) && !safeAction(node.getAttribute(attr))) return false;
+    }
+    if (node.hasAttribute('href') && !['http:', 'https:'].includes(new URL(node.getAttribute('href'), location.href).protocol)) return false;
+    return true;
+  });
   const markDirty = form => {
     dirty.add(form);
     revisions.set(form, (revisions.get(form) || 0) + 1);
@@ -209,7 +233,7 @@ JAVASCRIPT = r"""'use strict';
   const safePanel = panel => {
     const actions = new Set(['source-save', 'source-patch', 'source-copy', 'policy-save', 'global-save', 'rsshub-save', 'rsshub-probe', 'notification-preview']);
     if (!panel.dataset.editorKey || !['source', 'source-copy', 'policy', 'global', 'rsshub'].includes(panel.dataset.editorPanel) ||
-        !panel.querySelector('h2') || panel.querySelector('script, iframe, object, embed, link, style, meta, base, template, img, svg, math')) return false;
+        !panel.querySelector('h2') || !safeMarkup(panel)) return false;
     return [panel, ...panel.querySelectorAll('*')].every(node => {
       if (node.getAttributeNames().some(attr => /^on/i.test(attr) || ['srcdoc', 'src', 'style'].includes(attr.toLowerCase()))) return false;
       for (const attr of ['action', 'formaction']) {
@@ -362,8 +386,7 @@ JAVASCRIPT = r"""'use strict';
           return;
         }
         const next = fresh[0];
-        if (next.querySelector('script, iframe, object, embed, link, style, meta, base, template') ||
-            [next, ...next.querySelectorAll('*')].some(node => node.getAttributeNames().some(attr => /^on/i.test(attr) || ['srcdoc', 'style'].includes(attr.toLowerCase())))) {
+        if (!safeMarkup(next)) {
           throw new Error('unsafe region');
         }
         const messages = [...region.querySelectorAll('[data-action-feedback]')];
@@ -385,13 +408,17 @@ JAVASCRIPT = r"""'use strict';
   };
   document.addEventListener('submit', async event => {
     const form = event.target;
-    if (!form.action.includes('/api/actions/')) return;
+    if (attribute(form, 'method')?.toLowerCase() !== 'post') return;
+    // Block native navigation before any form property could be shadowed by a control.
     event.preventDefault();
+    const action = attribute(form, 'action') || '';
+    if (!safeAction(action)) return;
     if (busy.has(form)) return;
     if (form.hasAttribute('data-delete-form') && deleteTrigger?.dataset.deleteBlocked === '1') return;
     if (!form.reportValidity()) return;
     if (form.dataset.confirm && !window.confirm(form.dataset.confirm)) return;
-    const target = event.submitter?.getAttribute('formaction') || form.action;
+    const target = (event.submitter && attribute(event.submitter, 'formaction')) || action;
+    if (!safeAction(target)) return;
     const probe = target.endsWith('/rsshub-probe');
     const submittedRevision = revisions.get(form) || 0;
     const data = new URLSearchParams(new FormData(form));

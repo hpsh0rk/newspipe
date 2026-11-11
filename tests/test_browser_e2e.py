@@ -200,6 +200,54 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 held[0][0].fulfill(response=held[0][1])
                 self.expect(page.locator('#editor-dialog')).not_to_be_visible()
 
+    def test_editor_import_rejects_uncontrolled_forms_and_resource_markup(self):
+        for engine in self.browsers:
+            for unsafe in ('missing-action', 'clobbered-action', 'resource'):
+                with self.subTest(engine=engine, unsafe=unsafe), self.scenario(engine) as (fixture, page):
+                    page.goto(fixture.url + '/notifications?new=1')
+                    original = page.url
+                    modal = page.locator('#editor-dialog')
+                    field = modal.locator('[name="p.label"]')
+                    field.fill('Protected draft')
+                    base = modal.locator('[name="base_hash"]').input_value()
+                    posts = []
+                    page.on('request', lambda request: posts.append(request.url) if request.method == 'POST' else None)
+                    def inject(route):
+                        response = route.fetch()
+                        text = response.text()
+                        if unsafe == 'missing-action':
+                            text = text.replace(' action="/api/actions/policy-save"', '', 1)
+                        elif unsafe == 'clobbered-action':
+                            text = text.replace('</form>', '<input name="action" value="other"></form>', 1)
+                        else:
+                            text = text.replace('<header class="editor-heading">',
+                                '<video poster="https://unsafe.example.invalid/pixel"></video><header class="editor-heading">', 1)
+                        route.fulfill(response=response, body=text)
+                    page.route('**/notifications?new=1&preset=collect', inject)
+                    modal.get_by_role('link', name='只采集', exact=True).click()
+                    self.expect(page.locator('#action-result')).to_contain_text('编辑器未加载')
+                    self.expect(field).to_have_value('Protected draft')
+                    self.assertEqual(modal.locator('[name="base_hash"]').input_value(), base)
+                    self.assertEqual(page.url, original)
+                    self.assertEqual(posts, [])
+
+    def test_read_reconciliation_rejects_resource_loading_markup(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                page.goto(fixture.url + '/config')
+                attempts = []
+                page.on('request', lambda request: attempts.append(request.url) if request.method == 'POST' else None)
+                def inject(route):
+                    response = route.fetch()
+                    text = response.text().replace('data-read-region="sources">',
+                        'data-read-region="sources"><video poster="https://unsafe.example.invalid/pixel"></video>', 1)
+                    route.fulfill(response=response, body=text)
+                page.route('**/config', inject)
+                page.locator('[data-source="reading"]').get_by_role('button', name='启用', exact=True).click()
+                self.expect(page.locator('#action-result')).to_contain_text('刷新失败')
+                self.assertEqual(len(attempts), 1)
+                self.assertTrue(config.load(fixture.news_dir).sources['reading'].enabled)
+
     def test_rsshub_candidate_probes_preserve_draft_and_hash_with_and_without_js(self):
         for engine in self.browsers:
             for javascript in (True, False):

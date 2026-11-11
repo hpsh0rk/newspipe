@@ -17,6 +17,7 @@ class Element {
   append(node) { this.children.push(node); }
   replaceChildren() { this.children = []; }
   setAttribute() {}
+  getAttribute(name) { return name === 'method' ? 'post' : name === 'action' ? this.action : null; }
   removeAttribute() {}
   getBoundingClientRect() { return {top: 100, bottom: 150}; }
   scrollIntoView() {}
