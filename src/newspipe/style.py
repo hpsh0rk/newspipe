@@ -181,13 +181,13 @@ td .hint,td.hint{font-size:12px; color:var(--muted)}
 .srcrow summary .pill{margin:0 8px}
 
 /* ══ 8. 表单 / 工具条 / 按钮 ═══════════════════════════════════════════ */
-input:not([type]),input[type=text],input[type=number],select,textarea{
+input:not([type]),input[type=text],input[type=number],input[type=time],select,textarea{
   font:inherit; font-size:12.5px; padding:6px 10px; border-radius:var(--radius-xs);
   border:1px solid var(--border-strong); background:var(--surface); color:var(--text);
   transition:border-color var(--dur) var(--ease),box-shadow var(--dur) var(--ease);
 }
-input[type=text]:hover,select:hover{border-color:var(--faint)}
-input[type=text]:focus,select:focus,textarea:focus{border-color:var(--accent); outline:0;
+input[type=text]:hover,input[type=time]:hover,select:hover{border-color:var(--faint)}
+input[type=text]:focus,input[type=time]:focus,select:focus,textarea:focus{border-color:var(--accent); outline:0;
   box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 15%,transparent)}
 select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 input[type=checkbox]{accent-color:var(--accent); width:15px; height:15px}
@@ -382,6 +382,7 @@ form:has([name=dry]:not(:checked)) .save-actual{display:inline}
 .slot-edit-row input{width:100%;min-width:0}
 .time-edit-row{display:flex;align-items:center;gap:8px;margin:8px 0}
 .time-edit-row input{flex:1;min-width:0;width:100%}
+input[type=time]{min-height:38px}
 .policy-parameters{display:grid;grid-template-columns:minmax(120px,1fr) 1.4fr;gap:6px 16px;margin:12px 0}
 .policy-parameters dt{color:var(--muted);font-size:12px}
 .policy-parameters dd{margin:0;overflow-wrap:anywhere}

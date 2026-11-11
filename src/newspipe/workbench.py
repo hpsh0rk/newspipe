@@ -406,6 +406,22 @@ def preview_result(data):
         for row in data.get("sources", [])) + '</section>'
 
 
+def migration_result(data):
+    from newspipe.config import describe_schema
+    body = '<section class="preview-result"><h2>' + ("迁移预览 · 尚未应用" if data.get("dry_run") else "通知配置已迁移") + '</h2>'
+    for change in data.get("changes", []):
+        if change.get("source"):
+            body += f'<article><h3>{E(change["source"])} → {E(change["policy"])}</h3>'
+            body += f'<p>原策略：{E(change["before_policy"])}</p><details><summary>保留的策略参数（只读）</summary>'
+            values = change["values"]
+            body += _policy_records({"policies": {change["policy"]: {
+                "values": values, "summary": rule_summary({"policy_id": change["policy"], "values": values}, {})}}}, describe_schema())
+            body += '</details></article>'
+        else:
+            body += f'<article><h3>策略 {E(change["policy"])}</h3><p>固定发送时间：{E(" / ".join(change["times"].values()))}</p></article>'
+    return body + '</section>'
+
+
 def notification_status(payload):
     snap = payload.get("notification", {})
     rows = snap.get("sources", [])

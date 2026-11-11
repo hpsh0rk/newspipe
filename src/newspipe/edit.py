@@ -177,6 +177,12 @@ def set_policy(news_dir: Path, name: str, body: dict[str, Any], *,
         text = path.read_text(encoding="utf-8")
         template = policy.NotificationPolicy.parse(body, where=f"policies.{name}")
         template.validate(where=f"policies.{name}", slots=before.slots)
+        times = policy.sending_times(before, template.values())
+        previous = before.policies.get(name)
+        # Old distinct slot keys may share a clock; retain their completion identities.
+        if (len(set(times.values())) != len(times) and
+                (previous is None or times != policy.sending_times(before, previous.values()))):
+            raise ConfigError(f"policies.{name}.times: 发送时间不能重复；旧同刻计划只能原样保留或消除重复")
         if template.slots:
             body = template.values()
             body["times"] = policy.sending_times(before, body)
@@ -261,7 +267,8 @@ def migrate_notifications(news_dir: Path, *, base_hash: str | None = None,
         body.pop("slots", None)
         candidate = yamlblocks.set_block(candidate, "policies", name, _dump_block({name: body}))
         changes.append({"policy": name, "times": body["times"]})
-    for src in cfg.sources.values():
+    # YAML aliases point backward: materialize dependants before their anchor block.
+    for src in reversed(list(cfg.sources.values())):
         if not src.notify or not src.notify.overrides:
             continue
         stem = f"{src.notify.policy}_{src.name}"
@@ -283,7 +290,9 @@ def migrate_notifications(news_dir: Path, *, base_hash: str | None = None,
     out = _apply(news_dir, path, candidate, dry_run=dry_run, validate="sources")
     if out.get("ok"):
         out.update(op="notification-migrate", changes=changes,
-                   warning="旧时间引用已固定到策略；旧覆盖值转为独立策略。目标块内注释重写，其他块与投递台账保持原样。")
+                   warning=("迁移后将固定旧时间引用，并把旧覆盖值转为独立策略；当前尚未应用。" if dry_run else
+                            "旧时间引用已固定到策略；旧覆盖值已转为独立策略。")
+                   + "目标块内注释重写，其他块与投递台账保持原样。")
     return out
 
 

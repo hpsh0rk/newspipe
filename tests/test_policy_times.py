@@ -58,7 +58,7 @@ class PolicyTimeTests(unittest.TestCase):
         self.assertTrue(out["ok"], out)
 
     def test_invalid_times_rejected(self):
-        for times in ({}, {"x": "8:15"}, {"x": "24:00"}, {"x": "08:15", "y": "08:15"},
+        for times in ({}, {"x": "8:15"}, {"x": "24:00"},
                       {"bad key": "08:15"}, ["08:15"]):
             with self.subTest(times=times):
                 self.raw["policies"]["a"] = {"mode": "digest", "times": times}
@@ -112,6 +112,30 @@ class PolicyTimeTests(unittest.TestCase):
         out = self.command("notification", "migrate", "--base-hash", "stale")
         self.assertFalse(out["ok"], out)
         self.assertEqual(out["error"]["code"], "E_CONFLICT")
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_migration_preserves_legal_legacy_equal_clock_schedule_keys(self):
+        self.legacy()
+        self.raw["slots"]["pm"] = "08:15"
+        self.raw["policies"]["a"]["slots"] = ["am", "pm"]
+        self.load()
+        store = state.Store(self.news)
+        store.complete_notification_slot("2026-11-11", "s1", "am", status="ok")
+        out = self.command("notification", "migrate")
+        self.assertTrue(out["ok"], out)
+        cfg = config.load(self.news)
+        self.assertEqual(cfg.policies["a"].times, {"am": "08:15", "pm": "08:15"})
+        self.assertTrue(store.notification_slot_complete("2026-11-11", "s1", "am"))
+        self.assertFalse(store.notification_slot_complete("2026-11-11", "s1", "pm"))
+        body = {**cfg.policies["a"].values(), "label": "Renamed"}
+        self.assertTrue(self.command("policy", "set", "a", "--from-json", json.dumps(body))["ok"])
+
+    def test_new_duplicate_clock_writes_reject_without_losing_legacy_read_compatibility(self):
+        self.load()
+        before = self.path.read_bytes()
+        body = {"mode": "digest", "times": {"x": "08:15", "y": "08:15"}}
+        out = self.command("policy", "set", "new", "--from-json", json.dumps(body))
+        self.assertFalse(out["ok"], out)
         self.assertEqual(self.path.read_bytes(), before)
 
     def test_legacy_policy_cli_writes_freeze_clocks_instead_of_new_global_references(self):

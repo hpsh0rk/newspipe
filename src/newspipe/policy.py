@@ -72,8 +72,6 @@ def _fields(raw: dict, *, where: str) -> dict:
                 raise ConfigError(f"{path}: 需要发送时间映射")
             out[key] = {identifier(k, where=path): clock(v, where=f"{path}.{k}")
                         for k, v in value.items()}
-            if len(set(value.values())) != len(value):
-                raise ConfigError(f"{path}: 发送时间不能重复")
         elif key == "quiet_hours":
             quiet_window(value, where=path)
         elif key == "max_cards_per_day":

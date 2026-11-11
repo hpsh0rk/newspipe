@@ -206,8 +206,8 @@ def _flash_of(envelope: dict[str, Any]) -> dict[str, Any]:
         bits = [f"{k}: {data[k]}" for k in ("summary", "message", "changed", "note")
                 if data.get(k)]
         summary = " · ".join(bits) or "完成"
-        if action.get("name") == "rsshub-save" and data.get("dry_run"):
-            summary = "校验通过 · 尚未应用；取消“仅校验，不应用”后保存才会写入地址。"
+        if data.get("dry_run"):
+            summary = "校验通过 · 尚未应用；取消“仅校验，不应用”后保存才会真正写入配置。"
     return {
         "ok": ok,
         "label": str(action.get("label") or envelope.get("command") or "操作"),
@@ -456,6 +456,9 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                 if draft and draft.get("preview"):
                     from newspipe.workbench import preview_result
                     page = page.replace('<div id="action-result"', preview_result(draft["preview"]) + '<div id="action-result"', 1)
+                if draft and draft.get("migration"):
+                    from newspipe.workbench import migration_result
+                    page = page.replace('<div id="action-result"', migration_result(draft["migration"]) + '<div id="action-result"', 1)
                 self._send_html(200, page)
                 return
             self._send(200, {"ok": True, "service": "newspipe", "inbound": "http",
@@ -540,7 +543,8 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
             key = drafts.put({"action": action, "query": query if retain else {}, "flash": _flash_of(envelope),
                               "form": {k: v for k, v in form.items() if k != "token"} if retain else None,
                               "probe": envelope if name == "rsshub-probe" else None,
-                              "preview": data if name == "notification-preview" and envelope.get("ok") else None})
+                              "preview": data if name == "notification-preview" and envelope.get("ok") else None,
+                              "migration": data if name == "notification-migrate" and envelope.get("ok") else None})
             self.send_response(303)
             self.send_header("Location", f"{return_to}?draft={key}")
             self.send_header("Content-Length", "0")

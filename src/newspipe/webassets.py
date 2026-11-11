@@ -333,7 +333,9 @@ JAVASCRIPT = r"""'use strict';
     const note = form.querySelector('[data-source-version-note]');
     const sourceRevision = form.elements.namedItem('source_revision');
     const oldRevision = sourceRevision.value;
-    const url = [...editorURLs].find(([, key]) => key === panel.dataset.editorKey)?.[0];
+    // PRG draft handles are one-use; version reads need a canonical editor URL.
+    const url = attribute(form, 'action').endsWith('/source-save') ? '/config?new=1'
+      : `/config?edit=${encodeURIComponent(form.elements.namedItem('name').value)}`;
     button.disabled = true;
     busy.add(form);
     try {

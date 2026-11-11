@@ -104,6 +104,8 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 form = self.editor(fixture, page, policy=True)
                 self.expect(form.locator('[data-digest-times]')).not_to_be_visible()
                 form.locator('[name="p.mode"]').select_option("digest")
+                time_height = form.locator('[name="p.times"]').first.bounding_box()["height"]
+                self.assertGreaterEqual(time_height, 36, "Time input must match the other editor controls")
                 form.locator('[name="p.times"]').first.fill("09:45")
                 form.locator('[data-add-time]').click()
                 form.locator('[name="p.times"]').last.fill("12:30")
@@ -159,6 +161,25 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 self.assertEqual(form.locator('[name="base_hash"]').input_value(), old_hash)
                 self.expect(form.locator('[data-source-version-note]')).to_contain_text("消息源已被修改")
                 self.expect(form.locator('[name="f.feed_label"]')).to_have_value("Keep old draft")
+
+    def test_source_version_sync_after_one_use_prg_draft_uses_stable_editor_url(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                form = self.editor(fixture, page)
+                form.locator('[name="f.feed_label"]').fill("Keep restored draft")
+                form.locator('[name="f.feeds"]').fill("")
+                body = form.evaluate('form => new URLSearchParams(new FormData(form)).toString()')
+                response = page.request.post(fixture.url + '/api/actions/source-patch', data=body,
+                    headers={'Origin': fixture.url, 'Accept': 'text/html', 'Content-Type': 'application/x-www-form-urlencoded'}, max_redirects=0)
+                self.assertEqual(response.status, 303)
+                page.goto(fixture.url + response.headers['location'])
+                form = page.locator('#editor-dialog form[action="/api/actions/source-patch"]')
+                old_hash = form.locator('[name="base_hash"]').input_value()
+                self.assertTrue(cli.run_subcommand(['policy', 'set', 'live', '--from-json', '{"label":"New label"}', '--json'], fixture.news_dir).ok)
+                form.locator('[data-sync-source-version]').click()
+                self.expect(form.locator('[name="base_hash"]')).not_to_have_value(old_hash)
+                self.expect(form.locator('[name="f.feed_label"]')).to_have_value("Keep restored draft")
+                self.expect(form.locator('[name="f.feeds"]')).to_have_value("")
 
     def test_editor_links_open_dialogs_without_navigation_and_reopen_dirty_drafts(self):
         for engine in self.browsers:

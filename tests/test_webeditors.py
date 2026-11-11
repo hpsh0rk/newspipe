@@ -2,12 +2,36 @@
 import unittest
 import urllib.parse
 import urllib.request
+import yaml
 
 from newspipe import config, view
 from preview_workbench import offline_workbench
 
 
 class WebEditorTests(unittest.TestCase):
+    def test_no_js_migration_preview_reports_proposed_bindings_without_applying(self):
+        from test_rsshub_web import RssForm
+        from test_notification_contracts import TEXT
+        with offline_workbench() as fixture:
+            path = fixture.news_dir / 'sources.yaml'
+            raw = yaml.safe_load(TEXT)
+            raw["sources"]["last_source"] = dict(raw["sources"]["src"])
+            path.write_text(yaml.safe_dump(raw))
+            with urllib.request.urlopen(fixture.url + '/notifications') as response:
+                page = response.read().decode()
+            parser = RssForm()
+            parser.feed(page.replace('/api/actions/notification-migrate', '/api/actions/rsshub-save'))
+            before = path.read_bytes()
+            request = urllib.request.Request(fixture.url + '/api/actions/notification-migrate',
+                data=urllib.parse.urlencode(parser.values).encode(), headers={'Origin': fixture.url})
+            with urllib.request.urlopen(request) as response:
+                restored = response.read().decode()
+            self.assertTrue('迁移预览' in restored, restored.split('<p class="eyebrow">')[0][-1800:])
+            self.assertTrue('src → p_src' in restored)
+            self.assertTrue('last_source → p_last_source' in restored)
+            self.assertTrue('尚未应用' in restored)
+            self.assertEqual(path.read_bytes(), before)
+
     def test_no_js_policy_validation_preserves_all_added_clock_rows_and_keys(self):
         from test_rsshub_web import RssForm
         with offline_workbench() as fixture:
