@@ -11,7 +11,7 @@ Agent 不许直接改 `sources.yaml` / `hooks.yaml`，原因不是洁癖：
 1. **先验证再落盘**：候选文本先喂给真正的 `config.load()` 跑一遍完整校验，通过才写。
 2. **只动目标块**：块外的字节（含你写的注释）一字不动（见 `yamlblocks`）。
 3. **乐观并发**：`base_hash` 不匹配 = 有人在你读取之后改过 → 拒绝写入（`E_CONFLICT`），
-   让你重新读一遍再决定。`operation_id` 让重试幂等。
+   让你重新读一遍再决定。相同补丁不会重写文件；不自动重试未知结果的写入。
 
 所有函数返回**结构化结果**（不抛业务异常），供 CLI 直接包成 Result。
 """
@@ -28,6 +28,7 @@ import yaml
 
 from newspipe import config as config_mod
 from newspipe import _atomic, state, yamlblocks
+from newspipe import policy
 from newspipe.errors import ConfigError
 
 
@@ -91,12 +92,120 @@ def _apply(news_dir: Path, path: Path, candidate: str, *, dry_run: bool,
                         "`newspipe doctor --json` 可以看当前配置的完整问题清单"}
     if dry_run:
         return {"ok": True, "changed": False, "dry_run": True, "path": str(path)}
+    if path.is_file() and path.read_text(encoding="utf-8") == candidate:
+        return {"ok": True, "changed": False, "dry_run": False, "path": str(path), "hash": file_hash(path)}
     _atomic.atomic_write_text(path, candidate)
     return {"ok": True, "changed": True, "dry_run": False, "path": str(path),
             "hash": file_hash(path)}
 
 
 # ------------------------------------------------------------------ sources
+def merge_patch(current: Any, patch: Any) -> Any:
+    """JSON merge patch: objects merge, null deletes a key; zero/false/empty remain explicit."""
+    if not isinstance(patch, dict):
+        return patch
+    result = dict(current) if isinstance(current, dict) else {}
+    for key, value in patch.items():
+        if value is None:
+            result.pop(key, None)
+        else:
+            result[key] = merge_patch(result.get(key), value)
+    return result
+
+
+@_serialized
+def patch_source(news_dir: Path, name: str, body: dict[str, Any], *,
+                 base_hash: str | None = None, dry_run: bool = False,
+                 confirm_conversion: bool = False) -> dict[str, Any]:
+    path = _sources_path(news_dir)
+    conflict = _check_base_hash(path, base_hash)
+    if conflict:
+        return conflict
+    text = path.read_text(encoding="utf-8")
+    raw = yaml.safe_load(text)
+    if name not in raw["sources"]:
+        return {"code": "E_NOT_FOUND", "message": f"没有信源 {name!r}", "hint": "newspipe source list --json"}
+    if not isinstance(body, dict):
+        return {"code": "E_VALIDATION", "message": "补丁必须是 JSON 对象"}
+    merged = merge_patch(raw["sources"][name], body)
+    if bool(raw["sources"][name].get("notify")) != bool(merged.get("notify")) and not confirm_conversion:
+        return {"code": "E_VALIDATION", "message": "绑定/解绑会改变预算范围与通知行为，需要显式确认",
+                "hint": "先 notification preview 看变化，再带 --confirm-conversion；计数不会重置"}
+    if merged == raw["sources"][name]:
+        return {"ok": True, "changed": False, "dry_run": dry_run, "hash": file_hash(path), "source": name}
+    return set_source(news_dir, name, merged,
+                      base_hash=base_hash, dry_run=dry_run)
+
+
+@_serialized
+def set_policy(news_dir: Path, name: str, body: dict[str, Any], *,
+               base_hash: str | None = None, dry_run: bool = False) -> dict[str, Any]:
+    path = _sources_path(news_dir)
+    conflict = _check_base_hash(path, base_hash)
+    if conflict:
+        return conflict
+    try:
+        policy.identifier(name, where="policies")
+        before = config_mod.load(news_dir)
+        text = path.read_text(encoding="utf-8")
+        block = _dump_block({name: body})
+        existed = yamlblocks.has_block(text, "policies", name)
+        candidate = (yamlblocks.set_block(text, "policies", name, block) if existed else
+                     yamlblocks.append_block(text, "policies", name, block))
+        after = config_mod.load(news_dir, sources_text=candidate)
+    except (ConfigError, KeyError) as exc:
+        return {"code": "E_VALIDATION", "message": str(exc), "hint": "修正策略字段与槽位引用后重试；文件未改动"}
+    affected = [{"source": s.name, "enabled": s.enabled,
+                 "before": (policy.resolve(before, before.sources[s.name]).values),
+                 "after": policy.resolve(after, s).values}
+                for s in after.sources.values() if s.notify and s.notify.policy == name]
+    out = _apply(news_dir, path, candidate, dry_run=dry_run, validate="sources")
+    if out.get("ok"):
+        out.update(policy=name, op="update" if existed else "add", affected=affected,
+                   warning="该策略块内注释会被重写；其他配置块保持原样" if existed else "")
+    return out
+
+
+@_serialized
+def remove_policy(news_dir: Path, name: str, *, base_hash: str | None = None,
+                  dry_run: bool = False) -> dict[str, Any]:
+    path = _sources_path(news_dir)
+    conflict = _check_base_hash(path, base_hash)
+    if conflict:
+        return conflict
+    cfg = config_mod.load(news_dir)
+    refs = [s.name for s in cfg.sources.values() if s.notify and s.notify.policy == name]
+    if refs:
+        return {"code": "E_VALIDATION", "message": f"策略仍被引用：{', '.join(refs)}",
+                "hint": "先重新绑定所有信源（包括已停用信源），再删除策略"}
+    if name not in cfg.policies:
+        return {"code": "E_NOT_FOUND", "message": f"没有策略 {name!r}", "hint": "newspipe policy list --json"}
+    candidate = yamlblocks.remove_block(path.read_text(encoding="utf-8"), "policies", name)
+    out = _apply(news_dir, path, candidate, dry_run=dry_run, validate="sources")
+    if out.get("ok"):
+        out.update(policy=name, op="remove")
+    return out
+
+
+@_serialized
+def set_globals(news_dir: Path, body: dict[str, Any], *, base_hash: str | None = None,
+                dry_run: bool = False) -> dict[str, Any]:
+    path = _sources_path(news_dir)
+    conflict = _check_base_hash(path, base_hash)
+    if conflict:
+        return conflict
+    if not isinstance(body, dict) or set(body) - {"chat", "slots", "notifications"}:
+        return {"code": "E_VALIDATION", "message": "全局编辑只能包含 chat、slots、notifications",
+                "hint": "信源和策略请用 source patch / policy set"}
+    candidate = path.read_text(encoding="utf-8")
+    for key, value in body.items():
+        candidate = yamlblocks.set_top(candidate, key, None if value is None else _dump_block({key: value}))
+    out = _apply(news_dir, path, candidate, dry_run=dry_run, validate="sources")
+    if out.get("ok"):
+        out.update(op="globals", warning="被修改的全局块内注释会被重写；信源和策略块保持原样")
+    return out
+
+
 @_serialized
 def set_source(news_dir: Path, name: str, body: dict[str, Any], *,
                base_hash: str | None = None, dry_run: bool = False) -> dict[str, Any]:

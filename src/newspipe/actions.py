@@ -62,6 +62,8 @@ def _argv_run(form: dict[str, list[str]]) -> list[str]:
         argv = ["run", "--poll"]
     elif target in ("am", "noon", "pm"):
         argv = ["run", "--slot", target]
+    elif target.startswith("slot:") and target[5:].strip():
+        argv = ["run", "--slot", target[5:].strip()]
     elif target.startswith("source:"):
         name = target.split(":", 1)[1].strip()
         if not name:
@@ -171,6 +173,11 @@ def _argv_source_save(form: dict[str, list[str]]) -> list[str]:
     if not re.fullmatch(r"[A-Za-z0-9_\-]{1,40}", name):
         raise ActionInputError("信源名只能用字母、数字、下划线、短横，1–40 字符")
     body = build_source_body(form)
+    if "notify_policy" in form:
+        from newspipe.edit import merge_patch
+        binding = notification_binding(form)
+        if binding:
+            body["notify"] = merge_patch({}, binding)
     if not body:
         raise ActionInputError("表单是空的 —— 至少要提交 adapter 与 fetch.trigger")
     argv = ["source", "set", name, "--from-json", json.dumps(body, ensure_ascii=False)]
@@ -194,11 +201,123 @@ def _argv_source_remove(form: dict[str, list[str]]) -> list[str]:
     return argv
 
 
+def _write_flags(argv: list[str], form: dict[str, list[str]]) -> list[str]:
+    if _flag(form, "dry"):
+        argv.append("--dry-run")
+    base = (form.get("base_hash") or [""])[0].strip()
+    if base:
+        argv += ["--base-hash", base]
+    return argv
+
+
+def notification_binding(form: dict[str, list[str]]) -> dict | None:
+    from newspipe import config as config_mod
+    if "notify_policy" not in form:
+        return {}
+    name = (form.get("notify_policy") or [""])[0].strip()
+    if not name:
+        return None
+    overrides = {}
+    for field in config_mod.describe_schema()["policy_fields"]:
+        key = field["path"]
+        if key == "label" or f"inherit.{key}" not in form:
+            continue
+        inheritance = (form[f"inherit.{key}"] or [""])[0]
+        if inheritance == "inherit":
+            overrides[key] = None
+        elif inheritance == "custom":
+            overrides[key] = _coerce(field, form.get(f"n.{key}", []))
+        else:
+            raise ActionInputError(f"{key}: 只能选择 inherit 或 custom")
+    return {"policy": name, "overrides": overrides}
+
+
+def _source_patch_body(form):
+    body = build_source_body(form)
+    if "notify_policy" in form:
+        body["notify"] = notification_binding(form)
+    return body
+
+
+def _argv_source_patch(form):
+    argv = _write_flags(["source", "patch", _one(form, "name"), "--from-json",
+                         json.dumps(_source_patch_body(form), ensure_ascii=False)], form)
+    if _flag(form, "confirm_conversion"):
+        argv.append("--confirm-conversion")
+    return argv
+
+
+def _policy_body(form):
+    from newspipe import config as config_mod
+    return {field["path"]: _coerce(field, form[f"p.{field['path']}"])
+            for field in config_mod.describe_schema()["policy_fields"] if f"p.{field['path']}" in form}
+
+
+def _argv_policy_save(form):
+    return _write_flags(["policy", "set", _one(form, "name"), "--from-json", json.dumps(_policy_body(form))], form)
+
+
+def _argv_globals(form):
+    from newspipe import config as config_mod
+    body = {}
+    if "chat" in form:
+        body["chat"] = (form.get("chat") or [""])[0].strip()
+    if "slots_json" in form:
+        body["slots"] = json.loads(form["slots_json"][0])
+    fields = config_mod.describe_schema()["notification_fields"]
+    if any(f"g.{f['path']}" in form for f in fields):
+        body["notifications"] = {field["path"]: _coerce(field, form[f"g.{field['path']}"])
+                                 for field in fields if f"g.{field['path']}" in form
+                                 and not (field["path"] == "max_cards_per_day" and not form[f"g.{field['path']}"][0].strip())}
+    return _write_flags(["global", "set", "--from-json", json.dumps(body)], form)
+
+
+def _argv_preview(form):
+    name = (form.get("name") or [""])[0].strip()
+    kind = (form.get("preview_kind") or ["source"])[0]
+    argv = ["notification", "preview"]
+    if kind == "policy":
+        body = {"policies": {name: _policy_body(form)}}
+    elif kind == "source":
+        body = {"sources": {name: _source_patch_body(form)}}
+        argv += ["--source", name]
+    else:
+        raise ActionInputError("预览类型必须是 source 或 policy")
+    return [*argv, "--from-json", json.dumps(body)]
+
+
+def _argv_notify(form):
+    argv = ["notify", _one(form, "name")]
+    if _flag(form, "bypass_clock"):
+        if not _flag(form, "confirm"):
+            raise ActionInputError("越过通知时钟需要显式确认；预算与暂停仍生效")
+        argv.append("--bypass-clock")
+    if _flag(form, "dry"):
+        argv.append("--dry")
+    return argv
+
+
+def _argv_retry(form):
+    if not _flag(form, "confirm"):
+        raise ActionInputError("重试原操作需要显式确认")
+    return _write_flags(["notification", "retry", _one(form, "name"),
+                         "--operation-id", _one(form, "operation_id")], form)
+
+
 ACTIONS: dict[str, Action] = {
     a.name: a for a in (
         Action("run", "跑一轮", _argv_run),
         Action("source-toggle", "启用 / 停用信源", _argv_source_toggle, danger=True),
         Action("source-save", "保存信源（新增 / 修改）", _argv_source_save, danger=True),
+        Action("source-patch", "修改信源（保留未编辑字段）", _argv_source_patch, danger=True),
+        Action("source-copy", "复制信源（默认停用）", lambda f: _write_flags(["source", "copy", _one(f, "name"), "--new-name", _one(f, "new_name")], f), danger=True),
+        Action("policy-save", "保存通知策略", _argv_policy_save, danger=True),
+        Action("policy-remove", "删除通知策略", lambda f: _write_flags(["policy", "remove", _one(f, "name")], f), danger=True),
+        Action("global-save", "保存全局通知设置", _argv_globals, danger=True),
+        Action("notification-preview", "预览有效通知规则", _argv_preview),
+        Action("collect", "只采集一次", lambda f: ["collect", _one(f, "name"), *(["--dry"] if _flag(f, "dry") else [])]),
+        Action("notify", "通知现有待处理", _argv_notify, danger=True),
+        Action("notification-retry", "安全重试原操作", _argv_retry, danger=True),
         Action("source-remove", "删除信源", _argv_source_remove, danger=True),
         Action("queue-ack", "标记已入库（⭐）", _argv_queue_ack),
         Action("events-ack", "标记事件已消费", _argv_events_ack),
@@ -218,7 +337,7 @@ def dispatch(name: str, form: dict[str, list[str]], news_dir: Path) -> dict[str,
                            hint=f"可用动作：{', '.join(sorted(ACTIONS))}").as_dict()
     try:
         argv = spec.argv(form)
-    except ActionInputError as exc:
+    except (ActionInputError, ValueError, TypeError) as exc:
         return result.fail(name, "E_USAGE", str(exc)).as_dict()
     argv = [*argv, "--json"]
     res = cli.run_subcommand(argv, news_dir)

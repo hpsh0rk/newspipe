@@ -9,6 +9,20 @@
 from __future__ import annotations
 
 import re
+import yaml
+
+
+def _flow_entries(text: str, top_key: str):
+    root = yaml.compose(text)
+    if not isinstance(root, yaml.MappingNode):
+        return None
+    node = next((value for key, value in root.value if key.value == top_key), None)
+    return node.value if isinstance(node, yaml.MappingNode) and node.flow_style else None
+
+
+def _flow_block(block: str) -> str:
+    return yaml.safe_dump(yaml.safe_load(block), allow_unicode=True, default_flow_style=True,
+                          width=100000, sort_keys=False).strip()[1:-1]
 
 
 def _lines(text: str) -> list[str]:
@@ -21,7 +35,7 @@ def _indent(line: str) -> int:
 
 def _top_span(lines: list[str], top_key: str) -> tuple[int, int, int] | None:
     """返回 `(标题行号, 缩进, 体结束行号)`。"""
-    pattern = re.compile(rf"^(\s*){re.escape(top_key)}\s*:\s*(#.*)?$")
+    pattern = re.compile(rf"^([ \t]*){re.escape(top_key)}\s*:.*$")
     for index, raw in enumerate(lines):
         match = pattern.match(raw.rstrip("\n"))
         if not match:
@@ -39,7 +53,7 @@ def _top_span(lines: list[str], top_key: str) -> tuple[int, int, int] | None:
 
 def _child_span(lines: list[str], start: int, end: int, child_indent: int,
                 name: str) -> tuple[int, int] | None:
-    pattern = re.compile(rf"^(\s*){re.escape(name)}\s*:\s*(#.*)?$")
+    pattern = re.compile(rf"^([ \t]*){re.escape(name)}\s*:.*$")
     for index in range(start, end):
         raw = lines[index].rstrip("\n")
         if not raw.strip():
@@ -58,6 +72,12 @@ def _child_span(lines: list[str], start: int, end: int, child_indent: int,
 
 def get_block(text: str, top_key: str, name: str) -> str | None:
     """取出某个子块的原文（含其缩进），找不到返回 None。"""
+    entries = _flow_entries(text, top_key)
+    if entries is not None:
+        for key, value in entries:
+            if key.value == name:
+                return text[key.start_mark.index:value.end_mark.index]
+        return None
     lines = _lines(text)
     top = _top_span(lines, top_key)
     if top is None:
@@ -92,6 +112,12 @@ def _normalise(block: str, child_indent: int) -> str:
 
 def set_block(text: str, top_key: str, name: str, block: str) -> str:
     """替换已存在的子块（块外不动）。不存在则抛 KeyError。"""
+    entries = _flow_entries(text, top_key)
+    if entries is not None:
+        for key, value in entries:
+            if key.value == name:
+                return text[:key.start_mark.index] + _flow_block(block) + text[value.end_mark.index:]
+        raise KeyError(f"{top_key} 下没有 {name!r}")
     lines = _lines(text)
     top = _top_span(lines, top_key)
     if top is None:
@@ -110,6 +136,11 @@ def set_key_in_block(text: str, top_key: str, name: str, key: str, value: str) -
     用来做「翻一个开关」这类最小改动——整块重序列化会把 `slots: [am, pm]` 摊成多行，
     制造无意义的 diff 噪音。
     """
+    block = get_block(text, top_key, name)
+    if block and ("{" in block.splitlines()[0]):
+        parsed = yaml.safe_load(block)
+        parsed[name][key] = yaml.safe_load(value)
+        return set_block(text, top_key, name, yaml.safe_dump(parsed, allow_unicode=True, sort_keys=False))
     lines = _lines(text)
     top = _top_span(lines, top_key)
     if top is None:
@@ -122,7 +153,7 @@ def set_key_in_block(text: str, top_key: str, name: str, key: str, value: str) -
     key_indent = indent + 4
     pattern = re.compile(rf"^\s*{re.escape(key)}\s*:")
     for index in range(start + 1, stop):
-        if pattern.match(lines[index]):
+        if _indent(lines[index]) == key_indent and pattern.match(lines[index]):
             lines[index] = " " * key_indent + f"{key}: {value}\n"
             return "".join(lines)
     lines.insert(start + 1, " " * key_indent + f"{key}: {value}\n")
@@ -131,6 +162,12 @@ def set_key_in_block(text: str, top_key: str, name: str, key: str, value: str) -
 
 def append_block(text: str, top_key: str, name: str, block: str) -> str:
     """在顶层键的体末尾追加子块（不存在则先建顶层键）。"""
+    entries = _flow_entries(text, top_key)
+    if entries is not None:
+        root = yaml.compose(text)
+        node = next(value for key, value in root.value if key.value == top_key)
+        end = node.end_mark.index - 1
+        return text[:end] + (", " if entries else "") + _flow_block(block) + text[end:]
     lines = _lines(text)
     top = _top_span(lines, top_key)
     if top is None:
@@ -148,6 +185,18 @@ def append_block(text: str, top_key: str, name: str, block: str) -> str:
 
 def remove_block(text: str, top_key: str, name: str) -> str:
     """删除子块（连同它自己的空行），块外不动。不存在则抛 KeyError。"""
+    entries = _flow_entries(text, top_key)
+    if entries is not None:
+        for index, (key, value) in enumerate(entries):
+            if key.value != name:
+                continue
+            start, stop = key.start_mark.index, value.end_mark.index
+            if index < len(entries) - 1:
+                stop = entries[index + 1][0].start_mark.index
+            elif index:
+                start = entries[index - 1][1].end_mark.index
+            return text[:start] + text[stop:]
+        raise KeyError(f"{top_key} 下没有 {name!r}")
     lines = _lines(text)
     top = _top_span(lines, top_key)
     if top is None:
@@ -160,11 +209,20 @@ def remove_block(text: str, top_key: str, name: str) -> str:
     # 吞掉紧跟其后的空行，避免留下连续空行
     while stop < end and not lines[stop].strip():
         stop += 1
-    return "".join(lines[:start] + lines[stop:])
+    new = lines[:start] + lines[stop:]
+    candidate = "".join(new)
+    if not block_names(candidate, top_key):
+        comment = new[_index].partition("#")[2].rstrip()
+        new[_index] = " " * indent + top_key + ": {}" + (f" # {comment}" if comment else "") + "\n"
+        candidate = "".join(new)
+    return candidate
 
 
 def block_names(text: str, top_key: str) -> list[str]:
     """列出顶层键下的一级子键名（保持文件顺序）。"""
+    entries = _flow_entries(text, top_key)
+    if entries is not None:
+        return [key.value for key, _ in entries]
     lines = _lines(text)
     top = _top_span(lines, top_key)
     if top is None:
@@ -180,3 +238,13 @@ def block_names(text: str, top_key: str) -> list[str]:
             if match:
                 names.append(match.group(1))
     return names
+
+
+def set_top(text: str, key: str, block: str | None) -> str:
+    """Replace/delete one top-level block, byte-preserving every other block."""
+    lines = _lines(text)
+    span = _top_span(lines, key)
+    if span is None:
+        return text if block is None else text.rstrip("\n") + "\n" + block
+    start, _, end = span
+    return "".join(lines[:start]) + (block or "") + "".join(lines[end:])

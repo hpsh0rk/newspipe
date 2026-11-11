@@ -437,8 +437,8 @@ def describe_schema(news_dir: Path | None = None) -> dict[str, Any]:
     return {"contract_version": 1, "axes": axes, "fields": f, "adapters": adapter_names(),
             "policy_fields": policy_fields, "notification_fields": notification_fields,
             "slots": slots,
-            "globals": {"note": "chat 与 slots 是全局设置，不是某个源的字段；CLI 目前没有写这条路径",
-                        "editable": False}}
+            "globals": {"note": "chat、slots、notifications 由 global set 原子校验；策略由 policy set 编辑",
+                        "editable": True}}
 
 
 def source_values(cfg: SourceConfig) -> dict[str, Any]:
@@ -552,6 +552,7 @@ def _parse_sources(raw: Any, *, news_dir: Path) -> dict[str, SourceConfig]:
     known = available_adapters()
     out: dict[str, SourceConfig] = {}
     for name, body in raw.items():
+        policy_lib.identifier(name, where="sources")
         where = f"sources.{name}"
         if not isinstance(body, dict):
             raise ConfigError(f"{where} 需要映射")
@@ -648,6 +649,7 @@ def summarize(cfg: Config) -> list[dict[str, Any]]:
     """给 --verbose / --dry 用的可读展开视图。"""
     rows = []
     for src in cfg.sources.values():
+        rule = policy_lib.resolve(cfg, src)
         rows.append({
             "source": src.name,
             "enabled": src.enabled,
@@ -664,5 +666,7 @@ def summarize(cfg: Config) -> list[dict[str, Any]]:
                         "quiet_hours": src.deliver.quiet_hours,
                         "max_cards_per_day": src.deliver.max_cards_per_day,
                         "min_gap_min": src.deliver.min_gap_min},
+            "notify": {"policy": src.notify.policy, "overrides": dict(src.notify.overrides)} if src.notify else None,
+            "effective_notification": {"values": rule.values, "origins": rule.origins} if rule else None,
         })
     return rows

@@ -1,0 +1,271 @@
+"""Validated workbench writes and read-only previews use the CLI boundary."""
+from __future__ import annotations
+
+import json
+import sys
+import threading
+import unittest
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
+
+import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from newspipe import actions, cli, config, edit, inbound, pipeline, policy, state
+from test_news_pipeline import _item
+
+TEXT = """# preserved header
+chat: oc_test
+slots:
+  am: '08:15'
+policies:
+  p:
+    mode: digest
+    slots: [am]
+sources:
+  src:
+    adapter: rsshub
+    fetch: {trigger: poll, interval_min: 10}
+    notify: {policy: p, overrides: {quiet_hours: '', min_gap_min: 0}}
+    card: {title: 'Original', custom_card_key: yes}
+    custom_adapter_key: {nested: [1, 2]}
+  # other source must remain byte-preserved
+  other:
+    adapter: hn
+    enabled: false
+    fetch: {trigger: manual}
+    notify: {policy: p}
+"""
+
+
+class NotificationContractTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.news = Path(self.tmp.name)
+        self.path = self.news / "sources.yaml"
+        self.path.write_text(TEXT)
+
+    def command(self, *argv):
+        return cli.run_subcommand([*argv, "--json"], self.news).as_dict()
+
+    def test_source_patch_preserves_unknown_keys_and_removes_only_explicit_override(self):
+        before = self.path.read_text().split("  other:", 1)[1]
+        patch_body = {"card": {"title": "Renamed"}, "notify": {"overrides": {"quiet_hours": None}}}
+        out = self.command("source", "patch", "src", "--from-json", json.dumps(patch_body))
+        self.assertTrue(out["ok"], out)
+        raw = yaml.safe_load(self.path.read_text())["sources"]["src"]
+        self.assertEqual(raw["custom_adapter_key"], {"nested": [1, 2]})
+        self.assertIn("custom_card_key", raw["card"])
+        self.assertNotIn("quiet_hours", raw["notify"]["overrides"])
+        self.assertEqual(raw["notify"]["overrides"]["min_gap_min"], 0)
+        self.assertEqual(self.path.read_text().split("  other:", 1)[1], before)
+
+    def test_patch_is_idempotent_and_dry_or_conflict_writes_nothing(self):
+        body = json.dumps({"enabled": False})
+        base = edit.file_hash(self.path)
+        before = self.path.read_bytes()
+        dry = self.command("source", "patch", "src", "--from-json", body, "--dry-run", "--base-hash", base)
+        self.assertTrue(dry["ok"], dry)
+        self.assertFalse(dry["changed"])
+        self.assertEqual(self.path.read_bytes(), before)
+        out = self.command("source", "patch", "src", "--from-json", body, "--base-hash", base)
+        self.assertTrue(out["changed"])
+        again = self.command("source", "patch", "src", "--from-json", body)
+        self.assertTrue(again["ok"], again)
+        self.assertFalse(again["changed"])
+        conflict = self.command("source", "patch", "src", "--from-json", "{}", "--base-hash", base)
+        self.assertEqual(conflict["error"]["code"], "E_CONFLICT")
+
+    def test_policy_crud_reports_all_bindings_and_rejects_referenced_delete(self):
+        out = self.command("policy", "set", "p", "--from-json", '{"mode":"immediate","label":"Continuous"}')
+        self.assertTrue(out["ok"], out)
+        self.assertEqual({s["source"] for s in out["data"]["affected"]}, {"src", "other"})
+        before = self.path.read_bytes()
+        out = self.command("policy", "remove", "p")
+        self.assertEqual(out["error"]["code"], "E_VALIDATION")
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertTrue(self.command("policy", "set", "copy", "--from-json", '{"mode":"collect"}')["ok"])
+        self.assertTrue(self.command("policy", "remove", "copy")["ok"])
+        self.assertTrue(self.command("policy", "show", "p")["ok"])
+        self.assertTrue(self.command("policy", "list")["ok"])
+
+    def test_global_edit_rejects_referenced_slot_and_preserves_sources_bytes(self):
+        before = self.path.read_text().split("sources:", 1)[1]
+        denied = self.command("global", "set", "--from-json", '{"slots":{}}')
+        self.assertFalse(denied["ok"])
+        out = self.command("global", "set", "--from-json", '{"notifications":{"paused":true,"max_cards_per_day":0}}')
+        self.assertTrue(out["ok"], out)
+        self.assertTrue(self.path.read_text().split("sources:", 1)[1].startswith(before))
+        self.assertTrue(config.load(self.news).notifications.paused)
+
+    def test_empty_and_inline_mapping_edits_remain_valid(self):
+        self.path.write_text("chat: oc_test\nslots: {}\nsources: {}\npolicies: {}\n")
+        self.assertTrue(self.command("policy", "set", "p", "--from-json", "{}")["ok"])
+        self.assertTrue(self.command("source", "set", "src", "--from-json", '{"adapter":"hn","fetch":{"trigger":"manual"}}')["ok"])
+        self.assertTrue(self.command("source", "remove", "src")["ok"])
+        self.assertEqual(config.load(self.news).sources, {})
+
+    def test_preview_validates_candidate_without_network_model_or_state_writes(self):
+        store = state.Store(self.news)
+        store.append_pending("src", [_item(1)])
+        before = {str(p.relative_to(self.news)): p.read_bytes() for p in self.news.rglob("*") if p.is_file()}
+        with patch.object(pipeline, "_adapter", side_effect=AssertionError("preview fetched")), \
+             patch.object(pipeline, "_enrich_new", side_effect=AssertionError("preview enriched")), \
+             patch.object(store, "note_card", side_effect=AssertionError("preview counted")):
+            out = self.command("notification", "preview", "--source", "src", "--from-json",
+                               '{"policies":{"p":{"mode":"collect"}}}')
+        self.assertTrue(out["ok"], out)
+        self.assertFalse(out["changed"])
+        row = out["data"]["sources"][0]
+        self.assertEqual(row["after"]["values"]["mode"], "collect")
+        self.assertEqual(row["pending"], 1)
+        self.assertIn("consum", row["consequence"])
+        after = {str(p.relative_to(self.news)): p.read_bytes() for p in self.news.rglob("*") if p.is_file()}
+        self.assertEqual(after, before)
+
+    def test_source_patch_action_keeps_inherit_and_custom_values_distinct(self):
+        out = actions.dispatch("source-patch", {"name": ["src"], "f.feed_label": ["Changed"],
+             "notify_policy": ["p"], "inherit.quiet_hours": ["inherit"],
+             "inherit.min_gap_min": ["custom"], "n.min_gap_min": ["0"]}, self.news)
+        self.assertTrue(out["ok"], out)
+        src = config.load(self.news).sources["src"]
+        self.assertNotIn("quiet_hours", src.notify.overrides)
+        self.assertEqual(src.notify.overrides["min_gap_min"], 0)
+        self.assertIn("custom_adapter_key", src.extra)
+
+    def test_invalid_numeric_form_returns_envelope_not_internal_error(self):
+        out = actions.dispatch("source-patch", {"name": ["src"], "f.fetch.interval_min": ["abc"]}, self.news)
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error"]["code"], "E_USAGE")
+
+    def test_separate_collect_and_notify_commands_use_distinct_pipeline_entrypoints(self):
+        run = pipeline.SourceRun(source="src", status="collected")
+        with patch.object(pipeline, "collect_source", return_value=run) as collect, \
+             patch.object(pipeline, "notify_source", return_value=run) as notify:
+            self.assertTrue(self.command("collect", "src", "--dry")["ok"])
+            collect.assert_called_once()
+            notify.assert_not_called()
+            self.assertTrue(self.command("notify", "src", "--bypass-clock", "--dry")["ok"])
+            self.assertTrue(notify.call_args.kwargs["bypass_clock"])
+
+    def test_new_contracts_are_discoverable(self):
+        names = {c["name"] for c in self.command("api", "describe")["data"]["commands"]}
+        self.assertTrue({"source patch", "policy list", "policy set", "policy remove", "global set",
+                         "notification preview", "collect", "notify", "notification retry"} <= names)
+
+    def test_policy_preview_matches_replace_save_not_merge_of_old_values(self):
+        self.command("policy", "set", "p", "--from-json", '{"quiet_hours":"23:00-07:30","min_gap_min":10}')
+        preview = self.command("notification", "preview", "--source", "src", "--from-json",
+                               '{"policies":{"p":{"mode":"immediate"}}}')
+        self.assertTrue(preview["ok"], preview)
+        self.assertEqual(preview["data"]["policies"]["p"]["values"]["quiet_hours"], "")
+
+    def test_safe_retry_needs_matching_identity_and_blocks_expired_remote_outcome(self):
+        store = state.Store(self.news)
+        batch = {"source": "src", "digest": "2026-11-11", "slot": "am", "delivery_pending": True,
+                 "delivery_id": "op", "notification_attempts": 3, "notification_retry_after": 100,
+                 "form": "card", "items": [], "delivery_chat": "oc_test", "card_id": "card"}
+        store.write_batch(batch)
+        bad = self.command("notification", "retry", "src", "--operation-id", "other")
+        self.assertEqual(bad["error"]["code"], "E_CONFLICT")
+        dry = self.command("notification", "retry", "src", "--operation-id", "op", "--dry-run")
+        self.assertTrue(dry["ok"], dry)
+        self.assertFalse(dry["changed"])
+        self.assertEqual(store.unfinished_batch("src")["notification_attempts"], 3)
+        out = self.command("notification", "retry", "src", "--operation-id", "op")
+        self.assertTrue(out["ok"], out)
+        self.assertTrue(out["changed"])
+        self.assertEqual(store.unfinished_batch("src")["delivery_id"], "op")
+        batch.update(send_started_at="2026-01-01T00:00:00", send_uuid="keep", notification_attempts=3)
+        store.write_batch(batch)
+        expired = self.command("notification", "retry", "src", "--operation-id", "op")
+        self.assertEqual(expired["error"]["code"], "E_VALIDATION")
+        self.assertEqual(store.unfinished_batch("src")["send_uuid"], "keep")
+
+    def test_path_like_source_ids_are_rejected_before_processing(self):
+        out = self.command("source", "set", "../escape", "--from-json", '{"adapter":"hn","fetch":{"trigger":"manual"}}')
+        self.assertFalse(out["ok"], out)
+        self.assertEqual(out["error"]["code"], "E_VALIDATION")
+
+    def test_dynamic_acquisition_slots_are_accepted_by_action_and_cli(self):
+        self.assertEqual(actions.ACTIONS["run"].argv({"target": ["slot:evening"]}), ["run", "--slot", "evening"])
+
+    def test_copied_sources_preserve_extensions_but_start_disabled_and_reject_collision(self):
+        out = self.command("source", "copy", "src", "--new-name", "copy")
+        self.assertTrue(out["ok"], out)
+        copied = config.load(self.news).sources["copy"]
+        self.assertFalse(copied.enabled)
+        self.assertIn("custom_adapter_key", copied.extra)
+        denied = self.command("source", "copy", "src", "--new-name", "other")
+        self.assertFalse(denied["ok"])
+
+    def test_binding_conversion_requires_explicit_confirmation(self):
+        body = '{"notify":{"policy":"p"}}'
+        denied = self.command("source", "patch", "other", "--from-json", '{"notify":null}')
+        self.assertEqual(denied["error"]["code"], "E_VALIDATION")
+        self.assertTrue(self.command("source", "patch", "other", "--from-json", '{"notify":null}', "--confirm-conversion")["ok"])
+        self.assertFalse(self.command("source", "patch", "other", "--from-json", body)["ok"])
+        self.assertTrue(self.command("source", "patch", "other", "--from-json", body, "--confirm-conversion")["ok"])
+
+    def test_empty_patch_preserves_original_comments_and_reports_no_change(self):
+        before = self.path.read_bytes()
+        out = self.command("source", "patch", "src", "--from-json", "{}")
+        self.assertTrue(out["ok"])
+        self.assertFalse(out["changed"])
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_invalid_preview_candidate_is_a_validation_envelope(self):
+        out = self.command("notification", "preview", "--from-json", '{"policies":{"p":{"mode":"bad"}}}')
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error"]["code"], "E_VALIDATION")
+
+
+class NotificationHttpTests(unittest.TestCase):
+    setUp = NotificationContractTests.setUp
+
+    def serve(self):
+        server, _ = inbound.start_http(service_cfg={"http": {"host": "127.0.0.1", "port": 0}},
+                                       creds=None, news_dir=self.news, accept_events=False,
+                                       view_actions=True, action_token="test-token")
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_address[1]}"
+
+    def post(self, url, *, token="test-token", origin=None, json_accept=True, extra=None):
+        values = {"name": "src", "f.feed_label": "Saved", "token": token,
+                  "return_to": "/config"}
+        values.update(extra or {})
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        if json_accept:
+            headers["Accept"] = "application/json"
+        if origin:
+            headers["Origin"] = origin
+        request = urllib.request.Request(url + "/api/actions/source-patch",
+            data=urllib.parse.urlencode(values).encode(), headers=headers)
+        return urllib.request.urlopen(request)
+
+    def test_json_action_uses_same_envelope_and_security_gates(self):
+        url = self.serve()
+        with self.post(url, origin=url) as response:
+            self.assertEqual(response.status, 200)
+            out = json.load(response)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["command"], "source.patch")
+        self.assertIn("hash", out["data"])
+        for token, origin in (("wrong", url), ("test-token", "https://evil.example")):
+            with self.subTest(token=token, origin=origin), self.assertRaises(urllib.error.HTTPError) as caught:
+                self.post(url, token=token, origin=origin)
+            self.assertEqual(caught.exception.code, 403)
+
+    def test_html_action_redirects_to_own_allowlisted_page(self):
+        url = self.serve()
+        with self.post(url, json_accept=False) as response:
+            self.assertTrue(response.url.startswith(url + "/config?r="), response.url)
+        with self.post(url, json_accept=False, extra={"return_to": "https://evil.example"}) as response:
+            self.assertTrue(response.url.startswith(url + "/?r="), response.url)

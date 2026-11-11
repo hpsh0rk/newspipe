@@ -309,3 +309,14 @@ class NotificationTests(unittest.TestCase):
         self.assertTrue(res["ok"], res)
         self.assertGreaterEqual(res["data"]["card_budget"]["headroom"], 0)
         self.assertEqual(res["data"]["inbound"], "none")
+
+    def test_append_retry_uses_current_operation_clock_not_first_message_clock(self):
+        self.cfg = replace(self.cfg, policies={"p": policy.NotificationPolicy(form="append_card")})
+        self.store.append_pending("src", [_item(1)])
+        self.notify()
+        self.store.append_pending("src", [_item(2)])
+        self.update.side_effect = [OSError("update response lost"), True]
+        self.assertEqual(self.notify(now=NOW + timedelta(hours=2)).status, "send_failed")
+        self.assertEqual(self.notify(now=NOW + timedelta(hours=2, minutes=1)).status, "ok")
+        self.assertEqual(self.send.call_count, 1)
+        self.assertEqual(self.store.source_budget_state(DAY, "src")["cards"], 2)

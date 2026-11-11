@@ -234,6 +234,7 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
 
@@ -423,16 +424,19 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
             from newspipe import config as config_mod
             from newspipe import view as view_mod
 
+            def reject(status, code, message, hint=""):
+                self._send(status, {"ok": False, "command": f"action.{name}", "contract_version": 1,
+                                    "changed": False, "data": None,
+                                    "error": {"code": code, "message": message, "hint": hint},
+                                    "warnings": [], "next": []})
+
             if not token:
-                self._send(404, {"ok": False, "error": {
-                    "code": "E_DISABLED",
-                    "message": "写操作未开启（service.yaml: view.actions）"}})
+                reject(404, "E_DISABLED", "写操作未开启（service.yaml: view.actions）")
                 return
             origin = self.headers.get("Origin")
             if origin and not _same_origin(origin, self.headers.get("Host") or ""):
                 logger(f"写操作：拒绝跨站来源 {origin}")
-                self._send(403, {"ok": False, "error": {
-                    "code": "E_ORIGIN", "message": f"跨站请求已拒绝（Origin: {origin}）"}})
+                reject(403, "E_ORIGIN", f"跨站请求已拒绝（Origin: {origin}）")
                 return
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b""
@@ -440,22 +444,25 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
             given = (form.get("token") or [""])[0]
             if not secrets.compare_digest(given, token):
                 logger("写操作：令牌不匹配，已拒绝")
-                self._send(403, {"ok": False, "error": {
-                    "code": "E_TOKEN", "message": "令牌不匹配（页面可能过期，刷新重试）",
-                    "hint": "令牌在服务重启后更换；刷新页面即可"}})
+                reject(403, "E_TOKEN", "令牌不匹配（页面可能过期，刷新重试）", "令牌在服务重启后更换；刷新页面即可")
                 return
             try:
                 envelope = actions_mod.dispatch(
                     name, form, news_dir or config_mod.default_news_dir())
             except Exception as exc:                       # 写操作绝不能让进程崩
                 logger(f"写操作 {name} 崩了（{type(exc).__name__}: {exc}）")
-                self._send(500, {"ok": False, "error": {
-                    "code": "E_INTERNAL", "message": f"{type(exc).__name__}: {exc}"}})
+                reject(500, "E_INTERNAL", f"{type(exc).__name__}: {exc}")
                 return
             logger(f"写操作 {name} → {envelope.get('command')} ok={envelope.get('ok')}")
+            if "application/json" in (self.headers.get("Accept") or ""):
+                self._send(200, envelope)
+                return
             # PRG（Post/Redirect/Get）：结果编码进 URL，刷新页面不会重放写操作
+            return_to = (form.get("return_to") or ["/"])[0]
+            if return_to not in {"/", "/config", "/notifications", "/items", "/ops"}:
+                return_to = "/"
             self.send_response(303)
-            self.send_header("Location", f"/?r={view_mod.flash_encode(_flash_of(envelope))}")
+            self.send_header("Location", f"{return_to}?r={view_mod.flash_encode(_flash_of(envelope))}")
             self.send_header("Content-Length", "0")
             self.end_headers()
 

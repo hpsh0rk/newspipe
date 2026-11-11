@@ -12,7 +12,7 @@
 1. 任何命令都输出**一个**结构化结果对象：`ok` / `command` / `changed` / `data` / `error` /
    `warnings` / `next`。未捕获异常转成 `E_INTERNAL`，绝不吐堆栈。
 2. 退出码：`0` 成功 / `1` 运行时故障 / `2` 用法或配置错 / `3` 网络或投递错 / `4` 校验失败。
-3. 写操作支持 `--dry-run`（演练）、`--base-hash`（乐观并发）、`--operation-id`（幂等重试）。
+3. 配置写操作支持 `--dry-run`（演练）、`--base-hash`（乐观并发）。
 4. **旧 flag 的成功路径 stdout 仍为空**（no_agent cron 任务把非空 stdout 当告警投递给用户）；
    子命令一律输出结果对象——两种受众，两套约定，别混。
 """
@@ -21,10 +21,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import yaml
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from newspipe import (channel, config, edit, events, llm, pipeline, render, result, runtime,  # noqa: E402
+from newspipe import (channel, config, edit, events, llm, pipeline, policy, render, result, runtime,  # noqa: E402
                       service, state)
 from newspipe.errors import ConfigError, DeliveryError, NewsError  # noqa: E402
 
@@ -59,8 +61,8 @@ CONTRACT: list[dict[str, Any]] = [
      "examples": ["newspipe source show aihot --json"]},
     {"name": "source set", "summary": "新增或整体替换一个信源（先校验再落盘）",
      "usage": "newspipe source set <name> --from-json <json|-> [--dry-run] "
-              "[--base-hash H] [--operation-id ID]",
-     "args": ["name", "--from-json", "--dry-run", "--base-hash", "--operation-id"],
+              "[--base-hash H]",
+     "args": ["name", "--from-json", "--dry-run", "--base-hash"],
      "writes": True,
      "examples": ["echo '{\"adapter\":\"aihot\",\"fetch\":{\"trigger\":\"slot\",\"slots\":[\"am\"]}}'"
                   " | newspipe source set aihot --from-json - --dry-run --json"]},
@@ -126,7 +128,23 @@ CONTRACT: list[dict[str, Any]] = [
 
 SUBCOMMANDS = ("api", "config", "doctor", "status", "view", "list-sources", "source", "hooks", "events", "queue",
                "run", "serve", "migrate", "probe-channel", "probe-model", "card",
-               "card-preview", "enrich-only")
+               "card-preview", "enrich-only", "policy", "global", "notification", "collect", "notify")
+
+for _name, _summary, _args, _writes in (
+    ("source patch", "合并修改信源；null 删除字段，未提交字段保持原样", ["name", "--from-json", "--dry-run", "--base-hash"], True),
+    ("source copy", "保留扩展配置复制信源，默认停用", ["name", "--new-name", "--dry-run", "--base-hash"], True),
+    ("policy list", "列出可复用策略及绑定信源", [], False),
+    ("policy show", "查看策略及有效绑定", ["name"], False),
+    ("policy set", "新增/整体替换策略并报告影响信源", ["name", "--from-json", "--dry-run", "--base-hash"], True),
+    ("policy remove", "删除未被引用的策略", ["name", "--dry-run", "--base-hash"], True),
+    ("global set", "编辑目标、槽位或全局硬限制", ["--from-json", "--dry-run", "--base-hash"], True),
+    ("notification preview", "只读候选配置、待通知和预算预览；不采集不发卡", ["--source", "--from-json"], False),
+    ("notification retry", "安全窗口内重置原操作重试次数；不重建身份", ["source", "--operation-id", "--dry-run", "--base-hash"], True),
+    ("collect", "只采集；collect 策略会生成本地批次，不强制通知", ["source", "--dry"], True),
+    ("notify", "只通知现有待处理；时钟越过须显式声明，所有限制仍生效", ["source", "--bypass-clock", "--dry"], True),
+):
+    CONTRACT.append({"name": _name, "summary": _summary, "args": _args, "writes": _writes,
+                     "usage": f"newspipe {_name} [--json]", "examples": [f"newspipe {_name} --json"]})
 
 
 # --------------------------------------------------------------------- 工具
@@ -530,8 +548,19 @@ def _sub_source(args: argparse.Namespace, news_dir: Path) -> result.Result:
             return result.fail(command, "E_NOT_FOUND", f"没有信源 {args.name!r}",
                                hint="newspipe source list --json")
         return result.ok(command, {"source": row,
+                                   "body": yaml.safe_load((news_dir / "sources.yaml").read_text(encoding="utf-8"))["sources"][args.name],
+                                   "values": config.source_values(cfg.sources[args.name]),
                                    "hash": edit.file_hash(news_dir / "sources.yaml")})
-    if args.action in ("set",):
+    if args.action == "copy":
+        import yaml
+        raw = yaml.safe_load((news_dir / "sources.yaml").read_text(encoding="utf-8"))["sources"]
+        if args.name not in raw or not args.new_name or args.new_name in raw:
+            return result.fail(command, "E_VALIDATION", "原信源不存在，或新 ID 为空/已存在",
+                               hint="用 source list 核对，复制必须创建新的稳定 ID")
+        out = edit.set_source(news_dir, args.new_name, {**raw[args.name], "enabled": False},
+                              base_hash=args.base_hash, dry_run=args.dry_run)
+        return _write_result(command, out, news_dir, next_ok=["newspipe source list --json"])
+    if args.action in ("set", "patch"):
         try:
             body = edit.parse_json_body(args.from_json or "")
         except (ValueError, json.JSONDecodeError) as exc:
@@ -539,8 +568,10 @@ def _sub_source(args: argparse.Namespace, news_dir: Path) -> result.Result:
                                hint="传 JSON 文本，或 `-` 从 stdin 读")
         if not isinstance(body, dict):
             return result.fail(command, "E_USAGE", "--from-json 必须是 JSON 对象")
-        out = edit.set_source(news_dir, args.name, body, base_hash=args.base_hash,
-                              dry_run=args.dry_run)
+        writer = edit.patch_source if args.action == "patch" else edit.set_source
+        out = writer(news_dir, args.name, body, base_hash=args.base_hash,
+                     dry_run=args.dry_run,
+                     **({"confirm_conversion": args.confirm_conversion} if args.action == "patch" else {}))
     elif args.action in ("enable", "disable"):
         out = edit.set_source_enabled(news_dir, args.name, args.action == "enable",
                                       base_hash=args.base_hash, dry_run=args.dry_run)
@@ -584,11 +615,96 @@ def _write_result(command: str, out: dict[str, Any], news_dir: Path,
     """把 `edit.*` 的结构化返回包成 Result（成功/失败都明确）。"""
     if out.get("ok"):
         warnings = [w for w in [out.get("warning")] if w]
+        if out.get("changed"):
+            try:
+                events.append(news_dir, "config", payload={"target": command, "op": out.get("op"), "hash": out.get("hash")})
+            except Exception as exc:
+                warnings.append(f"配置已落盘，但审计事件未写入：{type(exc).__name__}: {exc}")
         return result.ok(command, out, changed=bool(out.get("changed")),
                          warnings=warnings, next=next_ok)
     return result.fail(command, str(out.get("code") or "E_RUNTIME"),
                        str(out.get("message") or "写入失败"),
                        hint=str(out.get("hint") or ""), details=out)
+
+
+def _json_object(args) -> dict:
+    body = edit.parse_json_body(args.from_json or "{}")
+    if not isinstance(body, dict):
+        raise ConfigError("--from-json 必须是 JSON 对象")
+    return body
+
+
+def _sub_policy(args, news_dir):
+    cfg, _ = _load(news_dir)
+    command = f"policy.{args.action}"
+    if args.action in ("list", "show"):
+        from newspipe.notification_view import snapshot
+        data = snapshot(news_dir)
+        if args.action == "show":
+            if args.name not in cfg.policies:
+                return result.fail(command, "E_NOT_FOUND", f"没有策略 {args.name!r}", hint="newspipe policy list --json")
+            return result.ok(command, {"policy": data["policies"][args.name], "hash": data["hash"]})
+        return result.ok(command, {"policies": data["policies"], "hash": data["hash"]})
+    out = (edit.set_policy(news_dir, args.name, _json_object(args), base_hash=args.base_hash, dry_run=args.dry_run)
+           if args.action == "set" else edit.remove_policy(news_dir, args.name, base_hash=args.base_hash, dry_run=args.dry_run))
+    return _write_result(command, out, news_dir, next_ok=["newspipe notification preview --json"])
+
+
+def _sub_global(args, news_dir):
+    out = edit.set_globals(news_dir, _json_object(args), base_hash=args.base_hash, dry_run=args.dry_run)
+    return _write_result("global.set", out, news_dir, next_ok=["newspipe notification preview --json"])
+
+
+def _sub_notification(args, news_dir):
+    if args.action == "preview":
+        from newspipe.notification_view import snapshot
+        try:
+            data = snapshot(news_dir, source=args.preview_source or args.source,
+                            candidate=_json_object(args) if args.from_json else None, now=_now())
+        except ConfigError as exc:
+            return result.fail("notification.preview", "E_VALIDATION" if args.from_json else "E_CONFIG", str(exc),
+                               hint="候选预览没有写入或联网；修正字段/引用后重试")
+        return result.ok("notification.preview", data)
+    cfg, store = _load(news_dir)
+    if args.source not in cfg.sources:
+        return result.fail("notification.retry", "E_NOT_FOUND", "信源不存在", hint="newspipe source list --json")
+    conflict = edit._check_base_hash(news_dir / "sources.yaml", args.base_hash)
+    if conflict:
+        return _write_result("notification.retry", conflict, news_dir, next_ok=[])
+    from contextlib import nullcontext
+    with nullcontext() if args.dry_run else store.transaction():
+        batch = store.unfinished_batch(args.source)
+        if not batch or batch.get("delivery_id") != args.operation_id:
+            return result.fail("notification.retry", "E_CONFLICT", "待处理操作身份已变化或不存在",
+                               hint="重新查看 notification preview；不能重试另一个操作")
+        now = _now()
+        started = batch.get("send_started_at") or batch.get("remote_attempt_started_at")
+        if batch.get("delivery_effect_done"):
+            return result.fail("notification.retry", "E_VALIDATION", "远端已确认成功，只需本地回执修复",
+                               hint="等待下轮服务修复；不要再次发送")
+        if started and now.timestamp() - datetime.fromisoformat(started).timestamp() >= 3600:
+            return result.fail("notification.retry", "E_VALIDATION", "结果未知且已超幂等窗口，不能重置重试",
+                               hint=f"核对平台回执：目标 {batch.get('delivery_chat')}，卡片 {batch.get('card_id')}，操作 {batch.get('delivery_id')}，时间 {started}；禁止强制重发")
+        changed = not args.dry_run and bool(batch.get("notification_attempts") or batch.get("notification_retry_after"))
+        if changed:
+            batch.update(notification_attempts=0, notification_retry_after=0,
+                         notification_retry_generation=int(batch.get("notification_retry_generation") or 0) + 1)
+            store.write_batch(batch)
+        return result.ok("notification.retry", {"operation_id": batch["delivery_id"], "dry_run": args.dry_run,
+                                               "hash": edit.file_hash(news_dir / "sources.yaml")}, changed=changed)
+
+
+def _sub_phase(args, news_dir):
+    cfg, store = _load(news_dir)
+    before = {str(p): p.read_bytes() for p in store.root.rglob("*") if p.is_file()}
+    run = (pipeline.collect_source(cfg, store, args.source, dry=args.dry, force=True, now=_now()) if args.cmd == "collect"
+           else pipeline.notify_source(cfg, store, args.source, dry=args.dry, now=_now(), bypass_clock=args.bypass_clock))
+    after = {str(p): p.read_bytes() for p in store.root.rglob("*") if p.is_file()}
+    if run.status in {"error", "config_missing", "send_failed", "overflow", "retry_exhausted", "send_result_unknown"}:
+        return result.fail(args.cmd, "E_DELIVERY" if args.cmd == "notify" else "E_NETWORK", run.note or run.status,
+                           hint="newspipe notification preview --source <ID> --json 查看原因与安全回执信息",
+                           details=run.as_dict())
+    return result.ok(args.cmd, run.as_dict(), changed=before != after)
 
 
 def _sub_events(args: argparse.Namespace, news_dir: Path) -> result.Result:
@@ -772,11 +888,36 @@ def _build_sub_parser() -> argparse.ArgumentParser:
                     help="输出服务端渲染页（默认输出 JSON 契约）")
 
     src = add("source")
-    src.add_argument("action", choices=["list", "show", "set", "enable", "disable", "remove"])
+    src.add_argument("action", choices=["list", "show", "set", "patch", "copy", "enable", "disable", "remove"])
     src.add_argument("name", nargs="?", help="信源名")
     src.add_argument("--from-json", help="该源的四轴配置（JSON 文本或 `-` 读 stdin）")
+    src.add_argument("--new-name")
+    src.add_argument("--confirm-conversion", action="store_true")
     src.add_argument("--dry-run", action="store_true", help="只校验与演练，不落盘")
     src.add_argument("--base-hash", help="乐观并发：与当前文件哈希不符则拒绝写入")
+
+    for name in ("policy", "global"):
+        parser = add(name)
+        parser.add_argument("action", choices=["list", "show", "set", "remove"] if name == "policy" else ["set"])
+        if name == "policy":
+            parser.add_argument("name", nargs="?")
+        parser.add_argument("--from-json")
+        parser.add_argument("--dry-run", action="store_true")
+        parser.add_argument("--base-hash")
+    notification = add("notification")
+    notification.add_argument("action", choices=["preview", "retry"])
+    notification.add_argument("source", nargs="?")
+    notification.add_argument("--source", dest="preview_source")
+    notification.add_argument("--from-json")
+    notification.add_argument("--operation-id")
+    notification.add_argument("--dry-run", action="store_true")
+    notification.add_argument("--base-hash")
+    for name in ("collect", "notify"):
+        parser = add(name)
+        parser.add_argument("source")
+        parser.add_argument("--dry", "--dry-run", action="store_true")
+        if name == "notify":
+            parser.add_argument("--bypass-clock", action="store_true")
 
     hk = add("hooks")
     hk.add_argument("action", choices=["list", "add", "remove"])
@@ -804,7 +945,7 @@ def _build_sub_parser() -> argparse.ArgumentParser:
     qu.add_argument("--note", help="必填：入库成功后的路径或回执")
 
     rn = add("run")
-    rn.add_argument("--slot", choices=["am", "noon", "pm"])
+    rn.add_argument("--slot")
     rn.add_argument("--poll", action="store_true")
     rn.add_argument("--source")
     rn.add_argument("--enrich-only", action="store_true")
@@ -841,6 +982,11 @@ SUB_HANDLERS = {
     ("list-sources", None): lambda args, news_dir: result.ok(
         "list-sources", {"sources": config.summarize(_load(news_dir)[0])}),
     ("source", None): _sub_source,
+    ("policy", None): _sub_policy,
+    ("global", None): _sub_global,
+    ("notification", None): _sub_notification,
+    ("collect", None): _sub_phase,
+    ("notify", None): _sub_phase,
     ("hooks", None): _sub_hooks,
     ("events", None): _sub_events,
     ("queue", None): _sub_queue,

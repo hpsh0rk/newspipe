@@ -236,6 +236,9 @@ def _run_notifications(cfg: config.Config, store: state.Store, last_runs: dict, 
             if not when <= now <= when + SLOT_TOLERANCE:
                 continue
             entry = slots.setdefault(slot, {}).setdefault(source.name, {})
+            generation = int((unfinished or {}).get("notification_retry_generation") or 0)
+            if generation > int(entry.get("retry_generation") or 0):
+                entry.update(attempts=0, retry_after=0, retry_generation=generation)
             if entry.get("complete"):
                 continue
             if not dry and (int(entry.get("attempts") or 0) >= SLOT_MAX_ATTEMPTS

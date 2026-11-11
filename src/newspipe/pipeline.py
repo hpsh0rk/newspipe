@@ -359,6 +359,7 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
             seq = int(batch.get("seq") or 1) + 1
             # Reserve the sequence durably: a lost response cannot make us reuse it.
             batch["seq"] = seq
+            batch.setdefault("remote_attempt_started_at", now.isoformat())
             store.write_batch(batch)
             if not channel.update_entity(str(batch["card_id"]), seq, card):
                 raise DeliveryError("卡片实体更新返回失败")
@@ -377,6 +378,7 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
             if started and now.timestamp() - datetime.fromisoformat(started).timestamp() >= 3600:
                 raise DeliveryError("发送结果未确认且已超过平台幂等窗口；请核对消息并修复批次回执，禁止自动重发")
             batch.setdefault("send_started_at", now.isoformat())
+            batch.setdefault("remote_attempt_started_at", now.isoformat())
             store.write_batch(batch)
             batch["message_id"] = channel.send_card(batch["delivery_chat"], str(batch["card_id"]),
                                                     idempotency_key=batch["send_uuid"])
@@ -399,6 +401,10 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
 
 def _begin_delivery(batch: dict, cfg: Any, digest: str, now: datetime) -> None:
     if not batch.get("delivery_pending"):
+        if batch.get("message_id"):
+            batch.pop("send_started_at", None)
+            batch.pop("send_uuid", None)
+        batch.pop("remote_attempt_started_at", None)
         batch.update(delivery_id=uuid.uuid4().hex, delivery_at=now.isoformat(),
                      delivery_date=digest, delivery_chat=cfg.chat, notification_attempts=0)
     batch.setdefault("delivery_id", uuid.uuid4().hex)
@@ -614,7 +620,7 @@ def notify_source(cfg: Any, store: state.Store, name: str, *, now: datetime | No
                 return run
             slot = remaining[0] if remaining else eligible[0]
         if unfinished:
-            started = unfinished.get("send_started_at")
+            started = unfinished.get("send_started_at") or unfinished.get("remote_attempt_started_at")
             if started and now.timestamp() - datetime.fromisoformat(started).timestamp() >= 3600:
                 run.status = "send_result_unknown"
                 run.note = (f"结果未确认且已超幂等窗口；核对平台回执：目标 {unfinished.get('delivery_chat')}, "
