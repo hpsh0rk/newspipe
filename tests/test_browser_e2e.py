@@ -237,6 +237,51 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 self.assertEqual(len(attempts), 1)
                 self.assertEqual(self.source_label(fixture), "研究与论文")
 
+    def test_custom_budget_blank_is_rejected_until_explicit_inheritance(self):
+        for engine in self.browsers:
+            for javascript in (True, False):
+                with self.subTest(engine=engine, javascript=javascript), self.scenario(
+                        engine, javascript=javascript) as (fixture, page):
+                    form = self.editor(fixture, page)
+                    form.get_by_text("自定义覆盖 · 每个字段可独立继承", exact=True).click()
+                    choice = form.locator('[name="inherit.max_cards_per_day"]')
+                    choice.select_option("custom")
+                    field = form.locator('[name="n.max_cards_per_day"]')
+                    field.fill("0")
+                    form.locator('[name="dry"]').uncheck()
+                    def save():
+                        if javascript:
+                            return self.submit(page, form)
+                        with page.expect_navigation():
+                            form.get_by_role("button", name="验证 / 保存", exact=True).click()
+                        return None
+                    saved = save()
+                    if javascript:
+                        self.assertTrue(saved["ok"], saved)
+                    self.assertEqual(config.load(fixture.news_dir).sources["research"].notify.overrides["max_cards_per_day"], 0)
+                    if not javascript:
+                        form = self.editor(fixture, page)
+                        form.get_by_text("自定义覆盖 · 每个字段可独立继承", exact=True).click()
+                        form.locator('[name="dry"]').uncheck()
+                    field = form.locator('[name="n.max_cards_per_day"]')
+                    field.fill("")
+                    before = (fixture.news_dir / "sources.yaml").read_bytes()
+                    failed = save()
+                    if javascript:
+                        self.assertFalse(failed["ok"], failed)
+                    else:
+                        form = page.locator('form[action="/api/actions/source-patch"]')
+                    self.expect(form.locator('[name="n.max_cards_per_day"]')).to_have_value("")
+                    self.expect(form.locator('[name="inherit.max_cards_per_day"]')).to_have_value("custom")
+                    self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
+                    form.locator('[name="inherit.max_cards_per_day"]').select_option("inherit")
+                    saved = save()
+                    if javascript:
+                        self.assertTrue(saved["ok"], saved)
+                    self.assertNotIn("max_cards_per_day", config.load(fixture.news_dir).sources["research"].notify.overrides)
+                    preview = cli.run_subcommand(["notification", "preview", "--source", "research", "--json"], fixture.news_dir)
+                    self.assertEqual(preview.data["sources"][0]["after"]["values"]["max_cards_per_day"], 12)
+
     def test_edits_during_pending_save_remain_unsaved(self):
         for engine in self.browsers:
             with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):

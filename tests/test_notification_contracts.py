@@ -209,6 +209,43 @@ class NotificationContractTests(unittest.TestCase):
         self.assertEqual(out["error"]["code"], "E_USAGE")
         self.assertIn("fetch.interval_min", out["error"]["message"])
 
+    def test_empty_custom_notification_numbers_reject_without_writing(self):
+        before = self.path.read_bytes()
+        for key in ("max_cards_per_day", "min_gap_min"):
+            for raw in (None, [], [""], ["  "]):
+                for action in ("source-patch", "source-save", "notification-preview"):
+                    with self.subTest(key=key, raw=raw, action=action):
+                        form = {"name": ["src"], "f.adapter": ["hn"],
+                                "f.fetch.trigger": ["manual"], "notify_policy": ["p"],
+                                f"inherit.{key}": ["custom"]}
+                        if raw is not None:
+                            form[f"n.{key}"] = raw
+                        out = actions.dispatch(action, form, self.news)
+                        self.assertFalse(out["ok"], out)
+                        self.assertEqual(out["error"]["code"], "E_USAGE")
+                        self.assertIn(key, out["error"]["message"])
+                        self.assertIn("继承", out["error"]["message"])
+                        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_zero_custom_numbers_and_empty_non_numbers_remain_explicit(self):
+        form = {"name": ["src"], "notify_policy": ["p"],
+                "inherit.mode": ["custom"], "n.mode": ["collect"],
+                "inherit.slots": ["custom"], "n.slots": [""],
+                "inherit.quiet_hours": ["custom"], "n.quiet_hours": [""],
+                "inherit.max_cards_per_day": ["custom"], "n.max_cards_per_day": ["0"],
+                "inherit.min_gap_min": ["custom"], "n.min_gap_min": ["0"]}
+        out = actions.dispatch("source-patch", form, self.news)
+        self.assertTrue(out["ok"], out)
+        overrides = config.load(self.news).sources["src"].notify.overrides
+        self.assertEqual(overrides, {"mode": "collect", "slots": (), "quiet_hours": "",
+                                     "max_cards_per_day": 0, "min_gap_min": 0.0})
+        for key in ("max_cards_per_day", "min_gap_min"):
+            form[f"inherit.{key}"] = ["inherit"]
+        out = actions.dispatch("source-patch", form, self.news)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(config.load(self.news).sources["src"].notify.overrides,
+                         {"mode": "collect", "slots": (), "quiet_hours": ""})
+
     def test_separate_collect_and_notify_commands_use_distinct_pipeline_entrypoints(self):
         run = pipeline.SourceRun(source="src", status="collected")
         with patch.object(pipeline, "collect_source", return_value=run) as collect, \

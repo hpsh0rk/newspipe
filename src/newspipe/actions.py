@@ -234,7 +234,10 @@ def notification_binding(form: dict[str, list[str]]) -> dict | None:
         if inheritance == "inherit":
             overrides[key] = None
         elif inheritance == "custom":
-            overrides[key] = _coerce(field, form.get(f"n.{key}", []))
+            value = _coerce(field, form.get(f"n.{key}", []))
+            if value is None:
+                raise ActionInputError(f"{key}: 自定义数值不能为空；请填写数值（可以为 0），或明确选择继承")
+            overrides[key] = value
         else:
             raise ActionInputError(f"{key}: 只能选择 inherit 或 custom")
     return {"policy": name, "overrides": overrides}

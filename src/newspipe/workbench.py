@@ -34,6 +34,8 @@ def _field(field, value, *, prefix, scope, slots):
     name = prefix + path
     ident = scope + "-" + name.replace(".", "-")
     help_text = field.get("help", "")
+    if prefix == "n." and kind in ("int", "float"):
+        help_text += " 自定义时必须填写数值（可以为 0）；使用策略值请明确选择继承。"
     described = f'aria-describedby="{E(ident)}-help {E(ident)}-error" aria-errormessage="{E(ident)}-error"'
     attr = f'id="{E(ident)}" name="{E(name)}" {described}'
     if kind == "bool":
