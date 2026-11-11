@@ -245,7 +245,7 @@ class ActionGateTests(unittest.TestCase):
         except urllib.error.HTTPError as exc:
             self.assertEqual(exc.code, 303)
             location = exc.headers["Location"]
-        self.assertTrue(location.startswith("/?r="), location)
+        self.assertTrue(location.startswith("/?draft="), location)
         with urllib.request.urlopen(f"{base}{location}", timeout=5) as resp:
             page = resp.read().decode("utf-8")
         self.assertIn("⛔", page)                        # 失败横幅

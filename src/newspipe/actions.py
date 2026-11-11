@@ -181,6 +181,8 @@ def _argv_source_save(form: dict[str, list[str]]) -> list[str]:
     if not body:
         raise ActionInputError("表单是空的 —— 至少要提交 adapter 与 fetch.trigger")
     argv = ["source", "set", name, "--from-json", json.dumps(body, ensure_ascii=False)]
+    if _flag(form, "create_only"):
+        argv.append("--create-only")
     if _flag(form, "dry"):
         argv.append("--dry-run")
     base = (form.get("base_hash") or [""])[0].strip()
@@ -254,7 +256,10 @@ def _policy_body(form):
 
 
 def _argv_policy_save(form):
-    return _write_flags(["policy", "set", _one(form, "name"), "--from-json", json.dumps(_policy_body(form))], form)
+    argv = ["policy", "set", _one(form, "name"), "--from-json", json.dumps(_policy_body(form))]
+    if _flag(form, "create_only"):
+        argv.append("--create-only")
+    return _write_flags(argv, form)
 
 
 def _argv_globals(form):
@@ -264,6 +269,18 @@ def _argv_globals(form):
         body["chat"] = (form.get("chat") or [""])[0].strip()
     if "slots_json" in form:
         body["slots"] = json.loads(form["slots_json"][0])
+    if "slot_id" in form:
+        ids, clocks = form.get("slot_id", []), form.get("slot_time", [])
+        if len(ids) != len(clocks):
+            raise ActionInputError("槽位 ID 与时刻必须成对提交")
+        body["slots"] = {}
+        for ident, clock in zip(ids, clocks):
+            ident, clock = ident.strip(), clock.strip()
+            if not ident and not clock:
+                continue
+            if not ident or not clock or ident in body["slots"]:
+                raise ActionInputError("槽位需要唯一 ID 与完整 HH:MM 时刻")
+            body["slots"][ident] = clock
     fields = config_mod.describe_schema()["notification_fields"]
     if any(f"g.{f['path']}" in form for f in fields):
         body["notifications"] = {field["path"]: _coerce(field, form[f"g.{field['path']}"])
@@ -281,8 +298,10 @@ def _argv_preview(form):
     elif kind == "source":
         body = {"sources": {name: _source_patch_body(form)}}
         argv += ["--source", name]
+    elif kind == "global":
+        body = json.loads(_argv_globals(form)[3])
     else:
-        raise ActionInputError("预览类型必须是 source 或 policy")
+        raise ActionInputError("预览类型必须是 source、policy 或 global")
     return [*argv, "--from-json", json.dumps(body)]
 
 

@@ -53,6 +53,23 @@ class NotificationContractTests(unittest.TestCase):
     def command(self, *argv):
         return cli.run_subcommand([*argv, "--json"], self.news).as_dict()
 
+    def test_create_only_rejects_existing_source_and_policy_even_when_dry(self):
+        before = self.path.read_bytes()
+        for noun, name, body in (("source", "src", '{"adapter":"hn"}'), ("policy", "p", '{"mode":"collect"}')):
+            for dry in ([], ["--dry-run"]):
+                out = self.command(noun, "set", name, "--from-json", body, "--create-only", *dry)
+                self.assertFalse(out["ok"], out)
+                self.assertEqual(out["error"]["code"], "E_VALIDATION")
+                self.assertEqual(self.path.read_bytes(), before)
+        self.assertTrue(self.command("policy", "set", "new_policy", "--from-json", '{}', "--create-only")["ok"])
+
+    def test_new_form_translation_requests_atomic_create_only(self):
+        for action, form in (("source-save", {"name": ["src"], "f.adapter": ["hn"], "create_only": ["1"]}),
+                             ("policy-save", {"name": ["p"], "p.mode": ["collect"], "create_only": ["1"]})):
+            out = actions.dispatch(action, form, self.news)
+            self.assertFalse(out["ok"], out)
+            self.assertEqual(out["error"]["code"], "E_VALIDATION", out)
+
     def test_source_patch_preserves_unknown_keys_and_removes_only_explicit_override(self):
         before = self.path.read_text().split("  other:", 1)[1]
         patch_body = {"card": {"title": "Renamed"}, "notify": {"overrides": {"quiet_hours": None}}}
@@ -263,9 +280,23 @@ class NotificationHttpTests(unittest.TestCase):
                 self.post(url, token=token, origin=origin)
             self.assertEqual(caught.exception.code, 403)
 
+    def test_no_script_failure_retains_inputs_and_old_hash_without_url_draft(self):
+        url = self.serve()
+        before = (self.news / "sources.yaml").read_bytes()
+        with self.post(url, json_accept=False, extra={"f.feed_label": '<edited & retained>', "base_hash": "stale"}) as response:
+            address = response.url
+            page = response.read().decode()
+        self.assertIn('value="&lt;edited &amp; retained&gt;"', page)
+        self.assertIn('name="base_hash" value="stale"', page)
+        self.assertNotIn("edited", address)
+        self.assertNotIn("stale", address)
+        self.assertEqual((self.news / "sources.yaml").read_bytes(), before)
+        again = urllib.request.urlopen(address).read().decode()
+        self.assertNotIn('value="&lt;edited &amp; retained&gt;"', again)
+
     def test_html_action_redirects_to_own_allowlisted_page(self):
         url = self.serve()
         with self.post(url, json_accept=False) as response:
-            self.assertTrue(response.url.startswith(url + "/config?r="), response.url)
+            self.assertTrue(response.url.startswith(url + "/config?draft="), response.url)
         with self.post(url, json_accept=False, extra={"return_to": "https://evil.example"}) as response:
-            self.assertTrue(response.url.startswith(url + "/?r="), response.url)
+            self.assertTrue(response.url.startswith(url + "/?draft="), response.url)

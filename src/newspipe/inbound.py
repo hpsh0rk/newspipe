@@ -225,6 +225,8 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
     #: 没有它，浏览器里**任何一个网页**都能 POST 到这个本地端口（CSRF）—— 本地端口对
     #: 浏览器是可达的，这不是理论风险。
     token = (action_token or secrets.token_urlsafe(24)) if view_actions else ""
+    from newspipe.webdrafts import Drafts
+    drafts = Drafts()
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "newspipe"
@@ -244,6 +246,8 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Security-Policy", "script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+            self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
             self.wfile.write(body)
 
@@ -342,13 +346,14 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
             if prefill:
                 page["prefill"] = prefill
                 page["prefill_name"] = hint
+            page.update({key: (query.get(key) or [""])[0] for key in
+                         ("new", "copy", "search", "policy_filter", "enabled_filter", "adapter_filter")})
             if query.get("edit"):
                 name = (query["edit"] or [""])[0]
                 try:
-                    cfg = config_mod.load(news)
-                    if name in cfg.sources:
+                    if name in payload["source_values"]:
                         page["edit"] = name
-                        page["values"] = config_mod.source_values(cfg.sources[name])
+                        page["values"] = payload["source_values"][name]
                     else:
                         page["discover_error"] = f"没有信源 {name!r}"
                 except Exception as exc:                # noqa: BLE001
@@ -361,9 +366,20 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
 
         def do_GET(self) -> None:                          # noqa: N802（stdlib 命名）
             route = self.path.split("?")[0]
+            if route == "/assets/workbench.js":
+                from newspipe.webassets import JAVASCRIPT
+                body = JAVASCRIPT.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/javascript; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.wfile.write(body)
+                return
             query = parse_qs(urlparse(self.path).query)
             is_batch = route.startswith("/batch/")
-            if route in ("/", "/ops", "/config", "/items", view_path) or is_batch:
+            if route in ("/", "/ops", "/config", "/notifications", "/items", view_path) or is_batch:
                 try:
                     payload = self._view()
                 except Exception as exc:                   # 配置坏了要说清楚，别回空壳
@@ -377,6 +393,9 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                 from newspipe import view as view_mod
 
                 act, flash = None, None
+                draft = drafts.pop((query.get("draft") or [""])[0]) if token else None
+                if draft:
+                    query.update(draft.get("query", {}))
                 if token:
                     from newspipe import config as config_mod
 
@@ -388,6 +407,8 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                         logger(f"写操作面构建失败（{type(exc).__name__}: {exc}）")
                         act = None
                     flash = view_mod.flash_decode((query.get("r") or [""])[0])
+                    if draft:
+                        flash = draft["flash"]
                 if is_batch:
                     parts = route.split("/")
                     if len(parts) == 4 and parts[2] and parts[3]:
@@ -400,10 +421,20 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                     page = view_mod.ops_html(payload, actions=act, flash=flash)
                 elif route == "/config":
                     page = self._config_page(payload, act, flash, query)
+                elif route == "/notifications":
+                    from newspipe import config as config_mod
+                    page = view_mod.notifications_html(payload, schema=config_mod.describe_schema(), actions=act, flash=flash,
+                           page={key: (query.get(key) or [""])[0] for key in ("edit", "copy", "new", "preset")})
                 elif route == "/items":
                     page = self._items_page(payload, query)
                 else:
                     page = view_mod.cockpit_html(payload, flash=flash, page=self._recent_page())
+                if draft and draft.get("form"):
+                    from newspipe.webdrafts import restore
+                    page = restore(page, draft["action"], draft["form"])
+                if draft and draft.get("preview"):
+                    from newspipe.workbench import preview_result
+                    page = page.replace('<div id="action-result"', preview_result(draft["preview"]) + '<div id="action-result"', 1)
                 self._send_html(200, page)
                 return
             self._send(200, {"ok": True, "service": "newspipe", "inbound": "http",
@@ -439,6 +470,9 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                 reject(403, "E_ORIGIN", f"跨站请求已拒绝（Origin: {origin}）")
                 return
             length = int(self.headers.get("Content-Length") or 0)
+            if length < 0 or length > 65536:
+                reject(413, "E_USAGE", "表单最多 64 KiB")
+                return
             body = self.rfile.read(length) if length else b""
             form = parse_qs(body.decode("utf-8", "replace"))
             given = (form.get("token") or [""])[0]
@@ -461,8 +495,23 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
             return_to = (form.get("return_to") or ["/"])[0]
             if return_to not in {"/", "/config", "/notifications", "/items", "/ops"}:
                 return_to = "/"
+            # One-use PRG memory: neither raw input nor CLI argv belongs in URLs.
+            data = envelope.get("data") or {}
+            retain = not envelope.get("ok") or data.get("dry_run") or name == "notification-preview"
+            action = name
+            if name == "notification-preview":
+                kind = (form.get("preview_kind") or ["source"])[0]
+                action = {"global": "global-save", "policy": "policy-save"}.get(kind, "source-save" if form.get("create_only") else "source-patch")
+            query = {}
+            if action in {"source-patch", "policy-save", "source-save"}:
+                query = {"new": ["1"]} if form.get("create_only") or action == "source-save" else {"edit": form.get("name", [])}
+            elif action == "source-copy":
+                query = {"copy": form.get("name", [])}
+            key = drafts.put({"action": action, "query": query if retain else {}, "flash": _flash_of(envelope),
+                              "form": {k: v for k, v in form.items() if k != "token"} if retain else None,
+                              "preview": data if name == "notification-preview" and envelope.get("ok") else None})
             self.send_response(303)
-            self.send_header("Location", f"{return_to}?r={view_mod.flash_encode(_flash_of(envelope))}")
+            self.send_header("Location", f"{return_to}?draft={key}")
             self.send_header("Content-Length", "0")
             self.end_headers()
 

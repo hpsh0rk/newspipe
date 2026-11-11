@@ -204,3 +204,19 @@ def describe_fields() -> tuple[list[dict], list[dict]]:
                 entry["default"] = None
             global_fields.append(entry)
     return policy_fields, global_fields
+
+
+def human_summary(rule: dict | None, slots: dict) -> str:
+    if not rule or rule.get("policy_id") is None:
+        return "旧式内联策略 · 使用旧全局计数，不会自动迁移"
+    values = rule["values"]
+    mode = values["mode"]
+    timing = {"immediate": "有新内容即通知", "collect": "只采集，本地消费待处理内容"}.get(mode)
+    if timing is None:
+        timing = "定时汇总 · " + " / ".join(f"{s} {slots.get(s, '')}" for s in values["slots"])
+    if mode == "collect":
+        return timing
+    return (f"{timing} · {'追加同一张卡' if values['form'] == 'append_card' else '每批新卡'} · "
+            f"每源 {values['max_cards_per_day']} 次/日 · 间隔 {values['min_gap_min']:g} 分钟"
+            + (f" · 静默 {values['quiet_hours']}" if values["quiet_hours"] else "")
+            + (" · 源级限制例外（全局限制仍生效）" if values["bypass_source_limits"] else ""))

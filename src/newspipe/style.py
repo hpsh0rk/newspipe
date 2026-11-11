@@ -1,4 +1,4 @@
-"""页面样式（纯 CSS，零 JS / 零外部请求）。
+"""页面样式（纯 CSS，零外部请求；本地 JS 只增强交互）。
 
 **设计契约**：`specs/design/DESIGN_SYSTEM.md`（方案 A「Ocean Minimalist」，AI 五方案选优
 97.55 分）+ `specs/design/tokens.json`。气质 = 轻盈通透：浅色画布 + 高饱和科技蓝**单点**
@@ -6,7 +6,7 @@
 
 四条硬约束（由 `tests/test_history.py` / `tests/test_view.py` 钉死，改这里之前先读）：
 
-1. **不许出现 `<script`** —— 页面零 JS。
+1. **唯一脚本是代码拥有的 `/assets/workbench.js`**；禁止内联/外部/用户输入脚本。
 2. **不许出现 `url(`** —— 没有外部字体/图标字体/data-URI；图标一律字符或 CSS 画。
 3. **不许出现外部 `http://`** —— 自包含，断网/境内都能看。
 4. **不许有「内容不可见」的入场动效** —— 无 `@starting-style`、关键帧不得从 `opacity:0`
@@ -65,6 +65,7 @@ CSS = """
 
 /* ══ 2. 基础 ═══════════════════════════════════════════════════════════ */
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 html{scroll-behavior:smooth}
 body{
   font:14px/1.65 var(--font); margin:0 auto; padding:0 24px 72px; max-width:1200px;
@@ -180,7 +181,7 @@ td .hint,td.hint{font-size:12px; color:var(--muted)}
 .srcrow summary .pill{margin:0 8px}
 
 /* ══ 8. 表单 / 工具条 / 按钮 ═══════════════════════════════════════════ */
-input[type=text],input[type=number],select,textarea{
+input:not([type]),input[type=text],input[type=number],select,textarea{
   font:inherit; font-size:12.5px; padding:6px 10px; border-radius:var(--radius-xs);
   border:1px solid var(--border-strong); background:var(--surface); color:var(--text);
   transition:border-color var(--dur) var(--ease),box-shadow var(--dur) var(--ease);
@@ -290,5 +291,81 @@ footer code{background:transparent; border:0; padding:0}
   .toolbar{gap:8px}
   td.note{max-width:none}
   .clamp2{max-width:none}
+}
+/* Workbench: shared hierarchy, distinct collection/delivery controls. */
+body{background:radial-gradient(ellipse at 95% 0,var(--accent-soft),transparent 45%),var(--bg)}
+.eyebrow{font:11px/1.5 var(--mono);letter-spacing:.14em;color:var(--accent);margin:0 0 8px}
+.lead{font-size:18px;line-height:1.6;color:var(--text-2);max-width:720px}
+.page-intro,.section-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:24px 0}
+.source-filters{display:flex;align-items:end;flex-wrap:wrap;gap:12px;margin:24px 0}
+.source-filters label{display:grid;gap:4px;color:var(--text-2);font-size:12px;flex:1;min-width:130px}
+.source-filters input,.source-filters select{width:100%;min-width:0}
+.source-list{display:grid;gap:12px}
+.source-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;padding:20px 24px;border:1px solid var(--border);background:var(--surface);border-radius:var(--radius)}
+.source-row h3{font-size:16px;margin:0 0 4px}
+.source-row p{overflow-wrap:anywhere;font-size:13px}
+.source-state{display:grid;align-content:start;justify-items:end;gap:8px;font-size:12px;color:var(--muted)}
+.row-actions{display:flex;flex-wrap:wrap;gap:8px;grid-column:1/-1}
+.source-editor,.policy-editor,.rss-panel{margin-top:28px}
+.source-editor>summary,.policy-editor>summary,.rss-panel>summary{font-size:16px;font-weight:600}
+.workbench-grid{display:grid;grid-template-columns:minmax(0,3fr) minmax(240px,1fr);gap:24px;margin-top:20px}
+.workbench-grid>*{min-width:0}
+.editor{min-width:0;padding:20px 24px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)}
+.editor fieldset{border:0;padding:16px 0;margin:0 0 12px;min-width:0}
+.editor legend{font-weight:600;font-size:15px;color:var(--text)}
+.editor details{margin:12px 0;padding:8px 0;border-top:1px solid var(--divider)}
+.field-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.field-grid>details{grid-column:1/-1}
+.field{display:grid;gap:6px;min-width:0;margin:0 0 12px;color:var(--text-2);font-size:13px}
+.field input:not([type=checkbox]),.field select{width:100%;min-width:0;font-size:14px}
+.field small{font-size:12px;color:var(--muted);line-height:1.6}
+.field-error{color:var(--danger)!important}
+[aria-invalid=true]{border-color:var(--danger)!important}
+.check{display:flex;align-items:center;gap:8px;font-size:13px;line-height:1.6}
+.slot-options{display:flex;flex-wrap:wrap;gap:12px}
+.override{padding:12px 0;border-bottom:1px solid var(--divider)}
+.override>label{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px}
+.override [data-custom]{margin-top:12px}
+.form-actions{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin:24px 0 0;padding-top:16px;border-top:1px solid var(--border)}
+.form-actions .check{margin-right:auto}
+.rule-aside{position:sticky;top:calc(var(--nav-h) + 20px);align-self:start;padding:24px;border-left:2px solid var(--accent);background:var(--accent-soft);border-radius:var(--radius-sm)}
+.rule-aside h3{font-size:16px;margin:0 0 12px}
+.global-panel{padding:24px;background:linear-gradient(130deg,var(--accent-soft),var(--surface));border:1px solid var(--border);border-radius:var(--radius);margin-top:28px}
+.global-panel h2{margin-top:0}
+.global-panel .editor{background:var(--surface);margin-top:16px}
+.policy-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
+.policy-card{padding:24px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)}
+.policy-card h3{font-size:16px;margin-top:0}
+.policy-card p{margin:12px 0;font-size:13px;overflow-wrap:anywhere}
+.notice{padding:16px;background:var(--warn-soft);border:1px solid var(--warn-line);border-radius:var(--radius-sm);color:var(--warn)}
+.slot-edit-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:8px 0}
+.slot-edit-row label{display:grid;gap:4px;font-size:12px}
+.slot-edit-row input{width:100%;min-width:0}
+.feed-result{display:grid;gap:4px;padding:16px;margin:8px 0;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm)}
+.feed-result span,.feed-result small{color:var(--muted);font-size:12px}
+.feed-result code{overflow-wrap:anywhere;white-space:normal}
+#action-result:focus{outline:2px solid var(--accent);outline-offset:3px}
+#action-result h3{margin-top:0}
+.editor[aria-busy=true]{opacity:.75}
+.notification-status,.operation-row,.preview-result{padding:20px 24px;margin:20px 0;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)}
+.notification-status h2,.operation-row h3,.preview-result h2{margin-top:0}
+.notify-form{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:12px 0}
+.receipt{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px 16px;font-size:12px}
+.receipt dd{margin:0;overflow-wrap:anywhere}
+.receipt code{white-space:normal}
+.preview-result article{border-top:1px solid var(--border);padding:12px 0}
+@media(max-width:900px){.workbench-grid{grid-template-columns:1fr}.rule-aside{position:static}}
+@media(max-width:640px){
+ nav.tabs{padding:8px 8px 0;gap:0;overflow:visible}
+ nav.tabs a.tab{font-size:12.5px;padding:8px;flex:1;text-align:center}
+ .source-row{grid-template-columns:minmax(0,1fr);padding:16px;gap:8px}
+ .source-state{justify-items:start;display:flex;align-items:center}
+ .page-intro,.section-heading{align-items:start;flex-wrap:wrap}
+ .editor,.global-panel,.policy-card{padding:16px}
+ .field-grid{grid-template-columns:1fr}
+ .policy-grid{grid-template-columns:minmax(0,1fr)}
+ .override>label{align-items:start;flex-direction:column}
+ td,th{overflow-wrap:anywhere}
+ .lead{font-size:16px}
 }
 """

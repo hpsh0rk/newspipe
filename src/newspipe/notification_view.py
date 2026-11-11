@@ -14,6 +14,14 @@ import yaml
 from newspipe import config, delivery, edit, policy, state
 from newspipe.errors import ConfigError
 
+REASONS = {"nothing_new": "没有待通知内容", "waiting_slot": "等待通知时刻", "slot_complete": "本槽位已完成",
+           "ok": "可以通知", "notifications_paused": "全局通知暂停", "global_quiet_hours": "全局静默时段",
+           "global_budget_exceeded": "全局次数已用完", "global_min_gap": "等待全局最小间隔",
+           "quiet_hours": "源级静默时段", "budget_exceeded": "该源次数已用完", "min_gap": "等待源级最小间隔",
+           "below_min_items": "继续攒批", "disabled": "已停用", "retry_exhausted": "重试已耗尽",
+           "send_result_unknown": "远端结果未知，请核对回执", "receipt_repair": "只需修复本地回执",
+           "budget_attribution_incomplete": "今日历史预算归属不完整，发送已保护性暂停"}
+
 
 def _rule(cfg, source):
     resolved = policy.resolve(cfg, source)
@@ -26,10 +34,10 @@ def _rule(cfg, source):
 
 
 def snapshot(news_dir: Path, *, source: str | None = None, candidate: dict | None = None,
-             now: datetime | None = None) -> dict:
+             now: datetime | None = None, cfg=None, base_hash: str | None = None) -> dict:
     news_dir = Path(news_dir)
     now = now or datetime.now()
-    before = config.load(news_dir)
+    before = cfg or config.load(news_dir)
     after = before
     if candidate is not None:
         if not isinstance(candidate, dict) or set(candidate) - {"sources", "policies", "notifications", "chat", "slots"}:
@@ -98,9 +106,15 @@ def snapshot(news_dir: Path, *, source: str | None = None, candidate: dict | Non
                      "after": rule, "pending": store.pending_count(name), "reason": reason,
                      "plan": plan.as_dict(), "budget": store.source_budget_state(day, name),
                      "legacy_budget_scope": scfg.notify is None, "unfinished": receipt, "consequence": consequence})
+        rows[-1].update(summary=policy.human_summary(rule, after.slots), before_summary=policy.human_summary(_rule(before, current), before.slots) if current else "新建消息源",
+                        reason_label=REASONS.get(reason, reason),
+                        consequence_label=("将把待处理内容消费为本地批次；切回通知后不会重发这些已消费内容。" if rule["values"]["mode"] == "collect"
+                                           else "待处理内容继续保留，直到通知时钟与预算允许。")
+                        + ("旧式策略使用全局计数，绑定模板后额度按源独立；转换不会清零已有计数。" if current and (current.notify is None) != (scfg.notify is None) else "")
+                        + ("未完成远端操作保留原身份和目标，必须核对回执；不能强制重发。" if unfinished else ""))
     return {"contract_version": 1, "date": day, "time_zone": str(state.TZ or "local"),
-            "chat": after.chat, "slots": after.slots, "hash": edit.file_hash(news_dir / "sources.yaml"),
+            "chat": after.chat, "slots": after.slots, "hash": base_hash if base_hash is not None else edit.file_hash(news_dir / "sources.yaml"),
             "notifications": asdict(after.notifications) if after.notifications is not None else None,
             "global_budget": store.budget_state(day), "sources": rows,
-            "policies": {name: {"values": template.values(), "bound_sources": [s.name for s in after.sources.values()
+            "policies": {name: {"values": template.values(), "summary": policy.human_summary({"policy_id": name, "values": template.values()}, after.slots), "bound_sources": [s.name for s in after.sources.values()
                           if s.notify and s.notify.policy == name]} for name, template in after.policies.items()}}

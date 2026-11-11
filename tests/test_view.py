@@ -141,6 +141,9 @@ class ViewBuildTests(unittest.TestCase):
     def test_page_loads_nothing_external(self) -> None:
         """自包含：整页只有内联样式，没有任何会发起请求的标签。"""
         page = view.as_html(view.build(self.news, now=NOW))
+        local_script = '<script src="/assets/workbench.js" defer></script>'
+        self.assertEqual(page.count(local_script), 1)
+        page = page.replace(local_script, "")
         for tag in ("<link", "<img", "<iframe", "<script", "<video", "<audio", "url("):
             self.assertNotIn(tag, page)
 

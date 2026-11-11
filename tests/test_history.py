@@ -195,7 +195,9 @@ class CockpitTrendTests(unittest.TestCase):
     def test_trend_bars_are_pure_css(self) -> None:
         self.assertIn('<span class="bar', self.page)
         self.assertNotIn("url(", self.page)                      # 不引图表库、不拉外部资源
-        self.assertNotIn("<script", self.page)                   # 也没有 JS
+        script = '<script src="/assets/workbench.js" defer></script>'
+        self.assertEqual(self.page.count(script), 1)
+        self.assertNotIn("<script", self.page.replace(script, ""))
 
     def test_drawer_shows_the_gates_and_admits_what_is_not_recorded(self) -> None:
         self.assertIn("诊断抽屉", self.page)

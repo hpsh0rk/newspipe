@@ -557,7 +557,7 @@ def _sub_source(args: argparse.Namespace, news_dir: Path) -> result.Result:
             return result.fail(command, "E_VALIDATION", "原信源不存在，或新 ID 为空/已存在",
                                hint="用 source list 核对，复制必须创建新的稳定 ID")
         out = edit.set_source(news_dir, args.new_name, {**raw[args.name], "enabled": False},
-                              base_hash=args.base_hash, dry_run=args.dry_run)
+                              base_hash=args.base_hash, dry_run=args.dry_run, create_only=True)
         return _write_result(command, out, news_dir, next_ok=["newspipe source list --json"])
     if args.action in ("set", "patch"):
         try:
@@ -570,7 +570,7 @@ def _sub_source(args: argparse.Namespace, news_dir: Path) -> result.Result:
         writer = edit.patch_source if args.action == "patch" else edit.set_source
         out = writer(news_dir, args.name, body, base_hash=args.base_hash,
                      dry_run=args.dry_run,
-                     **({"confirm_conversion": args.confirm_conversion} if args.action == "patch" else {}))
+                     **({"confirm_conversion": args.confirm_conversion} if args.action == "patch" else {"create_only": args.create_only}))
     elif args.action in ("enable", "disable"):
         out = edit.set_source_enabled(news_dir, args.name, args.action == "enable",
                                       base_hash=args.base_hash, dry_run=args.dry_run)
@@ -644,7 +644,7 @@ def _sub_policy(args, news_dir):
                 return result.fail(command, "E_NOT_FOUND", f"没有策略 {args.name!r}", hint="newspipe policy list --json")
             return result.ok(command, {"policy": data["policies"][args.name], "hash": data["hash"]})
         return result.ok(command, {"policies": data["policies"], "hash": data["hash"]})
-    out = (edit.set_policy(news_dir, args.name, _json_object(args), base_hash=args.base_hash, dry_run=args.dry_run)
+    out = (edit.set_policy(news_dir, args.name, _json_object(args), base_hash=args.base_hash, dry_run=args.dry_run, create_only=args.create_only)
            if args.action == "set" else edit.remove_policy(news_dir, args.name, base_hash=args.base_hash, dry_run=args.dry_run))
     return _write_result(command, out, news_dir, next_ok=["newspipe notification preview --json"])
 
@@ -892,6 +892,7 @@ def _build_sub_parser() -> argparse.ArgumentParser:
     src.add_argument("--from-json", help="该源的四轴配置（JSON 文本或 `-` 读 stdin）")
     src.add_argument("--new-name")
     src.add_argument("--confirm-conversion", action="store_true")
+    src.add_argument("--create-only", action="store_true", help="只新增；ID 已存在时拒绝覆盖")
     src.add_argument("--dry-run", action="store_true", help="只校验与演练，不落盘")
     src.add_argument("--base-hash", help="乐观并发：与当前文件哈希不符则拒绝写入")
 
@@ -900,6 +901,7 @@ def _build_sub_parser() -> argparse.ArgumentParser:
         parser.add_argument("action", choices=["list", "show", "set", "remove"] if name == "policy" else ["set"])
         if name == "policy":
             parser.add_argument("name", nargs="?")
+            parser.add_argument("--create-only", action="store_true")
         parser.add_argument("--from-json")
         parser.add_argument("--dry-run", action="store_true")
         parser.add_argument("--base-hash")

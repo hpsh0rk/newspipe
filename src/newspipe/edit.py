@@ -139,7 +139,7 @@ def patch_source(news_dir: Path, name: str, body: dict[str, Any], *,
 
 @_serialized
 def set_policy(news_dir: Path, name: str, body: dict[str, Any], *,
-               base_hash: str | None = None, dry_run: bool = False) -> dict[str, Any]:
+               base_hash: str | None = None, dry_run: bool = False, create_only: bool = False) -> dict[str, Any]:
     path = _sources_path(news_dir)
     conflict = _check_base_hash(path, base_hash)
     if conflict:
@@ -150,6 +150,8 @@ def set_policy(news_dir: Path, name: str, body: dict[str, Any], *,
         text = path.read_text(encoding="utf-8")
         block = _dump_block({name: body})
         existed = yamlblocks.has_block(text, "policies", name)
+        if create_only and existed:
+            raise ConfigError(f"策略 ID {name!r} 已存在；新建/复制必须使用新 ID，编辑请打开现有策略")
         candidate = (yamlblocks.set_block(text, "policies", name, block) if existed else
                      yamlblocks.append_block(text, "policies", name, block))
         after = config_mod.load(news_dir, sources_text=candidate)
@@ -208,7 +210,7 @@ def set_globals(news_dir: Path, body: dict[str, Any], *, base_hash: str | None =
 
 @_serialized
 def set_source(news_dir: Path, name: str, body: dict[str, Any], *,
-               base_hash: str | None = None, dry_run: bool = False) -> dict[str, Any]:
+               base_hash: str | None = None, dry_run: bool = False, create_only: bool = False) -> dict[str, Any]:
     """新增或整体替换一个信源。`body` 就是该源在 `sources.yaml` 里的那段映射。"""
     path = _sources_path(news_dir)
     if not path.is_file():
@@ -225,6 +227,9 @@ def set_source(news_dir: Path, name: str, body: dict[str, Any], *,
     block = _dump_block({name: body})
     try:
         existed = yamlblocks.has_block(text, "sources", name)
+        if create_only and existed:
+            return {"code": "E_VALIDATION", "message": f"信源 ID {name!r} 已存在",
+                    "hint": "新建/复制必须使用新 ID；编辑请打开现有信源，不能覆盖"}
         candidate = (yamlblocks.set_block(text, "sources", name, block) if existed
                      else yamlblocks.append_block(text, "sources", name, block))
     except KeyError as exc:
