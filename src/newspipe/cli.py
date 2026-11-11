@@ -147,6 +147,7 @@ _WORKBENCH_EXAMPLES = {
     "policy show": 'newspipe policy show reading --json',
     "policy set": 'newspipe policy set reading --from-json \'{"mode":"immediate"}\' --create-only --dry-run --json',
     "policy remove": 'newspipe policy remove unused_policy --dry-run --json',
+    "notification migrate": 'newspipe notification migrate --dry-run --json',
     "global set": 'newspipe global set --from-json \'{"notifications":{"paused":true}}\' --dry-run --json',
     "notification preview": 'newspipe notification preview --source my_feed --json',
     "notification retry": 'newspipe notification retry my_feed --operation-id op_example --dry-run --json',
@@ -160,6 +161,7 @@ for _name, _summary, _args, _writes in (
     ("policy show", "查看策略及有效绑定", ["name"], False),
     ("policy set", "新增/整体替换策略并报告影响信源", ["name", "--from-json", "--create-only", "--dry-run", "--base-hash"], True),
     ("policy remove", "删除未被引用的策略", ["name", "--dry-run", "--base-hash"], True),
+    ("notification migrate", "原子迁移旧时间引用与源覆盖值，保留通知行为和台账", ["--dry-run", "--base-hash"], True),
     ("global set", "编辑目标、槽位或全局硬限制", ["--from-json", "--dry-run", "--base-hash"], True),
     ("notification preview", "只读候选配置、待通知和预算预览；不采集不发卡", ["--source", "--from-json"], False),
     ("notification retry", "安全窗口内重置原操作重试次数；不重建身份", ["source", "--operation-id", "--dry-run", "--base-hash"], True),
@@ -703,6 +705,9 @@ def _sub_global(args, news_dir):
 
 
 def _sub_notification(args, news_dir):
+    if args.action == "migrate":
+        out = edit.migrate_notifications(news_dir, base_hash=args.base_hash, dry_run=args.dry_run)
+        return _write_result("notification.migrate", out, news_dir, next_ok=["newspipe notification preview --json"])
     if args.action == "preview":
         from newspipe.notification_view import snapshot
         try:
@@ -968,7 +973,7 @@ def _build_sub_parser() -> argparse.ArgumentParser:
         parser.add_argument("--dry-run", action="store_true")
         parser.add_argument("--base-hash")
     notification = add("notification")
-    notification.add_argument("action", choices=["preview", "retry"])
+    notification.add_argument("action", choices=["preview", "retry", "migrate"])
     notification.add_argument("source", nargs="?")
     notification.add_argument("--source", dest="preview_source")
     notification.add_argument("--from-json")

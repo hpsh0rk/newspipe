@@ -149,7 +149,7 @@ class PolicyConfigTests(unittest.TestCase):
         schema = config.describe_schema(self.news)
         self.assertIn("policy_fields", schema)
         self.assertEqual({f["path"] for f in schema["policy_fields"]},
-                         {"label", "mode", "slots", "form", "quiet_hours", "max_cards_per_day",
+                         {"label", "mode", "times", "form", "quiet_hours", "max_cards_per_day",
                           "min_gap_min", "bypass_source_limits"})
         self.assertEqual({f["path"] for f in schema["notification_fields"]},
                          {"paused", "quiet_hours", "max_cards_per_day", "min_gap_min"})

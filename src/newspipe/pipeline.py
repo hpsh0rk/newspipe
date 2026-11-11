@@ -359,8 +359,8 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
         if current_plan.reason != "ok":
             return defer(current_plan.reason)
         if scheduled_slot:
-            from newspipe.service import SLOT_TOLERANCE, slot_datetime
-            when = slot_datetime(cfg, clock_slot or slot, current)
+            from newspipe.service import SLOT_TOLERANCE
+            when = policy.notification_datetime(cfg, scfg, clock_slot or slot, current)
             if current.date().isoformat() != digest or not when <= current <= when + SLOT_TOLERANCE:
                 return defer("waiting_slot")
         started = batch.get("remote_attempt_started_at") or batch.get("send_started_at")
@@ -689,9 +689,10 @@ def notify_source(cfg: Any, store: state.Store, name: str, *, now: datetime | No
         effective = policy.effective_source(cfg, scfg)
         mode = rule.values["mode"] if rule else "immediate"
         if mode == "digest" and not bypass_clock:
-            from newspipe.service import SLOT_TOLERANCE, slot_datetime
-            eligible = [s for s in rule.values["slots"] if (slot is None or s == slot)
-                        and slot_datetime(cfg, s, now) <= now <= slot_datetime(cfg, s, now) + SLOT_TOLERANCE]
+            from newspipe.service import SLOT_TOLERANCE
+            eligible = [s for s in policy.sending_times(cfg, rule.values) if (slot is None or s == slot)
+                        and policy.notification_datetime(cfg, scfg, s, now) <= now <=
+                        policy.notification_datetime(cfg, scfg, s, now) + SLOT_TOLERANCE]
             if not eligible:
                 run.status, run.queued = "waiting_slot", store.pending_count(name)
                 return run

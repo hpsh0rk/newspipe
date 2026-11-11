@@ -235,8 +235,8 @@ def _run_notifications(cfg: config.Config, store: state.Store, last_runs: dict, 
             runs.append(pipeline.notify_source(cfg, store, source.name, now=now, dry=dry))
             continue
         slots = last_runs.setdefault("notification_slots", {}).setdefault(day, {})
-        for slot in sorted(rule.values["slots"], key=lambda s: cfg.slots[s]):
-            when = slot_datetime(cfg, slot, now)
+        for slot, time in sorted(policy.sending_times(cfg, rule.values).items(), key=lambda item: item[1]):
+            when = policy.notification_datetime(cfg, source, slot, now)
             if not when <= now <= when + SLOT_TOLERANCE:
                 continue
             entry = slots.setdefault(slot, {}).setdefault(source.name, {})

@@ -236,6 +236,52 @@ def set_globals(news_dir: Path, body: dict[str, Any], *, base_hash: str | None =
 
 
 @_serialized
+def migrate_notifications(news_dir: Path, *, base_hash: str | None = None,
+                          dry_run: bool = False) -> dict[str, Any]:
+    """Freeze old clock references and lift effective overrides without touching state."""
+    path = _sources_path(news_dir)
+    conflict = _check_base_hash(path, base_hash)
+    if conflict:
+        return conflict
+    cfg, candidate, _ = sources_snapshot(news_dir)
+    raw = yaml.safe_load(candidate)
+    changes = []
+    names = set(cfg.policies)
+    for name, template in cfg.policies.items():
+        if not template.slots:
+            continue
+        body = template.values()
+        body["times"] = policy.sending_times(cfg, body)
+        body.pop("slots", None)
+        candidate = yamlblocks.set_block(candidate, "policies", name, _dump_block({name: body}))
+        changes.append({"policy": name, "times": body["times"]})
+    for src in cfg.sources.values():
+        if not src.notify or not src.notify.overrides:
+            continue
+        stem = f"{src.notify.policy}_{src.name}"
+        name, suffix = stem, 2
+        while name in names:
+            name, suffix = f"{stem}_{suffix}", suffix + 1
+        names.add(name)
+        body = dict(policy.resolve(cfg, src).values)
+        body["times"] = policy.sending_times(cfg, body)
+        body.pop("slots", None)
+        body["label"] = (cfg.policies[src.notify.policy].label or src.notify.policy) + f" · {src.name} 独立设置"
+        candidate = yamlblocks.append_block(candidate, "policies", name, _dump_block({name: body}))
+        source_body = dict(raw["sources"][src.name])
+        source_body["notify"] = {"policy": name}
+        candidate = yamlblocks.set_block(candidate, "sources", src.name, _dump_block({src.name: source_body}))
+        changes.append({"source": src.name, "before_policy": src.notify.policy, "policy": name, "values": body})
+    if not changes:
+        return {"ok": True, "changed": False, "dry_run": dry_run, "hash": file_hash(path), "changes": []}
+    out = _apply(news_dir, path, candidate, dry_run=dry_run, validate="sources")
+    if out.get("ok"):
+        out.update(op="notification-migrate", changes=changes,
+                   warning="旧时间引用已固定到策略；旧覆盖值转为独立策略。目标块内注释重写，其他块与投递台账保持原样。")
+    return out
+
+
+@_serialized
 def set_source(news_dir: Path, name: str, body: dict[str, Any], *,
                base_hash: str | None = None, dry_run: bool = False, create_only: bool = False) -> dict[str, Any]:
     """新增或整体替换一个信源。`body` 就是该源在 `sources.yaml` 里的那段映射。"""
@@ -251,6 +297,12 @@ def set_source(news_dir: Path, name: str, body: dict[str, Any], *,
         return {"code": "E_VALIDATION",
                 "message": f"body.name={body['name']!r} 与命令里的 {name!r} 不一致"}
     text = path.read_text(encoding="utf-8")
+    current = (yaml.safe_load(text).get("sources") or {}).get(name, {})
+    old_binding, new_binding = current.get("notify") or {}, body.get("notify") or {}
+    if ((new_binding.get("overrides") and new_binding != old_binding)
+            or (old_binding.get("overrides") and new_binding != old_binding)):
+        return {"code": "E_VALIDATION", "message": "消息源只能选择策略，不能新增、修改或静默清除旧覆盖值",
+                "hint": "先 newspipe notification migrate --dry-run --json 预览，再迁移为独立策略"}
     block = _dump_block({name: body})
     try:
         existed = yamlblocks.has_block(text, "sources", name)
