@@ -1,5 +1,6 @@
 """Execute the actual progressive-enhancement asset with controlled browser responses."""
 import shutil
+import os
 import subprocess
 import sys
 import unittest
@@ -63,11 +64,20 @@ const success = {ok: true, changed: true, data: {hash: 'new-hash'}};
 """
 
 
-@unittest.skipUnless(shutil.which("node"), "Node is needed for optional JavaScript behavioral tests")
+NODE = shutil.which("node")
+
+
+@unittest.skipUnless(NODE or os.environ.get("NEWSPIPE_REQUIRE_JS_TESTS") == "1",
+                     "Node is needed for optional JavaScript behavioral tests")
 class WorkbenchJavaScriptTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if not NODE:
+            raise RuntimeError("Node is required by NEWSPIPE_REQUIRE_JS_TESTS=1; JavaScript coverage cannot be skipped")
+
     def run_javascript(self, scenario):
         script = HARNESS + JAVASCRIPT + "\n(async () => {\n" + scenario + "\n})().catch(error => { console.error(error); process.exitCode = 1; });"
-        result = subprocess.run([shutil.which("node"), "-"], input=script, text=True,
+        result = subprocess.run([NODE, "-"], input=script, text=True,
                                 capture_output=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
