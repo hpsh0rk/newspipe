@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
-from newspipe import (backends, callback_jobs, config, credentials, hostenv, inbound as inbound_mod, pipeline, runtime,
+from newspipe import (backends, callback_jobs, config, credentials, hostenv, inbound as inbound_mod, pipeline, policy, runtime,
                       state)
 from newspipe._atomic import file_lock, write_json_atomic
 from newspipe.errors import ConfigError, DeliveryError, InboundError, NewsError
@@ -39,7 +39,7 @@ from newspipe.errors import ConfigError, DeliveryError, InboundError, NewsError
 SLOT_TOLERANCE = timedelta(minutes=15)
 SLOT_MAX_ATTEMPTS = 3
 SLOT_RETRY_SECONDS = 60
-SLOT_FAILURES = {"error", "config_missing", "send_failed", "overflow"}
+SLOT_FAILURES = {"error", "config_missing", "send_failed", "overflow", "retry_exhausted", "send_result_unknown", "retry_wait"}
 
 
 def parse_slot_time(text: str) -> tuple[int, int]:
@@ -117,7 +117,7 @@ def mark_slot(news_dir: Path, slot: str, now: datetime) -> dict[str, Any]:
 
 
 def _save_runs(news_dir: Path, data: dict[str, Any]) -> None:
-    for field in ("slots", "slot_progress"):
+    for field in ("slots", "slot_progress", "notification_slots"):
         days = data.get(field) or {}
         for key in sorted(days)[:-14]:
             days.pop(key, None)
@@ -178,7 +178,8 @@ def _run_once(cfg: config.Config, store: state.Store, *, now: datetime,
                 _save_runs(news_dir, last_runs)
             try:
                 output = pipeline.run_slot(cfg, store, slot, only=source.name if source else None,
-                                           dry=dry, now=now)
+                                           dry=dry, now=now,
+                                           **({"collect_only": True} if source and source.notify else {}))
             except NewsError as exc:
                 logger(f"调度：槽位 {slot} 信源 {name} 失败（{type(exc).__name__}: {exc}）")
                 output = [pipeline.SourceRun(source=name, status="error", note=str(exc)[:200])]
@@ -198,9 +199,59 @@ def _run_once(cfg: config.Config, store: state.Store, *, now: datetime,
 
     if cfg.poll_sources():
         try:
-            runs.extend(pipeline.run_poll(cfg, store, dry=dry, now=now))
+            runs.extend(pipeline.run_poll(cfg, store, dry=dry, now=now,
+                         **({"collect_only": True} if any(s.notify for s in cfg.sources.values()) else {})))
         except NewsError as exc:
             logger(f"调度：轮询失败（{type(exc).__name__}: {exc}）")
+    runs.extend(_run_notifications(cfg, store, last_runs, now=now, news_dir=news_dir, dry=dry))
+    return runs
+
+
+def _run_notifications(cfg: config.Config, store: state.Store, last_runs: dict, *, now: datetime,
+                       news_dir: Path, dry: bool) -> list[pipeline.SourceRun]:
+    """Notification progress is independent of acquisition slots and fetch throttles."""
+    runs = []
+    day = now.date().isoformat()
+    for source in cfg.sources.values():
+        unfinished = store.unfinished_batch(source.name)
+        if unfinished and unfinished.get("delivery_effect_done"):
+            result = pipeline.notify_source(cfg, store, source.name, now=now, dry=dry)
+            runs.append(result)
+            if not dry and unfinished.get("notification_scheduled") and result.status == "ok":
+                entry = (last_runs.setdefault("notification_slots", {})
+                         .setdefault(unfinished["delivery_date"], {})
+                         .setdefault(unfinished["slot"], {}).setdefault(source.name, {}))
+                entry.update(complete=True, status="ok")
+                _save_runs(news_dir, last_runs)
+            continue
+        if not source.enabled or source.notify is None:
+            continue
+        rule = policy.resolve(cfg, source)
+        if rule.values["mode"] != "digest":
+            runs.append(pipeline.notify_source(cfg, store, source.name, now=now, dry=dry))
+            continue
+        slots = last_runs.setdefault("notification_slots", {}).setdefault(day, {})
+        for slot in sorted(rule.values["slots"], key=lambda s: cfg.slots[s]):
+            when = slot_datetime(cfg, slot, now)
+            if not when <= now <= when + SLOT_TOLERANCE:
+                continue
+            entry = slots.setdefault(slot, {}).setdefault(source.name, {})
+            if entry.get("complete"):
+                continue
+            if not dry and (int(entry.get("attempts") or 0) >= SLOT_MAX_ATTEMPTS
+                            or float(entry.get("retry_after") or 0) > now.timestamp()):
+                continue
+            if not dry:
+                entry.update(attempts=int(entry.get("attempts") or 0) + 1,
+                             retry_after=now.timestamp() + SLOT_RETRY_SECONDS, status="running")
+                _save_runs(news_dir, last_runs)
+            result = pipeline.notify_source(cfg, store, source.name, slot=slot, now=now, dry=dry)
+            runs.append(result)
+            if not dry:
+                entry.update(status=result.status, complete=result.status not in SLOT_FAILURES)
+                _save_runs(news_dir, last_runs)
+            # At most one new notification operation per source per service tick.
+            break
     return runs
 
 

@@ -47,7 +47,7 @@
 
 **Files:** Modify src/newspipe/pipeline.py, delivery.py, state.py, service.py; create focused notification scheduling tests.
 
-**Interfaces:** Consumes Task 1 resolution. Produces collect_source(cfg, name, news_dir, now, force) and notify_source(cfg, name, news_dir, now, slot, bypass_clock); source_budget_state(digest) and source-attributed note_card(..., source=...). Service progress tracks acquisition separately from notification.
+**Interfaces:** Consumes Task 1 resolution. Produces collect_source(cfg, store, name, *, now, force, dry) -> SourceRun and notify_source(cfg, store, name, *, now, slot, bypass_clock, dry) -> SourceRun; source_budget_state(date, source) and source-attributed note_card(..., source=...). Service progress tracks acquisition separately from notification; Store owns completion receipts used by both CLI and service without lock inversion.
 
 - [ ] Write tests for poll/digest separation, pause while collecting, immediate pending without fetch, collect-local consumption, separate source counters under global limits, and legacy behavior.
 - [ ] Run focused tests; expect new entrypoints/accounting behavior missing.

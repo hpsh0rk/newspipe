@@ -34,7 +34,7 @@ def poll_decisions(cfg: Any, store: Any, now: datetime, *, force: bool = False,
     for src in cfg.poll_sources():
         if only and src.name != only:
             continue
-        if in_quiet_hours(src.deliver.quiet_hours, now):
+        if src.notify is None and in_quiet_hours(src.deliver.quiet_hours, now):
             out.append(Decision(src.name, False, "quiet_hours"))
             continue
         interval = float(src.fetch.interval_min or 0)

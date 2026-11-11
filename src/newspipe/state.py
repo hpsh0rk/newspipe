@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
@@ -293,15 +294,90 @@ class Store:
         data = read_json(self.root / "budget" / f"{date}.json")
         return data if isinstance(data, dict) else {"cards": 0, "last_card_ts": None}
 
-    def note_card(self, date: str, *, at: datetime | None = None, operation_id: str = "") -> dict:
+    def _source_accounting(self, date: str, data: dict) -> dict:
+        if data.get("source_accounting_version") == 1:
+            return data
+        from newspipe import events
+        data = dict(data)
+        data.update(source_accounting_version=1, sources={}, source_operations={})
+        known = set()
+        for event in events.list_events(self.news_dir, days=None, types=["delivered"]):
+            if str(event.get("ts") or "")[:10] != date or not event.get("source"):
+                continue
+            eid = str(event["id"])
+            operation = eid.removeprefix("ev_delivery_") if eid.startswith("ev_delivery_") else eid
+            if operation in known:
+                continue
+            known.add(operation)
+            self._attribute_operation(data, str(event["source"]), operation, str(event["ts"]))
+        # Never invent attribution for a retained global operation without a receipt.
+        missing = set(data.get("operations") or []) - known
+        data["unattributed"] = max(0, int(data.get("cards") or 0) - len(known), len(missing))
+        if len(known) > int(data.get("cards") or 0):
+            data["unattributed"] = max(1, data["unattributed"])
+        return data
+
+    @staticmethod
+    def _attribute_operation(data: dict, source: str, operation: str, timestamp: str) -> None:
+        if operation in data.setdefault("source_operations", {}):
+            return
+        data["source_operations"][operation] = source
+        bucket = data.setdefault("sources", {}).setdefault(source, {"cards": 0, "last_card_ts": None})
+        bucket["cards"] += 1
+        previous = bucket.get("last_card_ts")
+        if not previous or datetime.fromisoformat(previous).timestamp() < datetime.fromisoformat(timestamp).timestamp():
+            bucket["last_card_ts"] = timestamp
+
+    def source_budget_state(self, date: str, source: str) -> dict:
+        """Pure read/derivation, safe for previews; no migration write or directory creation."""
+        data = self._source_accounting(date, self.budget_state(date))
+        bucket = dict(data.get("sources", {}).get(source, {"cards": 0, "last_card_ts": None}))
+        bucket["attribution_complete"] = not data.get("unattributed")
+        return bucket
+
+    def ensure_source_accounting(self, date: str) -> dict:
         with self.transaction():
             data = self.budget_state(date)
-            if operation_id and operation_id in data.get("operations", []):
-                return data
-            data["cards"] = int(data.get("cards") or 0) + 1
-            if operation_id:
-                data.setdefault("operations", []).append(operation_id)
+            if data.get("source_accounting_version") != 1:
+                data = self._source_accounting(date, data)
+                write_json_atomic(self._path("budget", f"{date}.json"), data, sort_keys=False)
+            return data
+
+    def reserve_notification_slot(self, date: str, source: str, *, prefix: str = "notify") -> str:
+        with self.transaction():
+            path = self._path("notification_sequences", date, f"{source}.json")
+            data = read_json(path) or {}
+            sequence = int(data.get("sequence") or 0) + 1
+            write_json_atomic(path, {"sequence": sequence})
+            return f"{prefix}-{sequence:06d}"
+
+    def notification_slot_complete(self, date: str, source: str, slot: str) -> bool:
+        data = read_json(self.root / "notification_slots" / date / f"{source}.json") or {}
+        return slot in data
+
+    def complete_notification_slot(self, date: str, source: str, slot: str, *, status: str) -> None:
+        with self.transaction():
+            path = self._path("notification_slots", date, f"{source}.json")
+            data = read_json(path) or {}
+            data[slot] = {"status": status}
+            write_json_atomic(path, data)
+
+    def note_card(self, date: str, *, at: datetime | None = None, operation_id: str = "",
+                  source: str = "") -> dict:
+        with self.transaction():
+            data = self.ensure_source_accounting(date)
+            operation_id = operation_id or uuid.uuid4().hex
+            already = operation_id in data.get("operations", [])
             when = at or datetime.now(TZ)
+            if source and operation_id not in data["source_operations"]:
+                self._attribute_operation(data, source, operation_id, when.isoformat(timespec="seconds"))
+                if already:
+                    data["unattributed"] = max(0, int(data.get("unattributed") or 0) - 1)
+            if not already:
+                data["cards"] = int(data.get("cards") or 0) + 1
+                data.setdefault("operations", []).append(operation_id)
+                if not source:
+                    data["unattributed"] = int(data.get("unattributed") or 0) + 1
             previous = data.get("last_card_ts")
             if not previous or datetime.fromisoformat(previous).timestamp() < when.timestamp():
                 data["last_card_ts"] = when.isoformat(timespec="seconds")

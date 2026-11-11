@@ -18,12 +18,12 @@ from __future__ import annotations
 import importlib
 import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
 from newspipe import channel, dedup, delivery, enrich as enrich_mod, filter as filter_mod
-from newspipe import events, render, runtime, scheduler, state
+from newspipe import events, policy, render, runtime, scheduler, state
 from newspipe.errors import ConfigError, DeliveryError
 from newspipe.state import now_iso, today
 
@@ -155,6 +155,9 @@ def _prepare_batch(cfg: Any, store: state.Store, scfg: Any, digest: str, slot: s
     is_append = bool(existing and existing.get("message_id"))
     if existing:
         batch = dict(existing)
+        if existing.get("delivery_pending") and scfg.notify is not None:
+            # Freeze an unfinished operation's payload/form/target as well as its identity.
+            return batch, is_append, []
     else:
         batch = {"digest": digest, "slot": slot, "source": scfg.name, "adapter": scfg.adapter,
                  "form": scfg.deliver.form, "title": scfg.card_title, "chat_id": cfg.chat,
@@ -271,7 +274,18 @@ def _process_locked(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slo
     cap = delivery.card_cap(scfg)
     pending = [] if dry else dedup.fresh(store.peek_pending(scfg.name, max(cap, 1) * 2), store, scfg.name)
     candidates = _merge(pending, fresh)
-    plan = delivery.plan(candidates, scfg, store, digest=digest, slot=slot, now=now)
+    return _deliver_candidates(cfg, store, scfg, run, candidates, digest=digest, slot=slot,
+                               dry=dry, now=now, mode=mode, since=since, kept=kept, raw=raw)
+
+
+def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
+                        candidates: list[dict], *, digest: str, slot: str, dry: bool,
+                        now: datetime, mode: str, since: float | None = None,
+                        kept: list[dict] | None = None, raw: list[dict] | None = None,
+                        scheduled_slot: bool = False) -> SourceRun:
+    kept, raw = kept or [], raw or []
+    cap = delivery.card_cap(scfg)
+    plan = delivery.plan(candidates, scfg, store, digest=digest, slot=slot, now=now, cfg=cfg)
     run.planned, run.queued = len(plan.items), len(plan.queued)
 
     if dry:
@@ -292,7 +306,16 @@ def _process_locked(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slo
     # Persist every candidate first, and enrich only the final display set after merging.
     _queue(store, scfg.name, candidates)
     batch, is_append, excess = _prepare_batch(cfg, store, scfg, digest, slot, plan.items, cap)
-    batch["items"], run.enrich = _enrich_new(cfg, store, scfg, batch["items"], now)
+    if scfg.notify is not None and scfg.sends_card:
+        if not batch.get("delivery_pending"):
+            batch["notification_mode"] = policy.resolve(cfg, scfg).values["mode"]
+            batch["notification_scheduled"] = scheduled_slot
+        _begin_delivery(batch, cfg, digest, now)
+        batch["notification_attempts"] = int(batch.get("notification_attempts") or 0) + 1
+        batch["notification_retry_after"] = now.timestamp() + 60
+        store.write_batch(batch)
+    if scfg.notify is None or scfg.sends_card:
+        batch["items"], run.enrich = _enrich_new(cfg, store, scfg, batch["items"], now)
     batch["overflow"] = max(int(batch.get("overflow") or 0), plan.overflow, len(excess))
 
     if not scfg.sends_card:
@@ -324,15 +347,7 @@ def _process_locked(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slo
         return run
 
     try:
-        if not batch.get("delivery_pending"):
-            batch["delivery_id"] = uuid.uuid4().hex
-            batch["delivery_at"] = now.isoformat()
-            batch["delivery_date"] = digest
-            batch["delivery_chat"] = cfg.chat
-        batch.setdefault("delivery_id", uuid.uuid4().hex)
-        batch.setdefault("delivery_at", now.isoformat())
-        batch.setdefault("delivery_date", digest)
-        batch.setdefault("delivery_chat", cfg.chat)
+        _begin_delivery(batch, cfg, digest, now)
         batch["delivery_run"] = {key: getattr(run, key) for key in ("fetched", "kept", "new", "planned", "enrich")}
         if mode == "poll":
             batch["delivery_cursor"] = _watermark(since, kept, raw, now)
@@ -382,6 +397,18 @@ def _process_locked(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slo
     return _complete_delivery(store, batch, run)
 
 
+def _begin_delivery(batch: dict, cfg: Any, digest: str, now: datetime) -> None:
+    if not batch.get("delivery_pending"):
+        batch.update(delivery_id=uuid.uuid4().hex, delivery_at=now.isoformat(),
+                     delivery_date=digest, delivery_chat=cfg.chat, notification_attempts=0)
+    batch.setdefault("delivery_id", uuid.uuid4().hex)
+    batch.setdefault("delivery_at", now.isoformat())
+    batch.setdefault("delivery_date", digest)
+    batch.setdefault("delivery_chat", cfg.chat)
+    batch["delivery_pending"] = True
+    batch["delivery_effect_done"] = False
+
+
 def _complete_delivery(store: state.Store, batch: dict, run: SourceRun) -> SourceRun:
     source, digest, slot = batch["source"], batch["digest"], batch["slot"]
     operation_id = batch["delivery_id"]
@@ -390,10 +417,11 @@ def _complete_delivery(store: state.Store, batch: dict, run: SourceRun) -> Sourc
     store.record_pushed(source, batch["items"], digest)
     store.remove_pending(source, store.pushed_ids(source))
     run.queued = store.pending_count(source)
-    store.note_card(batch["delivery_date"], at=delivered_at, operation_id=operation_id)
+    store.note_card(batch["delivery_date"], at=delivered_at, operation_id=operation_id, source=source)
     run.status = "ok"
     recorded = _record_event(store, "delivered",
                   payload={"card": run.card, "card_id": batch.get("card_id"),
+                           "operation_id": operation_id,
                            "message_id": batch.get("message_id"), "chat": batch["delivery_chat"],
                            "items": len(batch.get("items") or []), "queued": run.queued,
                            "title": (batch.get("card") or {}).get("title") or batch.get("title")},
@@ -414,6 +442,8 @@ def _complete_delivery(store: state.Store, batch: dict, run: SourceRun) -> Sourc
     if "delivery_cursor" in batch:
         current = store.cursor(source)
         store.set_cursor(source, max(float(current or 0), batch["delivery_cursor"]), at=delivered_at)
+    if batch.get("notification_scheduled"):
+        store.complete_notification_slot(batch["delivery_date"], source, slot, status="ok")
     batch["delivery_pending"] = False
     store.write_batch(batch)
     return run
@@ -427,7 +457,8 @@ def _advance(store: state.Store, scfg: Any, mode: str, since: float | None,
 
 @runtime.scoped
 def run_slot(cfg: Any, store: state.Store, slot: str, *, dry: bool = False,
-             only: str | None = None, now: datetime | None = None) -> list[SourceRun]:
+             only: str | None = None, now: datetime | None = None,
+             collect_only: bool = False) -> list[SourceRun]:
     now = now or datetime.now()
     # 批次日期必须来自**注入的时钟**：用 `today()`（墙钟）会让「回放/测试给了一个时刻」与
     # 「批次落在哪一天」分叉——批次写到今天、调用方按注入日期去读，读到的永远是 None，
@@ -437,6 +468,11 @@ def run_slot(cfg: Any, store: state.Store, slot: str, *, dry: bool = False,
     for scfg in scheduler.slot_sources(cfg, slot):
         if only and scfg.name != only:
             continue
+        if scfg.notify is not None:
+            out.append(collect_source(cfg, store, scfg.name, dry=dry, now=now, force=True))
+            if not collect_only:
+                out.append(notify_source(cfg, store, scfg.name, dry=dry, now=now, slot=slot))
+            continue
         out.append(_process(cfg, store, scfg, digest=digest, slot=slot, dry=dry,
                             now=now, mode="slot"))
     return out
@@ -444,7 +480,8 @@ def run_slot(cfg: Any, store: state.Store, slot: str, *, dry: bool = False,
 
 @runtime.scoped
 def run_poll(cfg: Any, store: state.Store, *, dry: bool = False, only: str | None = None,
-             force: bool = False, now: datetime | None = None) -> list[SourceRun]:
+             force: bool = False, now: datetime | None = None,
+             collect_only: bool = False) -> list[SourceRun]:
     now = now or datetime.now()
     digest = now.strftime("%Y-%m-%d")                       # 同上：别一半墙钟一半注入时钟
     out: list[SourceRun] = []
@@ -454,9 +491,16 @@ def run_poll(cfg: Any, store: state.Store, *, dry: bool = False, only: str | Non
             if not dry:
                 store.heartbeat(scfg.name, status=decision.reason, digest=digest)
             out.append(SourceRun(source=scfg.name, adapter=scfg.adapter, status=decision.reason))
+            if scfg.notify is not None and not collect_only:
+                out.append(notify_source(cfg, store, scfg.name, dry=dry, now=now))
             continue
-        out.append(_process(cfg, store, scfg, digest=digest, slot="alert", dry=dry,
-                            now=now, mode="poll", force=force))
+        if scfg.notify is not None:
+            out.append(collect_source(cfg, store, scfg.name, dry=dry, now=now, force=force))
+            if not collect_only:
+                out.append(notify_source(cfg, store, scfg.name, dry=dry, now=now))
+        else:
+            out.append(_process(cfg, store, scfg, digest=digest, slot="alert", dry=dry,
+                                now=now, mode="poll", force=force))
     return out
 
 
@@ -468,10 +512,162 @@ def run_source(cfg: Any, store: state.Store, name: str, *, slot: str | None = No
     if scfg is None:
         raise ConfigError(f"未知信源：{name}（可选：{', '.join(sorted(cfg.sources))}）")
     now = now or datetime.now()
+    if scfg.notify is not None:
+        return [collect_source(cfg, store, name, dry=dry, force=force, now=now),
+                notify_source(cfg, store, name, dry=dry, slot=slot, now=now)]
     if scfg.fetch.trigger == "poll":
         return run_poll(cfg, store, dry=dry, only=name, force=force, now=now)
     use = slot or (scfg.fetch.slots[0] if scfg.fetch.slots else "manual")
     return run_slot(cfg, store, use, dry=dry, only=name, now=now)
+
+
+def _source(cfg: Any, name: str) -> Any:
+    if name not in cfg.sources:
+        raise ConfigError(f"未知信源 {name!r}；先用 source list 查看可选 ID")
+    return cfg.sources[name]
+
+
+@runtime.scoped
+def collect_source(cfg: Any, store: state.Store, name: str, *, now: datetime | None = None,
+                   force: bool = True, dry: bool = False) -> SourceRun:
+    """Collect durably, never remotely send or enrich; manual force skips only baseline/throttle."""
+    scfg = _source(cfg, name)
+    now = now or datetime.now()
+    digest = now.date().isoformat()
+    run = SourceRun(source=name, adapter=scfg.adapter)
+    if not scfg.enabled:
+        run.status = "disabled"
+        return run
+    from contextlib import nullcontext
+    with nullcontext() if dry else store.transaction():
+        since = store.cursor(name) if scfg.fetch.trigger == "poll" else None
+        if scfg.fetch.trigger == "poll" and not force and not dry:
+            if since is None:
+                store.set_cursor(name, now.timestamp(), at=now)
+                run.status = "baseline"
+                store.heartbeat(name, status=run.status, digest=digest, note="首轮建基线，不发卡")
+                return run
+            age = store.cursor_age_min(name, now)
+            if age is not None and age < scfg.fetch.interval_min:
+                run.status = "throttled"
+                return run
+        try:
+            raw = _adapter(scfg.adapter).fetch(scfg.adapter_config(), since=since)
+            kept = filter_mod.apply(raw, scfg)
+            fresh = dedup.fresh(kept, store, name)
+        except Exception as exc:
+            run.status = "config_missing" if isinstance(exc, ConfigError) else "error"
+            run.note = f"{type(exc).__name__}: {exc}"[:200]
+            if not dry:
+                store.heartbeat(name, status=run.status, digest=digest, note=run.note)
+                _record_event(store, "failed", payload={"status": run.status, "error": run.note},
+                              source=name, slot="collect", digest=digest, now=now)
+            return run
+        run.fetched, run.kept, run.new = len(raw), len(kept), len(fresh)
+        if dry:
+            run.status, run.note = "dry", "只预览采集；不写游标、队列或批次"
+            return run
+        _queue(store, name, fresh)
+        # Cursor commits after durable pending, even when delivery is paused or fails later.
+        store.set_cursor(name, max(float(since or 0), _watermark(since, kept, raw, now)), at=now)
+        run.status, run.queued = "collected", store.pending_count(name)
+        store.heartbeat(name, status=run.status, digest=digest, fetched=run.fetched,
+                        kept=run.kept, new=run.new, queued=run.queued, card="none")
+        rule = policy.resolve(cfg, scfg)
+        if rule is not None and rule.values["mode"] == "collect":
+            return notify_source(cfg, store, name, now=now)
+        return run
+
+
+@runtime.scoped
+def notify_source(cfg: Any, store: state.Store, name: str, *, now: datetime | None = None,
+                  slot: str | None = None, bypass_clock: bool = False,
+                  dry: bool = False) -> SourceRun:
+    """Deliver existing pending only; explicit clock bypass never bypasses delivery gates."""
+    scfg = _source(cfg, name)
+    now = now or datetime.now()
+    digest = now.date().isoformat()
+    run = SourceRun(source=name, adapter=scfg.adapter)
+    from contextlib import nullcontext
+    with nullcontext() if dry else store.transaction():
+        unfinished = store.unfinished_batch(name)
+        if unfinished and unfinished.get("delivery_effect_done") and not dry:
+            for key, value in (unfinished.get("delivery_run") or {}).items():
+                setattr(run, key, value)
+            return _complete_delivery(store, unfinished, run)
+        if not scfg.enabled:
+            run.status = "disabled"
+            return run
+        rule = policy.resolve(cfg, scfg)
+        effective = policy.effective_source(cfg, scfg)
+        mode = rule.values["mode"] if rule else "immediate"
+        if mode == "digest" and not bypass_clock:
+            from newspipe.service import SLOT_TOLERANCE, slot_datetime
+            eligible = [s for s in rule.values["slots"] if (slot is None or s == slot)
+                        and slot_datetime(cfg, s, now) <= now <= slot_datetime(cfg, s, now) + SLOT_TOLERANCE]
+            if not eligible:
+                run.status, run.queued = "waiting_slot", store.pending_count(name)
+                return run
+            remaining = [s for s in eligible if not store.notification_slot_complete(digest, name, s)]
+            if not remaining and not unfinished:
+                run.status, run.queued = "slot_complete", store.pending_count(name)
+                return run
+            slot = remaining[0] if remaining else eligible[0]
+        if unfinished:
+            started = unfinished.get("send_started_at")
+            if started and now.timestamp() - datetime.fromisoformat(started).timestamp() >= 3600:
+                run.status = "send_result_unknown"
+                run.note = (f"结果未确认且已超幂等窗口；核对平台回执：目标 {unfinished.get('delivery_chat')}, "
+                            f"卡片 {unfinished.get('card_id')}, 操作 {unfinished.get('delivery_id')}, 时间 {started}；禁止自动重发")
+                return run
+            if not dry and scfg.notify is not None:
+                if int(unfinished.get("notification_attempts") or 0) >= 3:
+                    run.status, run.note = "retry_exhausted", "已尝试三次；仅可在原身份安全窗口内显式重试，或核对平台回执"
+                    return run
+                if float(unfinished.get("notification_retry_after") or 0) > now.timestamp():
+                    run.status = "retry_wait"
+                    return run
+            if mode == "collect":
+                run.status, run.note = "send_failed", "未完成的远端操作保留原身份；先核对回执，不能改为本地消费"
+                return run
+            effective = replace(effective, deliver=replace(effective.deliver, form=unfinished["form"]))
+        cap = delivery.card_cap(effective)
+        candidates = dedup.fresh(store.peek_pending(name, max(cap, 1) * 2), store, name)
+        if unfinished:
+            candidates = _merge(list(unfinished.get("items") or []), candidates)
+        if not candidates:
+            run.status = "nothing_new"
+            if not dry and mode == "digest" and not bypass_clock:
+                store.complete_notification_slot(digest, name, slot, status=run.status)
+            return run
+        if not dry and effective.sends_card and rule:
+            store.ensure_source_accounting(digest)
+        if unfinished:
+            use = unfinished["slot"]
+        elif mode == "collect" or (mode == "immediate" and effective.deliver.form == "card"):
+            use = "preview" if dry else store.reserve_notification_slot(digest, name,
+                                            prefix="collected" if mode == "collect" else "notify")
+        elif mode == "immediate":
+            use = "live"
+        else:
+            use = slot or "manual-notify"
+        run.new = len(candidates)
+        try:
+            outcome = _deliver_candidates(cfg, store, effective, run, candidates, digest=digest, slot=use,
+                                         dry=dry, now=now, mode="notify",
+                                         scheduled_slot=mode == "digest" and not bypass_clock)
+            if (not dry and mode == "digest" and not bypass_clock and
+                    outcome.status not in {"error", "config_missing", "send_failed", "overflow"}):
+                store.complete_notification_slot(digest, name, slot, status=outcome.status)
+            return outcome
+        except Exception as exc:
+            run.status, run.note = "error", f"{type(exc).__name__}: {exc}"[:200]
+            if not dry:
+                store.heartbeat(name, status=run.status, digest=digest, note=run.note,
+                                queued=store.pending_count(name))
+                _record_event(store, "failed", payload={"status": run.status, "error": run.note},
+                              source=name, slot=use, digest=digest, now=now)
+            return run
 
 
 def stats(store: state.Store, cfg: Any) -> list[dict[str, Any]]:

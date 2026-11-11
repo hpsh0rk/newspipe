@@ -78,13 +78,30 @@ def _gap_minutes(state: dict, now: datetime) -> float | None:
     if not ts:
         return None
     try:
-        return (now - datetime.fromisoformat(str(ts))).total_seconds() / 60
+        return (now.timestamp() - datetime.fromisoformat(str(ts)).timestamp()) / 60
     except (TypeError, ValueError):
         return None
 
 
+def global_gate(cfg: Any, store: Any, *, digest: str, now: datetime) -> str:
+    gates = getattr(cfg, "notifications", None)
+    if gates is None:
+        return ""
+    if gates.paused:
+        return "notifications_paused"
+    if in_quiet_hours(gates.quiet_hours, now):
+        return "global_quiet_hours"
+    budget = store.budget_state(digest)
+    if gates.max_cards_per_day is not None and int(budget.get("cards") or 0) >= gates.max_cards_per_day:
+        return "global_budget_exceeded"
+    gap = _gap_minutes(budget, now)
+    if gates.min_gap_min and gap is not None and gap < gates.min_gap_min:
+        return "global_min_gap"
+    return ""
+
+
 def plan(items: list[dict], scfg: Any, store: Any, *, digest: str, slot: str,
-         now: datetime) -> Plan:
+         now: datetime, cfg: Any = None) -> Plan:
     """把候选条目裁决成一份投递计划。不写任何状态（除读取预算计数）。"""
     form = scfg.deliver.form
     priority = scfg.deliver.priority
@@ -94,6 +111,10 @@ def plan(items: list[dict], scfg: Any, store: Any, *, digest: str, slot: str,
     if not items:
         return Plan(reason="nothing_new", **base)
 
+    reason = global_gate(cfg, store, digest=digest, now=now) if scfg.sends_card else ""
+    if reason:
+        return Plan(reason=reason, deferred=True, deferred_items=list(items), **base)
+
     bypass = priority == "high"
 
     # 闸① 静默窗口
@@ -102,7 +123,11 @@ def plan(items: list[dict], scfg: Any, store: Any, *, digest: str, slot: str,
 
     # 闸② 打扰预算（跨源可比：按当日发卡计数 + 最小间隔）
     if not bypass and scfg.sends_card:
-        budget = store.budget_state(digest)
+        budget = (store.source_budget_state(digest, scfg.name) if getattr(scfg, "notify", None)
+                  else store.budget_state(digest))
+        if budget.get("attribution_complete") is False:
+            return Plan(reason="budget_attribution_incomplete", deferred=True,
+                        deferred_items=list(items), **base)
         if int(budget.get("cards") or 0) >= int(scfg.deliver.max_cards_per_day or 0):
             return Plan(reason="budget_exceeded", deferred=True,
                         deferred_items=list(items), **base)
