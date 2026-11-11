@@ -18,13 +18,12 @@ from __future__ import annotations
 import importlib
 import hashlib
 import json
-import time
 import uuid
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
-from newspipe import channel, dedup, delivery, enrich as enrich_mod, filter as filter_mod
+from newspipe import channel, clock, dedup, delivery, enrich as enrich_mod, filter as filter_mod
 from newspipe import events, policy, render, runtime, scheduler, state
 from newspipe.errors import ConfigError, DeliveryError
 from newspipe.state import now_iso, today
@@ -226,6 +225,7 @@ def _enrich_new(cfg: Any, store: state.Store, scfg: Any, items: list[dict],
 
 
 # ── 主流程 ────────────────────────────────────────────────────────────────────
+@clock.scoped
 def _process(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slot: str,
              dry: bool, now: datetime, mode: str, force: bool = False) -> SourceRun:
     if dry:
@@ -297,9 +297,10 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
                         kept: list[dict] | None = None, raw: list[dict] | None = None,
                         scheduled_slot: bool = False) -> SourceRun:
     kept, raw = kept or [], raw or []
-    operation_clock = time.monotonic()
+    acquisition_now = now
+    now = clock.now()
     cap = delivery.card_cap(scfg)
-    plan = delivery.plan(candidates, scfg, store, digest=digest, slot=slot, now=now, cfg=cfg)
+    plan = delivery.plan(candidates, scfg, store, digest=now.date().isoformat(), slot=slot, now=now, cfg=cfg)
     run.planned, run.queued = len(plan.items), len(plan.queued)
 
     if dry:
@@ -307,34 +308,22 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
         run.note = f"plan={plan.reason}"
         return run
 
-    if plan.reason != "ok":
+    def defer(reason: str) -> SourceRun:
         _queue(store, scfg.name, candidates)
         queued = store.pending_count(scfg.name)
-        run.status, run.queued = plan.reason, queued
-        store.heartbeat(scfg.name, status=plan.reason, digest=digest, fetched=run.fetched,
+        run.status, run.queued = reason, queued
+        store.heartbeat(scfg.name, status=reason, digest=digest, fetched=run.fetched,
                         kept=run.kept, new=run.new, queued=queued)
-        if mode == "poll" and plan.reason not in NO_CURSOR_ADVANCE:
-            store.set_cursor(scfg.name, _watermark(since, kept, raw, now))
+        if mode == "poll" and reason not in NO_CURSOR_ADVANCE:
+            store.set_cursor(scfg.name, _watermark(since, kept, raw, acquisition_now))
         return run
+
+    if plan.reason != "ok":
+        return defer(plan.reason)
 
     # Persist every candidate first, and enrich only the final display set after merging.
     _queue(store, scfg.name, candidates)
     batch, is_append, excess = _prepare_batch(cfg, store, scfg, digest, slot, plan.items, cap)
-    if scfg.sends_card:
-        if not batch.get("delivery_pending"):
-            if scfg.notify is not None:
-                batch["notification_mode"] = policy.resolve(cfg, scfg).values["mode"]
-                batch["notification_scheduled"] = scheduled_slot
-                batch["notification_slot"] = slot
-            else:
-                batch.pop("notification_mode", None)
-                batch.pop("notification_scheduled", None)
-                batch.pop("notification_slot", None)
-        _begin_delivery(batch, cfg, digest, now)
-        if scfg.notify is not None or "notification_mode" in batch:
-            batch["notification_attempts"] = int(batch.get("notification_attempts") or 0) + 1
-            batch["notification_retry_after"] = now.timestamp() + 60
-            store.write_batch(batch)
     pinned = batch.get("delivery_payload")
     if not pinned and (scfg.notify is None or scfg.sends_card):
         batch["items"], run.enrich = _enrich_new(cfg, store, scfg, batch["items"], now)
@@ -353,8 +342,45 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
         store.heartbeat(scfg.name, status="ok", digest=digest, fetched=run.fetched, kept=run.kept,
                         new=run.new, planned=run.planned, queued=run.queued, card="none",
                         enrich=run.enrich, note="只落 state")
-        _advance(store, scfg, mode, since, kept, raw, now)
+        _advance(store, scfg, mode, since, kept, raw, acquisition_now)
         return run
+
+    def effect_gate() -> SourceRun | None:
+        current = clock.now()
+        current_plan = delivery.plan(candidates, scfg, store, digest=current.date().isoformat(),
+                                     slot=slot, now=current, cfg=cfg)
+        if current_plan.reason != "ok":
+            return defer(current_plan.reason)
+        if scheduled_slot:
+            from newspipe.service import SLOT_TOLERANCE, slot_datetime
+            logical_slot = (batch.get("notification_slot") or slot) if batch.get("delivery_pending") else slot
+            when = slot_datetime(cfg, logical_slot, current)
+            if current.date().isoformat() != digest or not when <= current <= when + SLOT_TOLERANCE:
+                return defer("waiting_slot")
+        started = batch.get("remote_attempt_started_at") or batch.get("send_started_at")
+        if batch.get("delivery_pending") and started and current.timestamp() - datetime.fromisoformat(started).timestamp() >= 3600:
+            run.note = "结果未确认且已超过平台幂等窗口；请核对回执，禁止自动重发"
+            return defer("send_result_unknown")
+        return None
+
+    blocked = effect_gate()
+    if blocked is not None:
+        return blocked
+    now = clock.now()
+    if not batch.get("delivery_pending"):
+        if scfg.notify is not None:
+            batch["notification_mode"] = policy.resolve(cfg, scfg).values["mode"]
+            batch["notification_scheduled"] = scheduled_slot
+            batch["notification_slot"] = slot
+        else:
+            batch.pop("notification_mode", None)
+            batch.pop("notification_scheduled", None)
+            batch.pop("notification_slot", None)
+    _begin_delivery(batch, cfg, digest, now)
+    if scfg.notify is not None or "notification_mode" in batch:
+        batch["notification_attempts"] = int(batch.get("notification_attempts") or 0) + 1
+        batch["notification_retry_after"] = now.timestamp() + 60
+        store.write_batch(batch)
 
     try:
         card = pinned or render.render(batch, getattr(cfg, "hooks", None))
@@ -373,7 +399,7 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
         _begin_delivery(batch, cfg, digest, now)
         batch["delivery_run"] = {key: getattr(run, key) for key in ("fetched", "kept", "new", "planned", "enrich")}
         if mode == "poll":
-            batch["delivery_cursor"] = _watermark(since, kept, raw, now)
+            batch["delivery_cursor"] = _watermark(since, kept, raw, acquisition_now)
         else:
             batch.pop("delivery_cursor", None)
         batch["delivery_pending"] = True
@@ -381,6 +407,10 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
         batch["delivery_payload"] = card
         if scfg.notify is not None or "notification_mode" in batch or batch.get("card_id"):
             store.write_batch(batch)
+        blocked = effect_gate()
+        if blocked is not None:
+            return blocked
+        now = clock.now()
         if is_append and batch.get("card_id"):
             seq = int(batch.get("seq") or 1) + 1
             # Reserve the sequence durably: a lost response cannot make us reuse it.
@@ -399,6 +429,11 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
                 store.write_batch(batch)
                 if not channel.update_entity(str(batch["card_id"]), batch["seq"], card):
                     raise DeliveryError("未发送卡片实体更新返回失败")
+            store.write_batch(batch)
+            blocked = effect_gate()
+            if blocked is not None:
+                return blocked
+            now = clock.now()
             batch.setdefault("send_uuid", str(uuid.uuid4()))
             started = batch.get("send_started_at")
             if started and now.timestamp() - datetime.fromisoformat(started).timestamp() >= 3600:
@@ -410,7 +445,7 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
                                                     idempotency_key=batch["send_uuid"])
             run.card = "sent"
         batch["delivery_effect_done"] = True
-        confirmed = now + timedelta(seconds=max(0, time.monotonic() - operation_clock))
+        confirmed = clock.now()
         batch["delivery_confirmed_at"] = confirmed.isoformat()
         batch["delivery_confirmation_date"] = confirmed.date().isoformat()
         batch["delivery_card"] = run.card
@@ -494,6 +529,7 @@ def _advance(store: state.Store, scfg: Any, mode: str, since: float | None,
         store.set_cursor(scfg.name, _watermark(since, kept, raw, now), at=now)
 
 
+@clock.scoped
 @runtime.scoped
 def run_slot(cfg: Any, store: state.Store, slot: str, *, dry: bool = False,
              only: str | None = None, now: datetime | None = None,
@@ -517,6 +553,7 @@ def run_slot(cfg: Any, store: state.Store, slot: str, *, dry: bool = False,
     return out
 
 
+@clock.scoped
 @runtime.scoped
 def run_poll(cfg: Any, store: state.Store, *, dry: bool = False, only: str | None = None,
              force: bool = False, now: datetime | None = None,
@@ -543,6 +580,7 @@ def run_poll(cfg: Any, store: state.Store, *, dry: bool = False, only: str | Non
     return out
 
 
+@clock.scoped
 @runtime.scoped
 def run_source(cfg: Any, store: state.Store, name: str, *, slot: str | None = None,
                dry: bool = False, force: bool = True, now: datetime | None = None) -> list[SourceRun]:
@@ -566,6 +604,7 @@ def _source(cfg: Any, name: str) -> Any:
     return cfg.sources[name]
 
 
+@clock.scoped
 @runtime.scoped
 def collect_source(cfg: Any, store: state.Store, name: str, *, now: datetime | None = None,
                    force: bool = True, dry: bool = False) -> SourceRun:
@@ -618,6 +657,7 @@ def collect_source(cfg: Any, store: state.Store, name: str, *, now: datetime | N
         return run
 
 
+@clock.scoped
 @runtime.scoped
 def notify_source(cfg: Any, store: state.Store, name: str, *, now: datetime | None = None,
                   slot: str | None = None, bypass_clock: bool = False,
@@ -630,6 +670,8 @@ def notify_source(cfg: Any, store: state.Store, name: str, *, now: datetime | No
     from contextlib import nullcontext
     with nullcontext() if dry else store.transaction():
         unfinished = store.unfinished_batch(name)
+        now = clock.now()
+        digest = now.date().isoformat()
         if unfinished and unfinished.get("delivery_effect_done") and not dry:
             for key, value in (unfinished.get("delivery_run") or {}).items():
                 setattr(run, key, value)

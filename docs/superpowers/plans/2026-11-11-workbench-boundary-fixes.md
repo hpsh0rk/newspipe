@@ -40,9 +40,9 @@
 **Files:** Create `src/newspipe/clock.py`; modify `src/newspipe/service.py`, `src/newspipe/pipeline.py`; test `tests/test_notifications.py`, `tests/test_clock.py`.
 **Interfaces:** An invocation-scoped datetime anchor plus monotonic elapsed time is shared by nested pipeline calls; public `now` injection remains supported. Refresh gates after collection/lock waits and before remote effects; confirmation derives from the same advancing clock.
 
-- [ ] Add deterministic elapsed-time tests for slow collection, late confirmation/minimum gap, quiet-window crossing during enrichment, digest expiration, midnight and scope isolation; run them and observe the timing regressions fail.
-- [ ] Implement the scoped clock and refresh scheduling/delivery/retry checks at effect boundaries; rerun timing and scheduler tests, expected PASS.
-- [ ] Run full unittest suite and diff check; commit `fix: advance notification clocks through collection and delivery`.
+- [x] Add deterministic elapsed-time tests for slow collection, late confirmation/minimum gap, quiet-window crossing during enrichment, digest expiration, midnight and scope isolation; run them and observe the timing regressions fail.
+- [x] Implement the scoped clock and refresh scheduling/delivery/retry checks at effect boundaries; rerun timing and scheduler tests, expected PASS.
+- [x] Run full unittest suite and diff check; commit `fix: advance notification clocks through collection and delivery`.
 
 ### Task 3: Local Consumption Without Notification Silence
 

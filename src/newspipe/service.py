@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
-from newspipe import (backends, callback_jobs, config, credentials, hostenv, inbound as inbound_mod, pipeline, policy, runtime,
+from newspipe import (backends, callback_jobs, clock, config, credentials, hostenv, inbound as inbound_mod, pipeline, policy, runtime,
                       state)
 from newspipe._atomic import file_lock, write_json_atomic
 from newspipe.errors import ConfigError, DeliveryError, InboundError, NewsError
@@ -137,6 +137,7 @@ def _mark_slot(news_dir: Path, slot: str, now: datetime) -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------ 跑一轮
+@clock.scoped
 def run_once(cfg: config.Config, store: state.Store, *, now: datetime,
              news_dir: Path | None = None, dry: bool = False,
              logger: Callable[[str], None] = print) -> list[pipeline.SourceRun]:
@@ -149,6 +150,7 @@ def run_once(cfg: config.Config, store: state.Store, *, now: datetime,
 
 def _run_once(cfg: config.Config, store: state.Store, *, now: datetime,
               news_dir: Path, dry: bool, logger: Callable[[str], None]) -> list[pipeline.SourceRun]:
+    now = clock.now()
     last_runs = load_runs(news_dir)
     runs: list[pipeline.SourceRun] = []
 
@@ -211,8 +213,9 @@ def _run_notifications(cfg: config.Config, store: state.Store, last_runs: dict, 
                        news_dir: Path, dry: bool) -> list[pipeline.SourceRun]:
     """Notification progress is independent of acquisition slots and fetch throttles."""
     runs = []
-    day = now.date().isoformat()
     for source in cfg.sources.values():
+        now = clock.now()
+        day = now.date().isoformat()
         unfinished = store.unfinished_batch(source.name)
         if unfinished and unfinished.get("delivery_effect_done"):
             result = pipeline.notify_source(cfg, store, source.name, now=now, dry=dry)
@@ -422,7 +425,6 @@ def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None
 
         exit_code = 1 if resource_error else 0
         while not stop_event.is_set():
-            now = now_fn()
             try:
                 fresh = reloader()
             except ConfigError as exc:
@@ -470,7 +472,7 @@ def run_forever(cfg: config.Config, store: state.Store, *, news_dir: Path | None
                                 running=True, error=resource_error)
             try:
                 with runtime.bind_channel(news_dir, channel):
-                    runs = run_once(cfg, store, now=now, news_dir=news_dir, dry=dry, logger=logger)
+                    runs = run_once(cfg, store, now=now_fn(), news_dir=news_dir, dry=dry, logger=logger)
                 report(runs, logger)
                 if any(run.status in SLOT_FAILURES for run in runs):
                     exit_code = 1

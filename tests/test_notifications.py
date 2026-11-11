@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import sys
 import unittest
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -28,6 +28,7 @@ class NotificationTests(unittest.TestCase):
         self.cfg = config.Config(chat="oc_test", slots={"am": "08:15", "pm": "18:35"},
                                  sources={"src": self.source}, policies={"p": policy.NotificationPolicy()})
         self.addCleanup(patch.stopall)
+        patch("time.monotonic", return_value=0.0).start()
         patch.object(runtime, "activate", side_effect=lambda *_: nullcontext()).start()
         self.adapter = patch.object(pipeline, "_adapter").start()
         self.adapter.return_value.fetch.return_value = [_item(1)]
@@ -169,6 +170,105 @@ class NotificationTests(unittest.TestCase):
         service.run_once(self.cfg, self.store, now=NOW, logger=lambda _: None)
         self.assertEqual(self.send.call_count, 1)
         self.adapter.return_value.fetch.assert_not_called()
+
+    def test_slow_collection_confirmation_and_gap_use_full_elapsed_time(self):
+        elapsed = [0.0]
+        self.cfg = replace(self.cfg, policies={"p": policy.NotificationPolicy(min_gap_min=10)},
+                           notifications=policy.NotificationGlobals(min_gap_min=10))
+        self.store.set_cursor("src", (NOW - timedelta(minutes=20)).timestamp(), at=NOW - timedelta(minutes=20))
+        def fetch(*args, **kwargs):
+            elapsed[0] += 600
+            return [_item(1)]
+        self.adapter.return_value.fetch.side_effect = fetch
+        with patch("time.monotonic", side_effect=lambda: elapsed[0]):
+            service.run_once(self.cfg, self.store, now=NOW, logger=lambda _: None)
+            self.assertEqual(self.store.budget_state(DAY)["last_card_ts"], (NOW + timedelta(minutes=10)).isoformat())
+            self.store.append_pending("src", [_item(2)])
+            self.assertEqual(self.notify(now=NOW + timedelta(minutes=11)).status, "global_min_gap")
+            self.cfg = replace(self.cfg, notifications=None)
+            self.assertEqual(self.notify(now=NOW + timedelta(minutes=11)).status, "min_gap")
+        self.assertEqual(self.send.call_count, 1)
+
+    def test_slow_collection_rechecks_quiet_hours_and_digest_window(self):
+        for rule in ("quiet", "digest"):
+            with self.subTest(rule=rule):
+                self.store = state.Store(Path(self.tmp.name) / rule)
+                elapsed = [0.0]
+                self.store.set_cursor("src", (NOW - timedelta(minutes=20)).timestamp(), at=NOW - timedelta(minutes=20))
+                self.cfg = replace(self.cfg,
+                    policies={"p": policy.NotificationPolicy(mode="digest", slots=("am",))} if rule == "digest"
+                             else {"p": policy.NotificationPolicy()},
+                    notifications=None if rule == "digest" else policy.NotificationGlobals(quiet_hours="08:20-09:00"))
+                def fetch(*args, **kwargs):
+                    elapsed[0] += 1200
+                    return [_item(1)]
+                self.adapter.return_value.fetch.side_effect = fetch
+                with patch("time.monotonic", side_effect=lambda: elapsed[0]):
+                    service.run_once(self.cfg, self.store, now=NOW, logger=lambda _: None)
+                self.assertEqual(self.store.pending_count("src"), 1)
+                self.send.assert_not_called()
+
+    def test_enrichment_crossing_quiet_window_defers_without_spending_remote_attempt(self):
+        elapsed = [0.0]
+        self.cfg = replace(self.cfg, notifications=policy.NotificationGlobals(quiet_hours="08:20-09:00"))
+        self.store.append_pending("src", [_item(1)])
+        def enrich(*args, **kwargs):
+            elapsed[0] += 600
+            return args[3], {}
+        with patch("time.monotonic", side_effect=lambda: elapsed[0]), \
+             patch.object(pipeline, "_enrich_new", side_effect=enrich):
+            self.assertEqual(self.notify().status, "global_quiet_hours")
+        self.create.assert_not_called()
+        self.send.assert_not_called()
+        self.assertEqual(self.store.pending_count("src"), 1)
+        self.assertFalse(self.store.unfinished_batch("src"))
+
+    def test_lock_wait_cannot_extend_uncertain_remote_retry_horizon(self):
+        self.store.append_pending("src", [_item(1)])
+        self.send.side_effect = OSError("lost response")
+        self.notify()
+        self.update.reset_mock()
+        elapsed = [0.0]
+        @contextmanager
+        def delayed_lock():
+            elapsed[0] += 120
+            yield
+        with patch("time.monotonic", side_effect=lambda: elapsed[0]), \
+             patch.object(self.store, "transaction", side_effect=delayed_lock):
+            self.assertEqual(self.notify(now=NOW + timedelta(minutes=59)).status, "send_result_unknown")
+        self.update.assert_not_called()
+        self.assertEqual(self.send.call_count, 1)
+
+    def test_entity_creation_crossing_quiet_window_preserves_entity_without_sending(self):
+        elapsed = [0.0]
+        self.cfg = replace(self.cfg, notifications=policy.NotificationGlobals(quiet_hours="08:20-09:00"))
+        self.store.append_pending("src", [_item(1)])
+        def create(card):
+            elapsed[0] += 600
+            return "created-card"
+        self.create.side_effect = create
+        with patch("time.monotonic", side_effect=lambda: elapsed[0]):
+            self.assertEqual(self.notify().status, "global_quiet_hours")
+            batch = self.store.unfinished_batch("src")
+            self.assertEqual(batch["card_id"], "created-card")
+            self.assertNotIn("send_started_at", batch)
+            self.send.assert_not_called()
+            self.assertEqual(self.notify(now=NOW.replace(hour=9)).status, "ok")
+        self.assertEqual(self.create.call_count, 1)
+        self.assertEqual(self.send.call_args.args[1], "created-card")
+
+    def test_enrichment_cannot_extend_digest_catchup_window(self):
+        elapsed = [0.0]
+        self.cfg = replace(self.cfg, policies={"p": policy.NotificationPolicy(mode="digest", slots=("am",))})
+        self.store.append_pending("src", [_item(1)])
+        def enrich(*args, **kwargs):
+            elapsed[0] += 1200
+            return args[3], {}
+        with patch("time.monotonic", side_effect=lambda: elapsed[0]), \
+             patch.object(pipeline, "_enrich_new", side_effect=enrich):
+            self.assertEqual(self.notify(slot="am").status, "waiting_slot")
+        self.send.assert_not_called()
+        self.assertEqual(self.store.pending_count("src"), 1)
 
     def test_disabled_source_retains_pending(self):
         self.cfg = replace(self.cfg, sources={"src": replace(self.source, enabled=False)})
@@ -328,6 +428,17 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(self.send.call_count, 2)
         self.assertEqual(self.store.pending_count("src"), 1)
 
+    def test_rotated_digest_remote_retry_uses_logical_slot_clock(self):
+        self.cfg = replace(self.cfg, policies={"p": policy.NotificationPolicy(mode="digest", slots=("am",), form="append_card")})
+        self.store.append_pending("src", [_item(1)])
+        self.notify(bypass_clock=True, slot="am")
+        self.cfg = replace(self.cfg, chat="oc_new")
+        self.store.append_pending("src", [_item(2)])
+        self.send.side_effect = [OSError("lost response"), "message"]
+        self.assertEqual(self.notify(slot="am").status, "send_failed")
+        self.assertEqual(self.notify(slot="am", now=NOW + timedelta(minutes=1)).status, "ok")
+        self.assertEqual(self.send.call_args.args[0], "oc_new")
+
     def test_digest_confirmed_repair_completes_notification_slot_without_resending_new_content(self):
         self.cfg = replace(self.cfg, policies={"p": policy.NotificationPolicy(mode="digest", slots=("am",))})
         self.store.set_cursor("src", NOW.timestamp(), at=NOW)
@@ -478,7 +589,12 @@ class NotificationTests(unittest.TestCase):
     def test_confirmation_date_tracks_elapsed_remote_operation_across_midnight(self):
         self.store.append_pending("src", [_item(1)])
         start = NOW.replace(hour=23, minute=59)
-        with patch.object(pipeline.time, "monotonic", side_effect=[100, 220]):
+        elapsed = [100.0]
+        def send(*args, **kwargs):
+            elapsed[0] += 120
+            return "message"
+        self.send.side_effect = send
+        with patch("time.monotonic", side_effect=lambda: elapsed[0]):
             self.assertEqual(self.notify(now=start).status, "ok")
         self.assertEqual(self.store.budget_state(DAY)["cards"], 0)
         next_day = (NOW + timedelta(days=1)).date().isoformat()
