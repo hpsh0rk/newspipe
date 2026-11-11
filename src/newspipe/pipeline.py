@@ -80,6 +80,13 @@ def _adapter(name: str) -> Any:
     return importlib.import_module(f"newspipe.adapters.{name}")
 
 
+def _adapter_config(cfg: Any, source: Any) -> dict:
+    settings = source.adapter_config()
+    if source.adapter == "rsshub":
+        settings["rsshub_base_url"] = cfg.rsshub.get("base_url", "")
+    return settings
+
+
 def _merge(first: list[dict], second: list[dict]) -> list[dict]:
     """按 ext_id 去重合并（first 优先，保序）——顺延队列在旧条目在前的语义下先进先出。"""
     seen: set[str] = set()
@@ -263,7 +270,7 @@ def _process_locked(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slo
         return run
 
     try:
-        raw = _adapter(scfg.adapter).fetch(scfg.adapter_config(), since=since)
+        raw = _adapter(scfg.adapter).fetch(_adapter_config(cfg, scfg), since=since)
     except ConfigError as exc:
         run.status, run.note = "config_missing", str(exc)[:200]
         if not dry:
@@ -629,7 +636,7 @@ def collect_source(cfg: Any, store: state.Store, name: str, *, now: datetime | N
                 run.status = "throttled"
                 return run
         try:
-            raw = _adapter(scfg.adapter).fetch(scfg.adapter_config(), since=since)
+            raw = _adapter(scfg.adapter).fetch(_adapter_config(cfg, scfg), since=since)
             kept = filter_mod.apply(raw, scfg)
             fresh = dedup.fresh(kept, store, name)
         except Exception as exc:

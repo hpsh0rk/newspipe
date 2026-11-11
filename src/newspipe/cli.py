@@ -118,6 +118,13 @@ CONTRACT: list[dict[str, Any]] = [
     {"name": "probe-model", "summary": "模型解析探针（绝不打印密钥）",
      "usage": "newspipe probe-model [--capability summarize] [--json]",
      "args": ["--capability"], "writes": False, "examples": ["newspipe probe-model --json"]},
+    {"name": "rsshub show", "summary": "查看可选 RSSHub 地址、来源与依赖信源（不联网）",
+     "usage": "newspipe rsshub show [--json]", "args": [], "writes": False,
+     "examples": ["newspipe rsshub show --json"]},
+    {"name": "rsshub set", "summary": "设置 RSSHub 基础地址；空字符串恢复继承",
+     "usage": "newspipe rsshub set --base-url URL [--dry-run] [--base-hash HASH] [--json]",
+     "args": ["--base-url", "--dry-run", "--base-hash"], "writes": True,
+     "examples": ["newspipe rsshub set --base-url https://rsshub.example.com --dry-run --json"]},
     {"name": "migrate", "summary": "把 v1 状态迁到 v2 布局（幂等）",
      "usage": "newspipe migrate [--json]", "args": [], "writes": True,
      "examples": ["newspipe migrate --json"]},
@@ -126,7 +133,7 @@ CONTRACT: list[dict[str, Any]] = [
      "examples": ["newspipe serve --once --dry"]},
 ]
 
-SUBCOMMANDS = ("api", "config", "doctor", "status", "view", "list-sources", "source", "hooks", "events", "queue",
+SUBCOMMANDS = ("api", "config", "doctor", "status", "view", "list-sources", "source", "rsshub", "hooks", "events", "queue",
                "run", "serve", "migrate", "probe-channel", "probe-model", "card",
                "card-preview", "enrich-only", "policy", "global", "notification", "collect", "notify")
 
@@ -599,6 +606,18 @@ def _sub_source(args: argparse.Namespace, news_dir: Path) -> result.Result:
                                                           "newspipe source list --json"])
 
 
+def _sub_rsshub(args: argparse.Namespace, news_dir: Path) -> result.Result:
+    from newspipe import rssconnect
+    command = f"rsshub.{args.action}"
+    if args.action == "show":
+        cfg, _, base_hash = edit.sources_snapshot(news_dir)
+        return result.ok(command, {**rssconnect.describe(cfg), "hash": base_hash})
+    if args.base_url is None:
+        return result.fail(command, "E_USAGE", "需要 --base-url；传空字符串表示恢复继承")
+    return _write_result(command, edit.set_rsshub(news_dir, args.base_url,
+        base_hash=args.base_hash, dry_run=args.dry_run), news_dir, next_ok=["newspipe rsshub show --json"])
+
+
 def _sub_hooks(args: argparse.Namespace, news_dir: Path) -> result.Result:
     cfg, _store = _load(news_dir)
     command = f"hooks.{args.action}"
@@ -901,6 +920,12 @@ def _build_sub_parser() -> argparse.ArgumentParser:
     cfgp = add("config")
     cfgp.add_argument("action", choices=["describe"])
 
+    hub = add("rsshub")
+    hub.add_argument("action", choices=["show", "set"])
+    hub.add_argument("--base-url")
+    hub.add_argument("--dry-run", action="store_true")
+    hub.add_argument("--base-hash")
+
     add("doctor")
     st = add("status")
     st.add_argument("--days", type=int, default=7, help="事件统计的天数窗口")
@@ -1006,6 +1031,7 @@ SUB_HANDLERS = {
     ("list-sources", None): lambda args, news_dir: result.ok(
         "list-sources", {"sources": config.summarize(_load(news_dir)[0])}),
     ("source", None): _sub_source,
+    ("rsshub", None): _sub_rsshub,
     ("policy", None): _sub_policy,
     ("global", None): _sub_global,
     ("notification", None): _sub_notification,

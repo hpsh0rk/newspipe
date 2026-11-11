@@ -8,15 +8,12 @@
 from __future__ import annotations
 
 import email.utils
-import os
 import re
 import time
 import xml.etree.ElementTree as ET
 
-from newspipe import net
+from newspipe import net, rssconnect
 from newspipe.errors import ConfigError
-
-BASE = os.environ.get("RSSHub_BASE", "http://127.0.0.1:1200")
 
 _TAG = re.compile(r"<[^>]+>")
 
@@ -33,11 +30,8 @@ def fetch(cfg: dict | None = None, since: float | None = None) -> list[dict]:
     failed: list[str] = []
     ok_feeds = 0
     for entry in cfg.get("feeds") or []:
-        if entry.startswith("http"):
-            url, label = entry, cfg.get("feed_label") or entry.split("/")[2]
-        else:
-            url = f"{BASE}{entry}"
-            label = cfg.get("feed_label") or entry.strip("/").split("/")[0]
+        url = rssconnect.feed_url(entry, cfg.get("rsshub_base_url", ""))
+        label = cfg.get("feed_label") or (url.split("/")[2] if entry.startswith("http") else entry.strip("/").split("/")[0])
         root = None
         last_err: Exception | None = None
         for _ in range(3):  # RSSHub 冷路由首发常见 503（内部重试后），退避再试

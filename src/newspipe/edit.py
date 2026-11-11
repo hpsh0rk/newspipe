@@ -107,6 +107,26 @@ def _apply(news_dir: Path, path: Path, candidate: str, *, dry_run: bool,
 
 
 # ------------------------------------------------------------------ sources
+@_serialized
+def set_rsshub(news_dir: Path, base_url: str, *, base_hash: str | None = None,
+               dry_run: bool = False) -> dict[str, Any]:
+    from newspipe import rssconnect
+    path = _sources_path(news_dir)
+    conflict = _check_base_hash(path, base_hash)
+    if conflict:
+        return conflict
+    try:
+        value = rssconnect.base_url(base_url)
+    except ConfigError as exc:
+        return {"code": "E_VALIDATION", "message": str(exc), "hint": "使用不含凭据/查询参数的 HTTP(S) 基础地址，或留空继承"}
+    block = _dump_block({"rsshub": {"base_url": value}}) if value else None
+    candidate = yamlblocks.set_top(path.read_text(encoding="utf-8"), "rsshub", block)
+    out = _apply(news_dir, path, candidate, dry_run=dry_run, validate="sources")
+    if out.get("ok"):
+        out.update(op="rsshub", warning="RSSHub 块内注释会被重写；信源、策略和其他配置保持原样")
+    return out
+
+
 def merge_patch(current: Any, patch: Any) -> Any:
     """JSON merge patch: objects merge, null deletes a key; zero/false/empty remain explicit."""
     if not isinstance(patch, dict):
