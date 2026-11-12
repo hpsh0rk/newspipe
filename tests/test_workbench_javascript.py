@@ -160,6 +160,19 @@ assert.equal(readCount, 0);
 assert.equal(result.children.some(node => node.textContent?.includes('只读检测')), true);
 """)
 
+    def test_chat_read_does_not_acknowledge_draft_hash_or_refresh_reads(self):
+        self.run_javascript(r"""
+form.action = 'http://localhost/api/actions/chat-list';
+edit('unsaved');
+const pending = submit();
+release({ok: true, changed: false, data: {groups: [], has_more: false, page_token: '', hash: 'not-a-saved-hash'}});
+await pending;
+assert.equal(warns(), true);
+assert.equal(hash.value, 'old-hash');
+assert.equal(readCount, 0);
+assert.equal(result.children.some(node => node.textContent?.includes('只读群列表')), true);
+""")
+
     def test_failed_probe_and_transport_are_not_unknown_writes(self):
         self.run_javascript(r"""
 form.action = 'http://localhost/api/actions/rsshub-probe';

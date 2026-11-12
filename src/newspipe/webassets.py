@@ -5,13 +5,14 @@ JAVASCRIPT = r"""'use strict';
   const dirty = new Set();
   const revisions = new WeakMap();
   const busy = new WeakSet();
+  const reading = new WeakSet();
   const attribute = (node, name) => Element.prototype.getAttribute.call(node, name);
   // SSR imports need inert markup, not a growing blacklist of loadable media.
   // This only constrains the browser surface; CLI/actions remain the writer authority.
   const inertTags = new Set('SECTION ARTICLE HEADER ASIDE DIV SPAN P SMALL B STRONG EM I A CODE PRE BR HR UL OL LI DL DT DD TABLE THEAD TBODY TFOOT TR TH TD H2 H3 H4 H5 FORM INPUT SELECT OPTION OPTGROUP BUTTON LABEL FIELDSET LEGEND DETAILS SUMMARY TEXTAREA'.split(' '));
-  const inertAttributes = new Set('class id role tabindex hidden title action formaction method name type value readonly required checked disabled selected multiple placeholder pattern min max step size rows cols for colspan rowspan open href target rel novalidate popover popovertarget'.split(' '));
+  const inertAttributes = new Set('class id role tabindex hidden title action formaction formnovalidate method name type value readonly required checked disabled selected multiple placeholder pattern min max step size rows cols for colspan rowspan open href target rel novalidate popover popovertarget'.split(' '));
   const domProperties = new Set('action method elements reportValidity dataset querySelectorAll querySelector closest hasAttribute getAttribute setAttribute removeAttribute append remove noValidate classList'.toLowerCase().split(' '));
-  const actionNames = new Set('run source-toggle source-save source-patch source-copy policy-save policy-remove global-save notification-preview notification-migrate rsshub-save rsshub-probe collect notify notification-retry source-remove queue-ack events-ack flush'.split(' '));
+  const actionNames = new Set('run source-toggle source-save source-patch source-copy policy-save policy-remove global-save notification-preview notification-migrate rsshub-save rsshub-probe chat-list collect notify notification-retry source-remove queue-ack events-ack flush'.split(' '));
   const safeAction = value => {
     const url = new URL(value, location.href || location.origin);
     return url.origin === location.origin && !url.search && !url.hash &&
@@ -143,7 +144,94 @@ JAVASCRIPT = r"""'use strict';
     if (detail) detail.textContent = message;
     reveal(field);
   };
-  document.querySelectorAll('form').forEach(form => { policyTiming(form); sourcePolicy(form); });
+  const chatStates = new WeakMap();
+  const chatState = picker => {
+    if (!chatStates.has(picker)) {
+      let groups = [];
+      try { groups = JSON.parse(picker.dataset.chatGroups || '[]'); } catch (_) {}
+      chatStates.set(picker, {groups, loaded: picker.dataset.chatLoaded === '1', has_more: picker.dataset.chatMore === '1', limited: picker.dataset.chatLimited === '1'});
+    }
+    return chatStates.get(picker);
+  };
+  const renderChats = form => {
+    const picker = form.querySelector('[data-chat-picker]');
+    if (!picker) return;
+    const state = chatState(picker);
+    const select = picker.querySelector('[data-chat-select]');
+    const manual = picker.querySelector('[data-chat-manual]');
+    const target = select.disabled ? manual.value : select.value;
+    const query = picker.querySelector('[data-chat-query]').value.toLocaleLowerCase();
+    const groups = state.groups.filter(group => `${group.name} ${group.chat_id}`.toLocaleLowerCase().includes(query));
+    const options = [];
+    const option = group => {
+      const node = document.createElement('option');
+      node.value = group.chat_id;
+      node.textContent = `${group.name || '未命名群'} · ${group.chat_id.slice(-8)}${group.external ? ' · 外部群' : ''}`;
+      return node;
+    };
+    if (!groups.some(group => group.chat_id === target)) {
+      const known = state.groups.find(group => group.chat_id === target);
+      const fallback = option(known || {chat_id: target, name: '当前通知群（名称未加载 / 未在已加载列表中）'});
+      options.push(fallback);
+    }
+    groups.forEach(group => options.push(option(group)));
+    select.replaceChildren(...options);
+    select.value = target;
+    manual.value = target;
+    picker.querySelector('[data-chat-id]').textContent = `当前选择：${target}`;
+    picker.querySelector('[data-chat-more]').disabled = !state.has_more || state.limited;
+    picker.querySelector('[data-chat-filter]').hidden = true;
+    let status = state.loaded ? `已加载 ${state.groups.length} 个群` : '尚未加载机器人群列表';
+    if (state.has_more) status += '；还有更多群尚未加载，搜索只匹配已加载的群';
+    if (state.limited) status += '。已达列表容量，请刷新或手动填写群 ID';
+    if (state.loaded && !state.groups.length) status = '机器人还没有加入任何群；可先将机器人加入目标群后刷新';
+    else if (query && !groups.length) status += '；已加载的群中没有匹配项';
+    picker.querySelector('[data-chat-status]').textContent = status;
+    picker.querySelector('[data-chat-manual-field]').hidden = !select.disabled;
+  };
+  const chatMode = (form, mode) => {
+    const picker = form.querySelector('[data-chat-picker]');
+    const select = picker.querySelector('[data-chat-select]');
+    const manual = picker.querySelector('[data-chat-manual]');
+    const target = select.disabled ? manual.value : select.value;
+    select.disabled = mode === 'manual';
+    manual.disabled = mode !== 'manual';
+    select.name = select.disabled ? '' : 'chat';
+    manual.name = manual.disabled ? '' : 'chat';
+    if (select.disabled) manual.value = target;
+    else {
+      if (![...select.options].some(option => option.value === target)) {
+        const node = document.createElement('option');
+        node.value = target;
+        node.textContent = '当前通知群（名称未加载）';
+        select.append(node);
+      }
+      select.value = target;
+    }
+    picker.querySelector('[data-chat-select-area]').hidden = select.disabled;
+    picker.querySelector('[name="chat_mode"]').value = mode;
+    const button = picker.querySelector('[data-chat-mode]');
+    button.value = select.disabled ? 'select-chat' : 'manual-chat';
+    button.textContent = select.disabled ? '返回列表选择' : '改为手动填写';
+    renderChats(form);
+    (select.disabled ? manual : select).focus();
+  };
+  const acceptChats = (form, envelope, more) => {
+    const picker = form.querySelector('[data-chat-picker]');
+    if (!picker) return;
+    const data = envelope.directory || envelope.data;
+    if (!data || !Array.isArray(data.groups) || data.groups.length > 1000 || typeof data.has_more !== 'boolean' ||
+        data.groups.some(group => !group || typeof group.chat_id !== 'string' || !/^oc_[A-Za-z0-9_-]+$/.test(group.chat_id) ||
+          typeof group.name !== 'string' || typeof group.external !== 'boolean')) throw new Error('invalid group page');
+    const previous = chatState(picker);
+    const groups = new Map((more && !envelope.directory ? previous.groups : []).map(group => [group.chat_id, group]));
+    data.groups.forEach(group => groups.set(group.chat_id, group));
+    chatStates.set(picker, {groups: [...groups.values()].slice(0, 1000), loaded: data.loaded ?? true, has_more: data.has_more, limited: Boolean(data.limited)});
+    if (data.handle) picker.querySelector('[name="chat_handle"]').value = data.handle;
+    picker.querySelector('[name="page_token"]').value = data.page_token || '';
+    renderChats(form);
+  };
+  document.querySelectorAll('form').forEach(form => { policyTiming(form); sourcePolicy(form); renderChats(form); });
   // Native validation precedes submit and does not bubble. Reveal before the
   // browser tries to focus an invalid control inside a closed details element.
   document.addEventListener('invalid', event => {
@@ -223,7 +311,7 @@ JAVASCRIPT = r"""'use strict';
   let editorRead = 0;
   const editorForms = panel => [...panel.querySelectorAll('form')];
   const panelDirty = panel => editorForms(panel).some(form => dirty.has(form));
-  const panelBusy = panel => panel && editorForms(panel).some(form => busy.has(form));
+  const panelBusy = panel => panel && editorForms(panel).some(form => busy.has(form) && !reading.has(form));
   const currentPanel = () => editorHost?.querySelector('[data-editor-panel]');
   const updateDraftCount = () => {
     const node = document.querySelector('[data-editor-drafts]');
@@ -264,7 +352,7 @@ JAVASCRIPT = r"""'use strict';
     editors.set(panel.dataset.editorKey, panel);
     editorHost.append(panel);
     editorTrigger = trigger;
-    editorForms(panel).forEach(form => { policyTiming(form); sourcePolicy(form, true); });
+    editorForms(panel).forEach(form => { policyTiming(form); sourcePolicy(form, true); renderChats(form); });
     panel.querySelectorAll('form[data-server-validation]').forEach(form => { form.noValidate = false; });
     editorDialog.setAttribute('aria-labelledby', panel.getAttribute('aria-labelledby'));
     editorDialog.dataset.editorKind = panel.dataset.editorPanel;
@@ -281,7 +369,7 @@ JAVASCRIPT = r"""'use strict';
     return url;
   };
   const safePanel = panel => {
-    const actions = new Set(['source-save', 'source-patch', 'source-copy', 'policy-save', 'global-save', 'rsshub-save', 'rsshub-probe', 'notification-preview']);
+    const actions = new Set(['source-save', 'source-patch', 'source-copy', 'policy-save', 'global-save', 'rsshub-save', 'rsshub-probe', 'chat-list', 'notification-preview']);
     if (!panel.dataset.editorKey || !['source', 'source-copy', 'policy', 'global', 'rsshub'].includes(panel.dataset.editorPanel) ||
         !panel.querySelector('h2') || !safeMarkup(panel)) return false;
     return [panel, ...panel.querySelectorAll('*')].every(node => {
@@ -382,19 +470,29 @@ JAVASCRIPT = r"""'use strict';
   }
   document.addEventListener('input', event => {
     const form = event.target.closest('form[method="post"]');
+    if (form && event.target.hasAttribute?.('data-chat-query')) { renderChats(form); return; }
     if (form) markDirty(form);
     updateDraftCount();
   });
   document.addEventListener('change', event => {
     const form = event.target.closest('form[method="post"]');
+    if (form && event.target.hasAttribute?.('data-chat-query')) { renderChats(form); return; }
     if (form) markDirty(form);
-    if (form) { policyTiming(form); sourcePolicy(form); }
+    if (form) { policyTiming(form); sourcePolicy(form); renderChats(form); }
     updateDraftCount();
   });
   window.addEventListener('beforeunload', event => {
     if (dirty.size) { event.preventDefault(); event.returnValue = ''; }
   });
   document.addEventListener('click', event => {
+    const chatButton = event.target.closest('[data-chat-mode], [data-chat-filter]');
+    if (chatButton) {
+      event.preventDefault();
+      const form = chatButton.closest('form');
+      if (chatButton.hasAttribute('data-chat-mode')) chatMode(form, chatButton.value === 'manual-chat' ? 'manual' : 'select');
+      else renderChats(form);
+      return;
+    }
     const sync = event.target.closest('[data-sync-source-version]');
     if (sync) { event.preventDefault(); syncSourceVersion(sync); return; }
     const addTime = event.target.closest('[data-add-time]');
@@ -521,11 +619,14 @@ JAVASCRIPT = r"""'use strict';
     if (!safeAction(action)) return;
     if (busy.has(form)) return;
     if (form.hasAttribute('data-delete-form') && deleteTrigger?.dataset.deleteBlocked === '1') return;
-    if (!form.reportValidity()) return;
-    if (form.dataset.confirm && !window.confirm(form.dataset.confirm)) return;
     const target = (event.submitter && attribute(event.submitter, 'formaction')) || action;
     if (!safeAction(target)) return;
     const probe = target.endsWith('/rsshub-probe');
+    const groupRead = target.endsWith('/chat-list');
+    if (!probe && !groupRead && !form.reportValidity()) return;
+    if (form.dataset.confirm && !window.confirm(form.dataset.confirm)) return;
+    const groupGeneration = editorRead;
+    let obsolete = false;
     const submittedRevision = revisions.get(form) || 0;
     const data = new URLSearchParams(new FormData(form));
     // FormData(form) excludes the clicked submitter; native POST includes it.
@@ -548,12 +649,21 @@ JAVASCRIPT = r"""'use strict';
     };
     const buttons = [...form.querySelectorAll('button[type="submit"], button:not([type])')];
     busy.add(form);
+    if (groupRead) reading.add(form);
     form.setAttribute('aria-busy', 'true');
     buttons.forEach(button => { button.disabled = true; });
     try {
       const response = await fetch(target, {method: 'POST', body: data,
         headers: {'Accept': 'application/json'}, credentials: 'same-origin'});
       const envelope = await response.json();
+      if (groupRead) {
+        if (editorRead !== groupGeneration || form.isConnected === false) { obsolete = true; return; }
+        if (envelope.directory || envelope.ok) acceptChats(form, envelope, data.get('chat_load') === 'more');
+        const error = envelope.error || {};
+        show(Boolean(envelope.ok), envelope.ok ? '只读群列表 · 已加载' : '只读群列表 · 加载失败', [error.message, error.hint,
+          '没有保存配置或发送消息；草稿与原版本保持不变。']);
+        return;
+      }
       if (!envelope.ok) {
         const error = envelope.error || {};
         show(false, `${probe ? '只读检测失败' : '未应用'} · ${error.code || response.status}`, [error.message, error.hint,
@@ -629,14 +739,25 @@ JAVASCRIPT = r"""'use strict';
         (await refreshReads(form)).forEach(line => addText('p', line));
       }
     } catch (_) {
-      if (probe) show(false, '检测结果未确认', ['连接中断或服务响应不可用。没有保存、采集或通知；输入与版本已保留，不会自动重试检测。']);
+      if (groupRead) {
+        if (editorRead !== groupGeneration || form.isConnected === false) { obsolete = true; }
+        else show(false, '群列表未加载', ['读取失败；已选群、草稿和原版本保持不变。请重新加载，也可手动填写群 ID。']);
+      }
+      else if (probe) show(false, '检测结果未确认', ['连接中断或服务响应不可用。没有保存、采集或通知；输入与版本已保留，不会自动重试检测。']);
       else show(false, '结果未确认', ['连接中断或服务响应不可用。输入已保留，不会自动重试写操作。',
         '先读取最新配置/操作状态核对是否已生效；不要直接重复未知结果的写入。']);
     } finally {
       busy.delete(form);
+      reading.delete(form);
       updateDraftCount();
       form.removeAttribute('aria-busy');
-      buttons.forEach(button => { button.disabled = form.dataset.created === '1'; });
+      buttons.forEach(button => {
+        if (button.hasAttribute?.('data-chat-more')) {
+          const state = chatState(button.closest('[data-chat-picker]'));
+          button.disabled = !state.has_more || state.limited;
+        } else button.disabled = form.dataset.created === '1';
+      });
+      if (obsolete) return;
       if (deletion && dialog.open) feedback.focus({preventScroll: true});
       else expose(feedback, !invalidField);
     }

@@ -41,6 +41,19 @@ class Drafts:
             return value[1] if value else None
 
 
+def edit_controls(action, form):
+    """Code-owned draft intents; these never dispatch a configuration writer."""
+    intent = (form.get("editor_intent") or [""])[0]
+    if not intent:
+        return False
+    from newspipe.actions import ActionInputError
+    if action == "chat-list" and intent in {"manual-chat", "select-chat", "filter-chat"}:
+        if intent != "filter-chat":
+            form["chat_mode"] = ["manual" if intent == "manual-chat" else "select"]
+        return True
+    raise ActionInputError("编辑操作不可用，请重新打开编辑器")
+
+
 def restore(page, action, values, *, reveal=False, feedback=""):
     """Restore only form controls in the code-rendered target; escape raw edits."""
     class Controls(HTMLParser):

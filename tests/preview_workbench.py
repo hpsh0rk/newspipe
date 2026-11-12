@@ -27,6 +27,7 @@ class WorkbenchFixture:
     server: object
     thread: threading.Thread
     blocked_effects: list[str]
+    group_calls: list[str]
 
 
 @contextmanager
@@ -70,7 +71,9 @@ def offline_workbench(*, view_actions=True):
             {"ext_id": "preview-collected", "title": "A deterministic collected item",
              "url": "https://example.invalid/collected", "source": "Preview"}])))
         stack.enter_context(patch.object(credentials, "resolve_feishu", side_effect=deny("credentials")))
+        group_calls = []
         def groups(*, page_size=100, page_token=""):
+            group_calls.append(page_token)
             if page_token not in ("", "offline-next"):
                 raise RuntimeError("unknown synthetic page")
             entries = ([{"chat_id": "oc_offline_preview", "name": "我的阅读群", "external": False},
@@ -98,7 +101,7 @@ def offline_workbench(*, view_actions=True):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            yield WorkbenchFixture(news, f"http://127.0.0.1:{server.server_address[1]}", store, server, thread, blocked)
+            yield WorkbenchFixture(news, f"http://127.0.0.1:{server.server_address[1]}", store, server, thread, blocked, group_calls)
         finally:
             server.shutdown()
             thread.join(timeout=5)

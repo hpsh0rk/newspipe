@@ -98,6 +98,78 @@ class WorkbenchBrowserTests(unittest.TestCase):
     def source_label(self, fixture):
         return config.source_values(config.load(fixture.news_dir).sources["research"])["feed_label"]
 
+    def test_chat_picker_search_more_manual_and_selection_are_unsaved(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine, width=360) as (fixture, page):
+                page.goto(fixture.url + "/notifications?global=1")
+                form = page.locator('form[action="/api/actions/global-save"]')
+                original = form.locator('[name="base_hash"]').input_value()
+                self.assertEqual(fixture.group_calls, [])
+                out = self.submit(page, form, "加载 / 刷新群列表")
+                self.assertTrue(out["ok"], out)
+                self.expect(form.locator('[data-chat-select]')).to_contain_text("工程讨论")
+                form.locator('[data-chat-select]').select_option("oc_engineering")
+                form.locator('[data-chat-query]').fill("周末")
+                self.expect(form.locator('[data-chat-select]')).to_have_value("oc_engineering")
+                self.expect(form.locator('[data-chat-status]')).to_contain_text("尚未加载")
+                out = self.submit(page, form, "加载更多群")
+                self.assertTrue(out["ok"], out)
+                self.expect(form.locator('[data-chat-select]')).to_contain_text("周末读书")
+                self.expect(form.locator('[data-chat-select]')).to_have_value("oc_engineering")
+                self.assertEqual(form.locator('[name="base_hash"]').input_value(), original)
+                form.get_by_text("群 ID 与手动填写（备用）", exact=True).click()
+                form.locator('[data-chat-mode]').click()
+                form.locator('[data-chat-manual]').fill("oc_manual")
+                form.locator('[data-chat-mode]').click()
+                self.expect(form.locator('[data-chat-select]')).to_have_value("oc_manual")
+                self.assertEqual(fixture.group_calls, ["", "offline-next"])
+                self.assertEqual(config.load(fixture.news_dir).chat, "oc_offline_preview")
+
+    def test_chat_lookup_bypasses_other_invalid_fields_and_preserves_new_edits(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                page.goto(fixture.url + "/notifications?global=1")
+                form = page.locator('form[action="/api/actions/global-save"]')
+                form.locator('[name="g.max_cards_per_day"]').fill("-1")
+                out = self.submit(page, form, "加载 / 刷新群列表")
+                self.assertTrue(out["ok"], out)
+                self.expect(form.locator('[name="g.max_cards_per_day"]')).to_have_value("-1")
+                self.expect(form.locator('[data-action-feedback]')).to_contain_text("没有保存")
+
+    def test_chat_read_can_close_and_late_response_does_not_reopen_editor(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                page.goto(fixture.url + "/notifications?global=1")
+                form = page.locator('form[action="/api/actions/global-save"]')
+                pending = []
+                page.route("**/api/actions/chat-list", lambda route: pending.append(route))
+                form.locator('[data-chat-load]').click()
+                page.wait_for_timeout(30)
+                page.locator('#editor-dialog [data-editor-close]').first.click()
+                self.expect(page.locator('#editor-dialog')).not_to_be_visible()
+                pending[0].fulfill(json={"ok": True, "changed": False, "data": {"groups": [], "has_more": False, "page_token": ""}})
+                page.wait_for_timeout(30)
+                self.expect(page.locator('#editor-dialog')).not_to_be_visible()
+
+    def test_chat_picker_is_usable_without_javascript(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine, javascript=False) as (fixture, page):
+                page.goto(fixture.url + "/notifications?global=1")
+                form = page.locator('form[action="/api/actions/global-save"]')
+                form.get_by_role("button", name="加载 / 刷新群列表", exact=True).click()
+                self.expect(form.locator('[data-chat-select]')).to_contain_text("我的阅读群")
+                form.get_by_role("button", name="加载更多群", exact=True).click()
+                self.expect(form.locator('[data-chat-select]')).to_contain_text("周末读书")
+                self.assertEqual(fixture.group_calls, ["", "offline-next"])
+
+    def test_chat_picker_opens_from_global_settings_link(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                page.goto(fixture.url + "/notifications")
+                page.get_by_role("link", name="全局设置", exact=True).click()
+                self.expect(page.locator('#editor-dialog')).to_be_visible()
+                self.expect(page.locator('#editor-dialog [data-chat-picker]')).to_be_visible()
+
     def test_policy_owned_times_can_add_remove_and_do_not_change_other_policy(self):
         for engine in self.browsers:
             with self.subTest(engine=engine), self.scenario(engine, width=360) as (fixture, page):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import json
 from urllib.parse import quote
 from newspipe.notification_view import REASONS
 from newspipe.policy import human_summary as rule_summary
@@ -305,6 +306,47 @@ def sources_body(payload, schema, actions, page):
     return body + _rss(page) + _policy_catalog(payload, schema) + (delete_dialog() + editor_dialog() if token else "")
 
 
+def _chat_picker(payload, page):
+    state = page.get("chat_directory") or {}
+    groups = state.get("groups") or []
+    target = page.get("chat_value", payload["chat"])
+    manual = page.get("chat_mode") == "manual"
+    query = page.get("chat_query", "")
+    matches = [g for g in groups if query.casefold() in (g["name"] + " " + g["chat_id"]).casefold()]
+    selected = next((g for g in groups if g["chat_id"] == target), None)
+    options = ''
+    if not any(g["chat_id"] == target for g in matches):
+        options += f'<option value="{E(target)}" selected>{E(selected["name"] if selected else "当前通知群（名称未加载 / 未在已加载列表中）")}</option>'
+    for group in matches:
+        options += (f'<option value="{E(group["chat_id"])}" data-directory-group data-group-name="{E(group["name"])}" data-group-external="{int(group["external"])}"'
+                    + (' selected' if group["chat_id"] == target else '') + f'>{E(group["name"] or "未命名群")} · {E(group["chat_id"][-8:])}'
+                    + (' · 外部群' if group["external"] else '') + '</option>')
+    body = '<fieldset data-chat-picker data-chat-groups="' + E(json.dumps(groups, ensure_ascii=False)) + '" data-chat-loaded="' + str(int(bool(state.get("loaded")))) + '" data-chat-more="' + str(int(bool(state.get("has_more")))) + '" data-chat-limited="' + str(int(bool(state.get("limited")))) + '"><legend>通知群' + help_tip("列表是当前发送机器人已加入的群，不是个人账号的全部群。选择只改变草稿，保存后才切换通知目标；不会发测试消息。", "chat-picker-help", "群选择说明") + '</legend>'
+    body += _hidden("chat_mode", "manual" if manual else "select") + _hidden("chat_handle", state.get("handle", "")) + _hidden("page_token", state.get("page_token", ""))
+    body += '<div class="field" data-chat-select-area><label>选择通知群</label><select ' + ('disabled ' if manual else 'name="chat" ') + 'data-chat-select aria-label="选择通知群">' + options + '</select></div>'
+    body += '<div class="field"><label>查找已加载的群</label><input name="chat_query" data-chat-query value="' + E(query) + '" placeholder="输入群名称或关键词" aria-label="查找已加载的群"></div>'
+    body += '<div class="row-actions"><button class="btn" type="submit" formaction="/api/actions/chat-list" formnovalidate name="chat_load" value="refresh" data-chat-load>加载 / 刷新群列表</button>'
+    body += '<button class="btn" type="submit" formaction="/api/actions/chat-list" formnovalidate name="chat_load" value="more" data-chat-more' + ('' if state.get("has_more") and not state.get("limited") else ' disabled') + '>加载更多群</button>'
+    body += '<button class="btn" type="submit" formaction="/api/actions/chat-list" formnovalidate name="editor_intent" value="filter-chat" data-chat-filter>筛选已加载</button></div>'
+    status = ("已加载 " + str(len(groups)) + " 个群" if state.get("loaded") else "尚未加载机器人群列表")
+    if state.get("has_more"):
+        status += "；还有更多群尚未加载，搜索只匹配已加载的群"
+    if state.get("limited"):
+        status += "。已达列表容量，请刷新或手动填写群 ID"
+    if state.get("loaded") and not groups:
+        status = "机器人还没有加入任何群；可先将机器人加入目标群后刷新"
+    body += '<p class="note" data-chat-status role="status">' + E(status) + '</p>'
+    body += '<details' + (' open' if manual else '') + '><summary>群 ID 与手动填写（备用）</summary><p class="note" data-chat-id>当前选择：' + E(target) + '</p>'
+    body += '<label class="field" data-chat-manual-field>群 ID<input data-chat-manual ' + ('name="chat"' if manual else 'disabled') + ' value="' + E(target) + '" pattern="oc_.+" aria-label="手动群 ID"></label>'
+    body += '<button class="btn" type="submit" formaction="/api/actions/chat-list" formnovalidate name="editor_intent" value="' + ('select-chat' if manual else 'manual-chat') + '" data-chat-mode>' + ('返回列表选择' if manual else '改为手动填写') + '</button></details>'
+    result = page.get("chat_result")
+    if result and not (result.get("data") or {}).get("draft_only"):
+        error = result.get("error") or {}
+        body += '<div class="banner ' + ('ok' if result.get("ok") else 'err') + '" data-chat-feedback role="status"><h3>只读群列表 · ' + ('已加载' if result.get("ok") else '加载失败') + '</h3>'
+        body += ''.join('<p>' + E(line) + '</p>' for line in [error.get("message"), error.get("hint"), "没有保存配置或发送消息；草稿与原版本保持不变。"] if line) + '</div>'
+    return body + '</fieldset>'
+
+
 def notifications_body(payload, schema, actions, page):
     actions, page = actions or {}, page or {}
     token = actions.get("token", "")
@@ -330,7 +372,7 @@ def notifications_body(payload, schema, actions, page):
     body += '</section>'
     if token and page.get("global"):
         form = _start("global-save", token, payload["sources_hash"], "/notifications") + _hidden("preview_kind", "global")
-        form += '<label class="field">通知目标（唯一群）<input name="chat" required pattern="oc_.+" value="' + E(payload["chat"]) + '"></label>'
+        form += _chat_picker(payload, page)
         form += '<div class="field-grid">' + "".join(_field(f, gates.get(f["path"], f.get("default")), prefix="g.", scope="global",
                                                            slots=payload["slots"]) for f in schema["notification_fields"]) + '</div>'
         form += '<p class="note">全局上限留空 = 未配置硬上限；0 = 完全不发送。策略的每源限制仍独立生效。</p>'
