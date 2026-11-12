@@ -81,6 +81,60 @@ class Store:
         """One state writer at a time; remote operations still require persisted identities."""
         return file_lock(self.root / ".writer.lock")
 
+    def _story_ledger(self):
+        from newspipe.story_state import Ledger
+        return Ledger(self.root / "stories" / "history.sqlite3")
+
+    def story_status(self):
+        return self._story_ledger().status()
+
+    def observations(self, *, after=0, limit=50, source=""):
+        return self._story_ledger().observations(after=after, limit=limit, source=source)
+
+    def observation(self, observation_id):
+        return self._story_ledger().observation(observation_id)
+
+    def story_preview(self, *, observation_id="", after=0, limit=20):
+        return self._story_ledger().preview(observation_id=observation_id, after=after, limit=limit)
+
+    def observation_capture_snapshot(self, drafts, *, at, window_days, candidate_limit, scan_limit):
+        return self._story_ledger().snapshot(drafts, at=at, window_days=window_days,
+                                             candidate_limit=candidate_limit, scan_limit=scan_limit)
+
+    def record_observations(self, drafts, **kwargs):
+        if kwargs["mode"] == "off" and not self._story_ledger().path.exists():
+            return self._story_ledger().record(drafts, **kwargs)
+        with self.transaction():
+            return self._story_ledger().record(drafts, **kwargs)
+
+    def original_observation_baselines(self, source, native_ids):
+        from newspipe.observations import prepare_observation
+        from newspipe.source_contract import SourceContractError
+        completed = self.pushed_ids(source)
+        found = {native: {"completed": native in completed, "availability": "missing_material", "draft": None}
+                 for native in native_ids}
+        if not completed.intersection(native_ids):
+            return found
+        for path in sorted((self.root / "batches").glob("*/*.json"), reverse=True):
+            batch = read_json(path)
+            if not isinstance(batch, dict) or batch.get("source") != source or not isinstance(batch.get("adapter"), str):
+                continue
+            for item in batch.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                native = identity_key(item.get("ext_id"))
+                if native not in found or native not in completed or found[native]["draft"] is not None:
+                    continue
+                if (not item.get("title") or not (item.get("source_text") or item.get("summary"))
+                        or any(item.get(k) for k in ("source_text_truncated", "summary_truncated"))):
+                    continue
+                try:
+                    draft = prepare_observation(source, batch["adapter"], item)
+                except SourceContractError:
+                    continue
+                found[native] = {"completed": True, "availability": "original" if draft.evidence.text_complete else "limited_original", "draft": draft}
+        return found
+
     # ── 路径 ────────────────────────────────────────────────────────────────
     def _path(self, *parts: str) -> Path:
         p = self.root.joinpath(*parts)
