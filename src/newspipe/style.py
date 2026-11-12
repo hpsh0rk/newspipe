@@ -410,6 +410,14 @@ input[type=time]{min-height:38px}
 .receipt dd{margin:0;overflow-wrap:anywhere}
 .receipt code{white-space:normal}
 .preview-result article{border-top:1px solid var(--border);padding:12px 0}
+.story-receipt,.story-version{padding:20px 24px;margin:16px 0;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow-wrap:anywhere}
+.story-receipt header{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.story-receipt h3,.story-version h3{margin-top:0}
+.story-relations{list-style:none;padding:0;margin:0}
+.story-relations li{padding:12px 0;border-top:1px solid var(--divider)}
+.story-relations p{margin:6px 0}
+.story-receipt details,.story-version details{margin-top:12px;border-top:1px solid var(--divider);padding-top:12px}
+.story-text{white-space:pre-wrap;overflow-wrap:anywhere;max-height:60dvh;overflow:auto;font:13px/1.7 var(--font);padding:16px;background:var(--surface-2);border-radius:var(--radius-sm)}
 @media(max-width:900px){.workbench-grid,#editor-dialog .workbench-grid{grid-template-columns:1fr}.rule-aside{position:static}}
 @media(max-width:640px){
  .btn{min-height:44px}

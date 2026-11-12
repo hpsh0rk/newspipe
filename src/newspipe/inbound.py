@@ -277,19 +277,29 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                     "queue_pending": queue_pending}
 
         def _items_page(self, payload: dict[str, Any],
-                        query: dict[str, list[str]]) -> str:
+                        query: dict[str, list[str]], act=None, flash=None) -> str:
             """「条目」Tab 的输入装配：快照 + 三个筛选参数（全服务端）。"""
             from newspipe import config as config_mod
             from newspipe import view as view_mod
+            from newspipe import state as state_mod, webstories
 
             try:
                 days = int((query.get("days") or [""])[0] or view_mod.ITEMS_DAYS)
             except ValueError:                              # 手改 URL 传了非数字
                 days = view_mod.ITEMS_DAYS
             days = min(max(days, 1), 30)
-            snap = view_mod.items_snapshot(news_dir or config_mod.default_news_dir(), days=days)
+            where = news_dir or config_mod.default_news_dir()
+            story_page = webstories.load(state_mod.Store(where), query)
+            snap = {} if story_page.get("preview_open") or story_page.get("detail_id") else view_mod.items_snapshot(where, days=days)
             snap.update({k: (query.get(k) or [""])[0] for k in ("q", "source", "status")})
-            return view_mod.items_html(payload, page=snap)
+            snap["story_page"] = story_page
+            if story_page.get("settings_open") and act:
+                import hashlib
+                data = (where / "sources.yaml").read_bytes()
+                settings, _ = config_mod.story_settings_snapshot(where, sources_text=data.decode("utf-8"))
+                snap.update(story_settings=settings.values(), story_fields=config_mod.describe_schema()["story_fields"],
+                            story_hash=hashlib.sha256(data).hexdigest()[:16])
+            return view_mod.items_html(payload, page=snap, actions=act, flash=flash)
 
         def _batch_page(self, payload: dict[str, Any], date: str,
                         stem: str) -> tuple[int, str]:
@@ -457,7 +467,7 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                     page = view_mod.notifications_html(payload, schema=config_mod.describe_schema(), actions=act, flash=flash,
                            page=policy_page)
                 elif route == "/items":
-                    page = self._items_page(payload, query)
+                    page = self._items_page(payload, query, act, flash)
                 else:
                     page = view_mod.cockpit_html(payload, flash=flash, page=self._recent_page())
                 if draft and draft.get("form"):
@@ -568,6 +578,8 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                 query = {"rsshub": ["1"]}
             elif action == "global-save":
                 query = {"acquisition": ["1"]} if (form.get("global_scope") or [""])[0] == "acquisition" else {"global": ["1"]}
+            elif action == "story-settings":
+                query = {"story_settings": ["1"]}
             key = drafts.put({"action": action, "query": query if retain else {}, "flash": _flash_of(envelope),
                               "form": {k: v for k, v in form.items() if k != "token"} if retain else None,
                               "probe": envelope if name == "rsshub-probe" else None,

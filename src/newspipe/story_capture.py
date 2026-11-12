@@ -6,6 +6,20 @@ from newspipe.observations import prepare_observation
 from newspipe.source_contract import identity_key
 from newspipe.story_matching import propose_relation, rank_candidates
 from newspipe.story_state import CaptureSnapshot
+from newspipe.story_state import StoryStorageError
+
+
+def observation_status(store, *, settings, revision):
+    """Optional history failure must not hide the saved off switch."""
+    try:
+        status = store.story_status()
+        awaiting = status["activated_revision"] != revision if settings.mode != "off" or status["activated_mode"] else False
+    except StoryStorageError as error:
+        status = {"contract_version": 1, "availability": "unavailable", "code": error.code,
+                  "activated_mode": None, "activated_revision": None, "activation_id": None,
+                  "frontier_sequence": None, "observation_count": None, "capture_count": None}
+        awaiting = None
+    return {**status, "saved_mode": settings.mode, "saved_revision": revision, "awaiting_collection": awaiting}
 
 
 @dataclass(frozen=True)
