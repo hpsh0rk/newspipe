@@ -155,4 +155,3 @@ def prepare_observation(source: str, adapter: str, item: dict) -> ObservationDra
                             source, adapter, partition, native, kind, evidence, original,
                             EXTRACTOR_VERSION, _timestamp(item.get("pub_ts")),
                             _timestamp(item.get("observed_ts")), _hash(content) if eligible else "")
-

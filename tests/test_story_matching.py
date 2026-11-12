@@ -76,4 +76,3 @@ class MatchingTests(unittest.TestCase):
         draft = self.draft(source_text="委员会批准工具版本二，保留历史回执。", source_text_complete=False)
         self.assertIn("委员", candidate_terms(draft))
         self.assertIn("回执", candidate_terms(draft))
-

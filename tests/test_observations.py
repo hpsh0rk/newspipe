@@ -97,4 +97,3 @@ class ObservationTests(unittest.TestCase):
                           ("https://example.com/a?x=1&x=2&edition=2#v2", "article")):
             self.assertNotEqual(canonical_reference(url, role),
                                 canonical_reference("https://example.com/a?x=1&x=2#v2", "article"))
-
