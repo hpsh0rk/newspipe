@@ -32,8 +32,13 @@ def propose_relation(current: ObservationDraft, previous: ObservationDraft) -> d
             reason = "same_version"
         else:
             relation, reason = "unclassified_change", "same_native_new_evidence"
-            fields = [key for key in ("title", "text", "facts_json", "references", "permalink", "text_complete")
-                      if getattr(current.evidence, key) != getattr(previous.evidence, key)]
+            if current.original_json and previous.original_json:
+                fields = [key for key in ("title", "text", "facts_json", "references", "permalink", "text_complete")
+                          if getattr(current.evidence, key) != getattr(previous.evidence, key)]
+            else:
+                # Snapshot evidence is bounded; the full version hash proves only a material change.
+                fields = ["source_material"]
+                reason = "same_native_changed_material_details_unverified"
     elif current.copy_hash and current.copy_hash == previous.copy_hash:
         relation, reason, score = "exact_copy", "complete_article_evidence_equal", 1.0
         fields = ["title", "text", "facts_json", "references"]

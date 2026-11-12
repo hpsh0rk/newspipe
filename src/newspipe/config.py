@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import os
 import math
+import hashlib
+import json
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -476,6 +478,7 @@ def describe_schema(news_dir: Path | None = None) -> dict[str, Any]:
         if entry["type"] == "slots":
             entry["choices"] = slots
     return {"contract_version": 1, "axes": axes, "fields": f, "adapters": adapter_names(),
+            "story_fields": deepcopy(STORY_FIELDS),
             "adapter_descriptors": {name: _adapter_descriptor(name).as_dict() for name in adapter_names()},
             "rsshub_fields": [{"path": "base_url", "label": "RSSHub 基础地址", "type": "str", "default": "",
                                "help": "可填本地或远端 HTTP(S) 地址；留空继承 RSSHub_BASE，未设置时使用本地默认。完整 RSS 地址不依赖它。"}],
@@ -564,6 +567,65 @@ def load_service(news_dir: Path) -> ServiceCfg:
                       schedule=dict(schedule), log=dict(raw.get("log") or {}), view=view)
 
 
+STORY_FIELDS = [
+    {"path": "mode", "label": "关联预览", "type": "enum", "choices": ["off", "observe"], "default": "off",
+     "labels": {"off": "关闭", "observe": "记录原始版本与候选"},
+     "help": "不自动合并、不减少通知。保存后从下一次真实采集生效；已有队列不迁移。"},
+    {"path": "window_days", "label": "候选回看天数", "type": "int", "default": 14, "min": 1, "max": 90, "advanced": True},
+    {"path": "candidate_limit", "label": "每条候选上限", "type": "int", "default": 5, "min": 1, "max": 20, "advanced": True},
+    {"path": "scan_limit", "label": "单次扫描上限", "type": "int", "default": 500, "min": 50, "max": 2000, "advanced": True},
+]
+
+
+@dataclass(frozen=True)
+class StorySettings:
+    mode: str = "off"
+    window_days: int = 14
+    candidate_limit: int = 5
+    scan_limit: int = 500
+
+    def values(self):
+        return {f["path"]: getattr(self, f["path"]) for f in STORY_FIELDS}
+
+    @property
+    def revision(self):
+        return hashlib.sha256(json.dumps(self.values(), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    @classmethod
+    def parse(cls, raw):
+        raw = {} if raw is None else raw
+        if not isinstance(raw, dict) or set(raw) - {f["path"] for f in STORY_FIELDS}:
+            raise ConfigError("stories 只能包含关联预览及其检索范围字段")
+        values = {}
+        for f in STORY_FIELDS:
+            value = raw.get(f["path"], f["default"])
+            if f["type"] == "enum":
+                if not isinstance(value, str) or value not in f["choices"]:
+                    raise ConfigError("stories.mode 只支持 off / observe；自动合并与通知去重尚未开放")
+            elif type(value) is not int or not f["min"] <= value <= f["max"]:
+                raise ConfigError(f'stories.{f["path"]} 必须是 {f["min"]}..{f["max"]} 的整数')
+            values[f["path"]] = value
+        return cls(**values)
+
+
+def _story_revision(settings, epoch):
+    if not isinstance(epoch, str) or epoch and (len(epoch) != 32 or any(c not in "0123456789abcdef" for c in epoch)):
+        raise ConfigError("关联预览内部修订标识无效；通过 stories set 重新保存设置")
+    return hashlib.sha256((settings.revision + epoch).encode()).hexdigest() if epoch else settings.revision
+
+
+def story_settings_snapshot(news_dir: Path, *, sources_text: str | None = None):
+    try:
+        text = sources_text if sources_text is not None else (Path(news_dir) / "sources.yaml").read_text(encoding="utf-8")
+        raw = yaml.load(text, Loader=_UniqueLoader) or {}
+    except (OSError, UnicodeError, yaml.YAMLError):
+        raise ConfigError("无法读取关联预览设置；请检查 sources.yaml，未激活任何新设置") from None
+    if not isinstance(raw, dict):
+        raise ConfigError("sources.yaml 顶层需要映射")
+    settings = StorySettings.parse(raw.get("stories"))
+    return settings, _story_revision(settings, raw.get("_stories_revision", ""))
+
+
 @dataclass(frozen=True)
 class Config:
     chat: str
@@ -577,6 +639,12 @@ class Config:
     policies: dict[str, policy_lib.NotificationPolicy] = field(default_factory=dict)
     notifications: policy_lib.NotificationGlobals | None = None
     rsshub: dict[str, str] = field(default_factory=dict)
+    stories: StorySettings = field(default_factory=StorySettings)
+    story_epoch: str = ""
+
+    @property
+    def story_revision(self):
+        return _story_revision(self.stories, self.story_epoch)
 
     def enabled_sources(self) -> list[SourceConfig]:
         return [s for s in self.sources.values() if s.enabled]
@@ -689,7 +757,10 @@ def load(news_dir: Path | None = None, *, sources_text: str | None = None,
         if not isinstance(models, dict):
             raise ConfigError(f"{models_path}: 顶层需要映射")
 
-    result = Config(chat=chat, slots=slots, sources=sources, models=models,
+    stories = StorySettings.parse(raw.get("stories"))
+    _story_revision(stories, raw.get("_stories_revision", ""))
+    result = Config(chat=chat, slots=slots, sources=sources, models=models, stories=stories,
+                  story_epoch=raw.get("_stories_revision", ""),
                   policies=policies, notifications=notifications, rsshub=rsshub,
                   service=load_service(news_dir),
                   hooks=hooks_lib.load_from(news_dir / "hooks.yaml", text=hooks_text))

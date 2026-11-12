@@ -128,6 +128,13 @@ CONTRACT: list[dict[str, Any]] = [
     {"name": "rsshub probe", "summary": "只读测试 RSSHub 连接或 RSS 订阅；不采集、不发送",
      "usage": "newspipe rsshub probe [--base-url URL] [--feed URL_OR_ROUTE] [--json]",
      "args": ["--base-url", "--feed"], "writes": False, "examples": ["newspipe rsshub probe --feed /sspai/matrix --json"]},
+    {"name": "stories settings", "summary": "只读关联预览设置与激活状态，不采集",
+     "usage": "newspipe stories settings [--json]", "args": [], "writes": False,
+     "examples": ["newspipe stories settings --json"]},
+    {"name": "stories set", "summary": "保存关联预览设置；不激活、不迁移队列",
+     "usage": "newspipe stories set --from-json JSON [--dry-run] [--base-hash HASH] [--json]",
+     "args": ["--from-json", "--dry-run", "--base-hash"], "writes": True,
+     "examples": ['newspipe stories set --from-json \'{"mode":"observe"}\' --dry-run --json']},
     {"name": "migrate", "summary": "把 v1 状态迁到 v2 布局（幂等）",
      "usage": "newspipe migrate [--json]", "args": [], "writes": True,
      "examples": ["newspipe migrate --json"]},
@@ -136,7 +143,7 @@ CONTRACT: list[dict[str, Any]] = [
      "examples": ["newspipe serve --once --dry"]},
 ]
 
-SUBCOMMANDS = ("api", "config", "doctor", "status", "view", "list-sources", "source", "rsshub", "chats", "hooks", "events", "queue",
+SUBCOMMANDS = ("api", "config", "doctor", "status", "view", "list-sources", "source", "rsshub", "stories", "chats", "hooks", "events", "queue",
                "run", "serve", "migrate", "probe-channel", "probe-model", "card",
                "card-preview", "enrich-only", "policy", "global", "notification", "collect", "notify")
 
@@ -701,6 +708,22 @@ def _sub_policy(args, news_dir):
     return _write_result(command, out, news_dir, next_ok=["newspipe notification preview --json"])
 
 
+def _sub_stories(args, news_dir):
+    from newspipe.story_state import StoryStorageError
+    if args.action == "set":
+        return _write_result("stories.set", edit.set_story_settings(news_dir, _json_object(args),
+                             base_hash=args.base_hash, dry_run=args.dry_run), news_dir,
+                             next_ok=["newspipe stories settings --json"])
+    try:
+        settings, revision = config.story_settings_snapshot(news_dir)
+        status = state.Store(news_dir).story_status()
+        return result.ok("stories.settings", {"settings": settings.values(), "revision": revision,
+                         "hash": edit.file_hash(news_dir / "sources.yaml"), "status": status,
+                         "awaiting_collection": status["activated_revision"] != revision})
+    except StoryStorageError as exc:
+        return result.fail("stories.settings", "E_RUNTIME", str(exc), hint="检查原始版本存储与备份；读取不会自动修复")
+
+
 def _sub_global(args, news_dir):
     out = edit.set_globals(news_dir, _json_object(args), base_hash=args.base_hash, dry_run=args.dry_run)
     return _write_result("global.set", out, news_dir, next_ok=["newspipe notification preview --json"])
@@ -965,6 +988,12 @@ def _build_sub_parser() -> argparse.ArgumentParser:
     hub.add_argument("--dry-run", action="store_true")
     hub.add_argument("--base-hash")
 
+    stories = add("stories")
+    stories.add_argument("action", choices=["settings", "set"])
+    stories.add_argument("--from-json")
+    stories.add_argument("--dry-run", action="store_true")
+    stories.add_argument("--base-hash")
+
     chatp = add("chats")
     chatp.add_argument("action", choices=["list"])
     chatp.add_argument("--page-size", type=int, default=100)
@@ -1076,6 +1105,7 @@ SUB_HANDLERS = {
         "list-sources", {"sources": config.summarize(_load(news_dir)[0])}),
     ("source", None): _sub_source,
     ("rsshub", None): _sub_rsshub,
+    ("stories", None): _sub_stories,
     ("chats", None): _sub_chats,
     ("policy", None): _sub_policy,
     ("global", None): _sub_global,

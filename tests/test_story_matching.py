@@ -1,5 +1,6 @@
 """Similarity is a bounded proposal, never a semantic or delivery decision."""
 import unittest
+from dataclasses import replace
 
 from newspipe.observations import prepare_observation
 from newspipe.story_matching import candidate_terms, propose_relation, rank_candidates
@@ -76,3 +77,11 @@ class MatchingTests(unittest.TestCase):
         draft = self.draft(source_text="委员会批准工具版本二，保留历史回执。", source_text_complete=False)
         self.assertIn("委员", candidate_terms(draft))
         self.assertIn("回执", candidate_terms(draft))
+
+    def test_bounded_previous_text_does_not_invent_specific_changed_fields(self):
+        previous = self.draft(source_text=TEXT * 100, facts={"version": 2})
+        previous = replace(previous, original_json="", evidence=replace(previous.evidence, text=previous.evidence.text[:20000]))
+        current = self.draft(source_text=TEXT * 100, facts={"version": 3})
+        relation = propose_relation(current, previous)
+        self.assertEqual(relation["relation"], "unclassified_change")
+        self.assertNotIn("text", relation["evidence_fields"])

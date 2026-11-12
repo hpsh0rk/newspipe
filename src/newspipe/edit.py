@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from functools import wraps
 from pathlib import Path
 from typing import Any
@@ -244,6 +245,29 @@ def set_globals(news_dir: Path, body: dict[str, Any], *, base_hash: str | None =
     out = _apply(news_dir, path, candidate, dry_run=dry_run, validate="sources")
     if out.get("ok"):
         out.update(op="globals", warning="被修改的全局块内注释会被重写；信源和策略块保持原样")
+    return out
+
+
+@_serialized
+def set_story_settings(news_dir: Path, body: dict[str, Any], *, base_hash: str | None = None,
+                       dry_run: bool = False) -> dict[str, Any]:
+    path = _sources_path(news_dir)
+    conflict = _check_base_hash(path, base_hash)
+    if conflict:
+        return conflict
+    try:
+        if not isinstance(body, dict):
+            raise ConfigError("关联预览设置需要 JSON 对象")
+        current, _ = config_mod.story_settings_snapshot(news_dir)
+        settings = config_mod.StorySettings.parse({**current.values(), **body})
+    except ConfigError as exc:
+        return {"code": "E_VALIDATION", "message": str(exc), "hint": "仅支持 off / observe；检查检索范围，原配置未修改"}
+    candidate = yamlblocks.set_top(path.read_text(encoding="utf-8"), "stories", _dump_block({"stories": settings.values()}))
+    if settings.values() != current.values():
+        candidate = yamlblocks.set_top(candidate, "_stories_revision", _dump_block({"_stories_revision": uuid.uuid4().hex}))
+    out = _apply(news_dir, path, candidate, dry_run=dry_run, validate="sources")
+    if out.get("ok"):
+        out.update(op="stories", awaiting_collection=True, warning="仅保存设置；下一次真实采集激活。已有队列、通知和收藏不迁移，原始历史不会自动删除。")
     return out
 
 
