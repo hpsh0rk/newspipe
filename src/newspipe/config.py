@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import math
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ import yaml  # noqa: E402
 
 from newspipe import hooks as hooks_lib
 from newspipe import policy as policy_lib
+from newspipe import source_registry
 from newspipe.errors import ConfigError  # noqa: E402
 
 
@@ -344,6 +346,45 @@ def adapter_names() -> list[str]:
                   if p.stem != "__init__" and not p.stem.startswith("_"))
 
 
+def _adapter_descriptor(name: str) -> source_registry.AdapterDescriptor:
+    descriptor = source_registry.describe_adapter(name)
+    reserved = {"adapter", "enabled", "tier", "first_party", "fetch", "filter", "enrich",
+                "deliver", "card", "notify", "feeds", "feed_label", "http2"}
+    for field in descriptor.fields:
+        if field["path"].split(".")[0] in reserved:
+            raise ConfigError("适配器参数路径与公共配置字段冲突；修正代码中的参数声明")
+    return descriptor
+
+
+def _setting_value(extra: dict, field: dict):
+    value = extra
+    for part in field["path"].split("."):
+        if not isinstance(value, dict) or part not in value:
+            return deepcopy(field["default"])
+        value = value[part]
+    return deepcopy(value)
+
+
+def _adapter_extras(name: str, extra: dict) -> dict:
+    out = deepcopy(extra)
+    for field in _adapter_descriptor(name).fields:
+        value = _setting_value(extra, field)
+        try:
+            source_registry.validate_value(value, field)
+        except ValueError:
+            raise ConfigError(f"适配器参数 {field['path']} 不符合声明；检查类型、选项或环境变量引用") from None
+        current = out
+        parts = field["path"].split(".")
+        for part in parts[:-1]:
+            if part not in current:
+                current[part] = {}
+            if not isinstance(current[part], dict):
+                raise ConfigError(f"适配器参数 {field['path']} 的父级需要映射")
+            current = current[part]
+        current[parts[-1]] = value
+    return out
+
+
 def describe_schema(news_dir: Path | None = None) -> dict[str, Any]:
     """配置的**自描述字段表** —— 页面表单与 Agent 改配置的唯一事实来源。
 
@@ -435,6 +476,7 @@ def describe_schema(news_dir: Path | None = None) -> dict[str, Any]:
         if entry["type"] == "slots":
             entry["choices"] = slots
     return {"contract_version": 1, "axes": axes, "fields": f, "adapters": adapter_names(),
+            "adapter_descriptors": {name: _adapter_descriptor(name).as_dict() for name in adapter_names()},
             "rsshub_fields": [{"path": "base_url", "label": "RSSHub 基础地址", "type": "str", "default": "",
                                "help": "可填本地或远端 HTTP(S) 地址；留空继承 RSSHub_BASE，未设置时使用本地默认。完整 RSS 地址不依赖它。"}],
             "policy_fields": policy_fields, "notification_fields": notification_fields,
@@ -449,7 +491,7 @@ def source_values(cfg: SourceConfig) -> dict[str, Any]:
     与 `describe_schema()` 的 `path` **一一对应**，有测试钉住这件事。少一个字段的后果不是
     报错，而是编辑表单把那个字段按默认值写回去 —— 静默的数据损坏（比如把 `feeds` 清空）。
     """
-    return {
+    values = {
         "adapter": cfg.adapter,
         "enabled": cfg.enabled,
         "tier": cfg.tier,
@@ -477,6 +519,9 @@ def source_values(cfg: SourceConfig) -> dict[str, Any]:
         "card.title": str(cfg.card.get("title") or ""),
         "card.group_by": str(cfg.card.get("group_by") or ""),
     }
+    values.update({field["path"]: _setting_value(cfg.extra, field)
+                   for field in _adapter_descriptor(cfg.adapter).fields})
+    return values
 
 
 def load_service(news_dir: Path) -> ServiceCfg:
@@ -577,7 +622,7 @@ def _parse_sources(raw: Any, *, news_dir: Path) -> dict[str, SourceConfig]:
             enrich=EnrichCfg.parse(body.get("enrich"), where=f"{where}.enrich"),
             deliver=DeliverCfg.parse(body.get("deliver"), where=f"{where}.deliver"),
             card=dict(body.get("card") or {}),
-            extra={k: v for k, v in body.items() if k not in reserved},
+            extra=_adapter_extras(adapter, {k: v for k, v in body.items() if k not in reserved}),
             notify=(policy_lib.NotifyBinding.parse(body["notify"], where=f"{where}.notify")
                     if "notify" in body else None),
         )
