@@ -276,6 +276,20 @@ class HookFrameworkTests(unittest.TestCase):
 
 # ------------------------------------------------------------------ 文本级块编辑
 class YamlBlocksTests(unittest.TestCase):
+    def test_top_replacement_targets_root_not_earlier_nested_key(self) -> None:
+        prefix = "policies:\n  legacy:\n    slots: [am, pm]\n# Keep this root comment\n"
+        suffix = "sources:\n  untouched: {enabled: false}\n"
+        for heading in ('slots:', '"slots":'):
+            with self.subTest(heading=heading):
+                text = prefix + heading + "\n  am: '08:15'\n  pm: '18:35'\n" + suffix
+                out = yamlblocks.set_top(text, "slots", "slots:\n  am: '09:00'\n")
+                self.assertEqual(out, prefix + "slots:\n  am: '09:00'\n" + suffix)
+                self.assertEqual(yamlblocks.set_top(text, "slots", None), prefix + suffix)
+
+    def test_nested_key_is_not_an_existing_root_block(self) -> None:
+        text = "policies:\n  legacy:\n    slots: [am]\n"
+        self.assertEqual(yamlblocks.set_top(text, "slots", "slots: {}\n"), text + "slots: {}\n")
+
     def test_set_block_keeps_everything_else_byte_for_byte(self) -> None:
         new_body = "  aihot:\n    adapter: aihot\n    fetch: {trigger: poll, interval_min: 5}\n"
         out = yamlblocks.set_block(SOURCES_YAML, "sources", "aihot", new_body)

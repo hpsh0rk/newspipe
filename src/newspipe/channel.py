@@ -33,3 +33,12 @@ def update_entity(card_id: str, sequence: int, card: dict) -> bool:
 def send_text(chat_id: str, text: str) -> str:
     """纯文本兜底（卡片发不出去时的降级通道）。"""
     return get_channel().send_text(chat_id, text)
+
+
+def list_chats(*, page_size: int = 100, page_token: str = "") -> dict:
+    """Optional read capability; never change the delivery backend to find groups."""
+    from newspipe.chats import DirectoryError
+    capability = getattr(get_channel(), "list_chats", None)
+    if not callable(capability):
+        raise DirectoryError("当前发送通道不支持读取已加入的群", code="E_CONFIG", hint="请手动填写群 ID")
+    return capability(page_size=page_size, page_token=page_token)

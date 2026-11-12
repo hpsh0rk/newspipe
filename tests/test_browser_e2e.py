@@ -10,8 +10,9 @@ import os
 from pathlib import Path
 import sys
 import unittest
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from newspipe import cli, config, rssconnect
@@ -97,6 +98,223 @@ class WorkbenchBrowserTests(unittest.TestCase):
 
     def source_label(self, fixture):
         return config.source_values(config.load(fixture.news_dir).sources["research"])["feed_label"]
+
+    def test_chat_picker_search_more_manual_and_selection_are_unsaved(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine, width=360) as (fixture, page):
+                page.goto(fixture.url + "/notifications?global=1")
+                form = page.locator('form[action="/api/actions/global-save"]')
+                original = form.locator('[name="base_hash"]').input_value()
+                self.assertEqual(fixture.group_calls, [])
+                out = self.submit(page, form, "加载 / 刷新群列表")
+                self.assertTrue(out["ok"], out)
+                self.expect(form.locator('[data-chat-select]')).to_contain_text("工程讨论")
+                form.locator('[data-chat-select]').select_option("oc_engineering")
+                form.locator('[data-chat-query]').fill("周末")
+                self.expect(form.locator('[data-chat-select]')).to_have_value("oc_engineering")
+                self.expect(form.locator('[data-chat-status]')).to_contain_text("尚未加载")
+                out = self.submit(page, form, "加载更多群")
+                self.assertTrue(out["ok"], out)
+                self.expect(form.locator('[data-chat-select]')).to_contain_text("周末读书")
+                self.expect(form.locator('[data-chat-select]')).to_have_value("oc_engineering")
+                self.assertEqual(form.locator('[name="base_hash"]').input_value(), original)
+                form.get_by_text("群 ID 与手动填写（备用）", exact=True).click()
+                form.locator('[data-chat-mode]').click()
+                form.locator('[data-chat-manual]').fill("oc_manual")
+                form.locator('[data-chat-mode]').click()
+                self.expect(form.locator('[data-chat-select]')).to_have_value("oc_manual")
+                self.assertEqual(fixture.group_calls, ["", "offline-next"])
+                self.assertEqual(config.load(fixture.news_dir).chat, "oc_offline_preview")
+
+    def test_chat_lookup_bypasses_other_invalid_fields_and_preserves_new_edits(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                page.goto(fixture.url + "/notifications?global=1")
+                form = page.locator('form[action="/api/actions/global-save"]')
+                form.locator('[name="g.max_cards_per_day"]').fill("-1")
+                out = self.submit(page, form, "加载 / 刷新群列表")
+                self.assertTrue(out["ok"], out)
+                self.expect(form.locator('[name="g.max_cards_per_day"]')).to_have_value("-1")
+                self.expect(form.locator('[data-action-feedback]')).to_contain_text("没有保存")
+
+    def test_chat_read_can_close_and_late_response_does_not_reopen_editor(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                page.goto(fixture.url + "/notifications?global=1")
+                form = page.locator('form[action="/api/actions/global-save"]')
+                pending = []
+                page.route("**/api/actions/chat-list", lambda route: pending.append(route))
+                form.locator('[data-chat-load]').click()
+                page.wait_for_timeout(30)
+                page.locator('#editor-dialog [data-editor-close]').first.click()
+                self.expect(page.locator('#editor-dialog')).not_to_be_visible()
+                pending[0].fulfill(json={"ok": True, "changed": False, "data": {"groups": [], "has_more": False, "page_token": ""}})
+                page.wait_for_timeout(30)
+                self.expect(page.locator('#editor-dialog')).not_to_be_visible()
+
+    def test_chat_picker_is_usable_without_javascript(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine, javascript=False) as (fixture, page):
+                page.goto(fixture.url + "/notifications?global=1")
+                form = page.locator('form[action="/api/actions/global-save"]')
+                form.get_by_role("button", name="加载 / 刷新群列表", exact=True).click()
+                self.expect(form.locator('[data-chat-select]')).to_contain_text("我的阅读群")
+                form.get_by_role("button", name="加载更多群", exact=True).click()
+                self.expect(form.locator('[data-chat-select]')).to_contain_text("周末读书")
+                self.assertEqual(fixture.group_calls, ["", "offline-next"])
+
+    def test_chat_picker_opens_from_global_settings_link(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                page.goto(fixture.url + "/notifications")
+                page.get_by_role("link", name="全局设置", exact=True).click()
+                self.expect(page.locator('#editor-dialog')).to_be_visible()
+                self.expect(page.locator('#editor-dialog [data-chat-picker]')).to_be_visible()
+
+    def test_chat_pagination_survives_global_validation_and_conflict(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                page.goto(fixture.url + "/notifications?global=1")
+                form = page.locator('form[action="/api/actions/global-save"]')
+                before = (fixture.news_dir / "sources.yaml").read_bytes()
+                original_hash = form.locator('[name="base_hash"]').input_value()
+                for conflict in (False, True):
+                    self.assertTrue(self.submit(page, form, "加载 / 刷新群列表")["ok"])
+                    form.locator('[data-chat-select]').select_option("oc_engineering")
+                    old_handle = form.locator('[name="chat_handle"]').input_value()
+                    if conflict:
+                        form.locator('[name="base_hash"]').evaluate("input => input.value = 'stale'")
+                    out = self.submit(page, form)
+                    self.assertEqual(out["ok"], not conflict, out)
+                    if conflict:
+                        self.assertEqual(out["error"]["code"], "E_CONFLICT")
+                    self.assertNotEqual(form.locator('[name="chat_handle"]').input_value(), old_handle)
+                    self.assertTrue(self.submit(page, form, "加载更多群")["ok"])
+                    self.expect(form.locator('[data-chat-select]')).to_contain_text("周末读书")
+                    self.expect(form.locator('[data-chat-select]')).to_have_value("oc_engineering")
+                    self.assertEqual(form.locator('[name="base_hash"]').input_value(), "stale" if conflict else original_hash)
+                self.assertEqual(fixture.group_calls, ["", "offline-next", "", "offline-next"])
+                self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
+
+    def test_acquisition_removed_prototype_named_key_remains_in_source_draft(self):
+        for engine in self.browsers:
+            for key in ("constructor", "__proto__"):
+                with self.subTest(engine=engine, key=key), self.scenario(engine) as (fixture, page):
+                    path = fixture.news_dir / "sources.yaml"
+                    raw = yaml.safe_load(path.read_text())
+                    raw["slots"][key] = "12:00"
+                    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+                    form = self.editor(fixture, page)
+                    old_hash = form.locator('[name="base_hash"]').input_value()
+                    form.locator('[name="f.fetch.trigger"]').select_option("slot")
+                    form.locator(f'[name="f.fetch.slots"][value="{key}"]').check()
+                    form.get_by_role("link", name="管理采集时间", exact=True).click()
+                    acquisition = page.locator('#editor-dialog form[action="/api/actions/global-save"]')
+                    self.expect(acquisition.locator('[name="slot_time"]')).to_have_count(3)
+                    acquisition.locator('[data-remove-slot]').last.click()
+                    acquisition.locator('[name="dry"]').uncheck()
+                    self.assertTrue(self.submit(page, acquisition)["ok"])
+                    page.get_by_role("link", name="继续编辑消息源", exact=True).click()
+                    form = page.locator('#editor-dialog form[action="/api/actions/source-patch"]')
+                    self.expect(form.locator(f'[name="f.fetch.slots"][value="{key}"]')).to_be_checked()
+                    self.expect(form.locator('[data-slot-choices]')).to_contain_text("已移除的采集时间")
+                    self.assertEqual(form.locator('[name="base_hash"]').input_value(), old_hash)
+                    self.assertNotIn(key, config.load(fixture.news_dir).slots)
+
+    def test_acquisition_clocks_have_no_ids_and_keep_source_draft_and_hash(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine, width=360) as (fixture, page):
+                form = self.editor(fixture, page)
+                old_hash = form.locator('[name="base_hash"]').input_value()
+                form.locator('[name="f.feed_label"]').fill("Retained acquisition draft")
+                form.get_by_role("link", name="管理采集时间", exact=True).click()
+                acquisition = page.locator('#editor-dialog form[action="/api/actions/global-save"]')
+                self.expect(acquisition.locator('[type="time"]')).to_have_count(2)
+                self.expect(acquisition.locator('[name="slot_id"]').first).not_to_be_visible()
+                acquisition.locator('[name="slot_time"]').first.fill("09:45")
+                acquisition.locator('[name="dry"]').uncheck()
+                out = self.submit(page, acquisition)
+                self.assertTrue(out["ok"], out)
+                page.get_by_role("link", name="继续编辑消息源", exact=True).click()
+                form = page.locator('#editor-dialog form[action="/api/actions/source-patch"]')
+                self.expect(form.locator('[name="f.feed_label"]')).to_have_value("Retained acquisition draft")
+                self.assertEqual(form.locator('[name="base_hash"]').input_value(), old_hash)
+                form.locator('[name="f.fetch.trigger"]').select_option("slot")
+                self.expect(form.locator('[data-fetch-for="slot"]')).to_contain_text("09:45")
+                self.assertEqual(config.load(fixture.news_dir).sources["products"].fetch.slots, ("am",))
+
+    def test_acquisition_trigger_controls_preserve_inactive_configuration(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                form = self.editor(fixture, page)
+                trigger = form.locator('[name="f.fetch.trigger"]')
+                self.expect(form.locator('[data-fetch-for="slot"]')).not_to_be_visible()
+                form.locator('[name="f.fetch.interval_min"]').fill("21")
+                trigger.select_option("slot")
+                self.expect(form.locator('[data-fetch-for="poll"]')).not_to_be_visible()
+                self.expect(form.locator('[data-fetch-for="slot"]')).to_be_visible()
+                form.locator('[name="f.fetch.slots"][value="am"]').check()
+                trigger.select_option("manual")
+                self.expect(form.locator('[data-fetch-for="slot"]')).not_to_be_visible()
+                trigger.select_option("poll")
+                self.expect(form.locator('[name="f.fetch.interval_min"]')).to_have_value("21")
+                trigger.select_option("manual")
+                form.locator('[name="dry"]').uncheck()
+                out = self.submit(page, form)
+                self.assertTrue(out["ok"], out)
+                cfg = config.load(fixture.news_dir)
+                self.assertEqual(cfg.sources["research"].fetch.trigger, "manual")
+                self.assertEqual(cfg.sources["research"].fetch.interval_min, 10)
+
+    def test_acquisition_add_remove_empty_and_policy_time_rows_without_spares(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine, width=360) as (fixture, page):
+                page.goto(fixture.url + "/config?acquisition=1")
+                form = page.locator('#editor-dialog form[action="/api/actions/global-save"]')
+                self.expect(form.locator('[data-remove-slot]').first).to_be_disabled()
+                self.assertTrue(self.submit(page, form)["ok"])
+                self.expect(form.locator('[data-remove-slot]').first).to_be_disabled()
+                form.locator('[data-remove-slot]').last.click()
+                self.assertEqual(form.locator('[name="slot_time"]').count(), 1)
+                form.locator('[data-add-slot]').click()
+                form.locator('[name="slot_time"]').last.fill("20:30")
+                self.assertEqual(form.locator('[name="slot_time"]').count(), 2)
+                self.close_editor(page, dirty=True)
+                page.goto(fixture.url + "/notifications?edit=digest")
+                self.assertEqual(page.locator('[name="p.times"]').count(), 2)
+
+    def test_acquisition_add_is_available_without_javascript(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine, javascript=False) as (fixture, page):
+                page.goto(fixture.url + "/config?acquisition=1")
+                form = page.locator('form[action="/api/actions/global-save"]')
+                form.get_by_role("button", name="添加采集时间", exact=True).click()
+                self.assertEqual(form.locator('[name="slot_time"]').count(), 3)
+                form.locator('[name="slot_time"]').last.fill("13:30")
+                form.get_by_role("button", name="校验配置", exact=True).click()
+                self.assertEqual(form.locator('[name="slot_time"]').count(), 3)
+                self.expect(form.locator('[name="slot_time"]').last).to_have_value("13:30")
+
+    def test_editor_enter_submits_validation_not_auxiliary_row_or_group_actions(self):
+        for engine in self.browsers:
+            for javascript in (True, False):
+                with self.subTest(engine=engine, javascript=javascript), self.scenario(engine, javascript=javascript) as (fixture, page):
+                    before = (fixture.news_dir / "sources.yaml").read_bytes()
+                    for route, action, field in (("/notifications?edit=digest", "policy-save", "p.label"),
+                                                ("/notifications?global=1", "global-save", "g.max_cards_per_day")):
+                        page.goto(fixture.url + route)
+                        form = page.locator(f'form[action="/api/actions/{action}"]')
+                        form.locator('input[name="dry"]').uncheck()
+                        clocks = form.locator('[name="p.times"]').count()
+                        with page.expect_request(lambda request: "/api/actions/" in request.url) as sent:
+                            form.locator(f'[name="{field}"]').press("Enter")
+                        self.assertTrue(sent.value.url.endswith("/api/actions/" + action), sent.value.url)
+                        submitted = parse_qs(sent.value.post_data or "")
+                        self.assertNotIn("editor_intent", submitted)
+                        self.assertEqual(submitted.get("validate_only"), ["1"])
+                        self.expect(form.locator('[name="p.times"]')).to_have_count(clocks)
+                    self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
+                    self.assertEqual(fixture.group_calls, [])
 
     def test_policy_owned_times_can_add_remove_and_do_not_change_other_policy(self):
         for engine in self.browsers:

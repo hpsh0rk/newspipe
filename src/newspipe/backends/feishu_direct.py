@@ -29,8 +29,10 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlencode
 
 from newspipe import credentials
 from newspipe.errors import DeliveryError
@@ -55,18 +57,30 @@ def _dig(payload: dict, dotted: str) -> Any:
 
 
 def _default_transport(method: str, url: str, headers: dict[str, str],
-                       body: bytes | None, timeout: float) -> tuple[int, bytes]:
+                       body: bytes | None, timeout: float, *, response_limit: int | None = None) -> tuple[int, bytes]:
     """默认 HTTP 出口：标准库 urllib，显式禁用环境代理（见模块头）。"""
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+    handlers = [urllib.request.ProxyHandler({})]
+    if response_limit is not None:
+        handlers.append(NoRedirect())
+    opener = urllib.request.build_opener(*handlers)
+    def read(response):
+        raw = response.read(response_limit + 1) if response_limit is not None else response.read()
+        if response_limit is not None and len(raw) > response_limit:
+            from newspipe.chats import DirectoryError
+            raise DirectoryError("群列表响应超过大小限制，请缩小每页数量后重试")
+        return raw
     req = urllib.request.Request(url, data=body, method=method.upper())
     for key, value in headers.items():
         req.add_header(key, value)
     try:
         with opener.open(req, timeout=timeout) as resp:
-            return int(resp.status), resp.read()
+            return int(resp.status), read(resp)
     except urllib.error.HTTPError as exc:          # 4xx/5xx 也要读 body：飞书的错误码在里面
         try:
-            return int(exc.code), exc.read() or b""
+            return int(exc.code), read(exc) or b""
         finally:
             exc.close()
 
@@ -91,6 +105,8 @@ class FeishuDirectChannel:
         self._service_cfg = dict(service_cfg or {})
         self._news_dir = news_dir
         self._transport = transport or _default_transport
+        from newspipe.chats import MAX_BYTES
+        self._directory_transport = transport or partial(_default_transport, response_limit=MAX_BYTES)
         self._timeout = timeout
         self._clock = clock
         self._sleep = sleeper
@@ -228,6 +244,56 @@ class FeishuDirectChannel:
         return str(_dig(payload, "data.message_id") or "")
 
     # ---------------------------------------------------------------- 自检
+    def list_chats(self, *, page_size: int = 100, page_token: str = "") -> dict:
+        from newspipe import chats
+        chats.validate_request(page_size, page_token)
+        try:
+            creds = self.creds
+            if not creds.app_id or not creds.app_secret:
+                raise ConfigError("incomplete")
+        except Exception:
+            raise chats.DirectoryError("当前发送应用未配置完整凭据", code="E_CONFIG",
+                                       hint="配置 NEWSPIPE_FEISHU_APP_ID / NEWSPIPE_FEISHU_APP_SECRET 或当前服务凭据") from None
+
+        def request(method, path, body=None, token=""):
+            headers = {"Content-Type": "application/json; charset=utf-8"}
+            if token:
+                headers["Authorization"] = "Bearer " + token
+            try:
+                status, raw = self._directory_transport(method, creds.base_url + path, headers,
+                    json.dumps(body).encode() if body is not None else None, chats.TIMEOUT)
+            except chats.DirectoryError:
+                raise
+            except Exception:
+                raise chats.DirectoryError("群列表服务暂时不可达") from None
+            self.stats["calls"] += 1
+            if len(raw) > chats.MAX_BYTES:
+                raise chats.DirectoryError("群列表响应超过大小限制")
+            try:
+                payload = json.loads(raw)
+            except (ValueError, UnicodeDecodeError):
+                raise chats.DirectoryError("群列表响应无法解析") from None
+            if not isinstance(payload, dict) or type(payload.get("code")) is not int:
+                raise chats.DirectoryError("群列表响应格式不可用")
+            if not 200 <= status < 300 or payload["code"] != 0:
+                if token and (status == 401 or payload["code"] in _TOKEN_CODES):
+                    self._token, self._token_expire = "", 0
+                raise chats.provider_error(payload["code"], status)
+            return payload
+
+        now = self._clock()
+        if not self._token or now >= self._token_expire:
+            payload = request("POST", "/open-apis/auth/v3/tenant_access_token/internal",
+                              {"app_id": creds.app_id, "app_secret": creds.app_secret})
+            token = _dig(payload, "data.tenant_access_token") or payload.get("tenant_access_token")
+            expire = _dig(payload, "data.expire") or payload.get("expire", 7200)
+            if not isinstance(token, str) or not token or len(token) > 8192 or type(expire) not in (int, float) or not 0 < expire <= 86400:
+                raise chats.DirectoryError("发送应用身份响应不完整", code="E_CONFIG", hint="核对当前应用凭据后重试")
+            self._token, self._token_expire = token, now + max(60, expire - 300)
+            self.stats["token_refreshes"] += 1
+        payload = request("GET", "/open-apis/im/v1/chats?" + urlencode({"page_size": page_size, "page_token": page_token}), token=self._token)
+        return payload.get("data")
+
     def probe(self, chat_id: str, *, send: bool = True) -> dict[str, Any]:
         """自检四步：token → 建实体 → 发卡 → 更新实体。返回**可安全打印**的步骤表。
 

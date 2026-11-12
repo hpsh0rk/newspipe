@@ -294,21 +294,35 @@ def _argv_policy_save(form):
 def _argv_globals(form):
     from newspipe import config as config_mod
     body = {}
+    scope = (form.get("global_scope") or [""])[0]
+    if scope not in {"", "notifications", "acquisition"}:
+        raise ActionInputError("全局表单类型不可用，请重新打开编辑器")
+    has_slots = any(key in form for key in ("slots_json", "slot_id", "slot_time", "slots_present"))
+    if scope == "notifications" and has_slots:
+        raise ActionInputError("通知设置不能修改采集时间，请到消息源页编辑")
+    if scope == "acquisition" and ("chat" in form or any(key.startswith("g.") for key in form)):
+        raise ActionInputError("采集时间表单不能修改通知目标或通知限制")
     if "chat" in form:
         body["chat"] = (form.get("chat") or [""])[0].strip()
     if "slots_json" in form:
         body["slots"] = json.loads(form["slots_json"][0])
-    if "slot_id" in form:
+    if "slot_id" in form or "slots_present" in form:
         ids, clocks = form.get("slot_id", []), form.get("slot_time", [])
         if len(ids) != len(clocks):
-            raise ActionInputError("槽位 ID 与时刻必须成对提交")
+            raise ActionInputError("采集时间行不完整，请重新打开编辑器")
         body["slots"] = {}
+        reserved = {ident.strip() for ident in ids if ident.strip()}
         for ident, clock in zip(ids, clocks):
             ident, clock = ident.strip(), clock.strip()
-            if not ident and not clock:
+            if not clock:
                 continue
-            if not ident or not clock or ident in body["slots"]:
-                raise ActionInputError("槽位需要唯一 ID 与完整 HH:MM 时刻")
+            if not ident:
+                stem = "at_" + clock.replace(":", "")
+                ident, suffix = stem, 2
+                while ident in reserved or ident in body["slots"]:
+                    ident, suffix = f"{stem}_{suffix}", suffix + 1
+            if ident in body["slots"]:
+                raise ActionInputError("采集时间行重复，请重新打开编辑器")
             body["slots"][ident] = clock
     fields = config_mod.describe_schema()["notification_fields"]
     if any(f"g.{f['path']}" in form for f in fields):
@@ -363,6 +377,10 @@ def _argv_rsshub_probe(form):
             *(["--feed", feed] if kind == "feed" else [])]
 
 
+def _argv_chat_list(form):
+    return ["chats", "list", "--page-token", (form.get("page_token") or [""])[0]]
+
+
 def _argv_rsshub_save(form):
     if "r.base_url" not in form:
         raise ActionInputError("缺少 RSSHub 基础地址字段；显式留空才会恢复继承")
@@ -383,6 +401,7 @@ ACTIONS: dict[str, Action] = {
         Action("notification-migrate", "迁移旧通知配置", lambda form: _write_flags(["notification", "migrate"], form), danger=True),
         Action("rsshub-save", "保存 RSSHub 地址", _argv_rsshub_save, danger=True),
         Action("rsshub-probe", "只读检测 RSSHub / RSS 订阅", _argv_rsshub_probe),
+        Action("chat-list", "读取机器人已加入的群", _argv_chat_list),
         Action("collect", "只采集一次", lambda f: ["collect", _one(f, "name"), *(["--dry"] if _flag(f, "dry") else [])]),
         Action("notify", "通知现有待处理", _argv_notify, danger=True),
         Action("notification-retry", "安全重试原操作", _argv_retry, danger=True),
@@ -411,6 +430,10 @@ def dispatch(name: str, form: dict[str, list[str]], news_dir: Path) -> dict[str,
     res = cli.run_subcommand(argv, news_dir)
     data = res.as_dict()
     displayed = list(argv)
+    if name == "chat-list":
+        for index, arg in enumerate(displayed[:-1]):
+            if arg == "--page-token":
+                displayed[index + 1] = "<分页信息>" if displayed[index + 1] else ""
     if name.startswith("rsshub-"):
         from newspipe import rssconnect
         for index, arg in enumerate(displayed[:-1]):

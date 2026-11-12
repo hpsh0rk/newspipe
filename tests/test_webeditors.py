@@ -9,6 +9,19 @@ from preview_workbench import offline_workbench
 
 
 class WebEditorTests(unittest.TestCase):
+    def test_editor_prefixes_real_references_without_rewriting_data_attributes(self):
+        from newspipe.webui import editor_panel
+        body = ('<div data-fetch-for="poll" data-source-id="research">'
+                '<label for="interval">Interval</label><input id="interval" '
+                'aria-describedby="help error"><span id="help"></span><span id="error"></span></div>')
+        panel = editor_panel("source", "Source", body, "/config", "research")
+        self.assertIn('data-fetch-for="poll"', panel)
+        self.assertIn('data-source-id="research"', panel)
+        self.assertNotIn('for="interval"', panel)
+        self.assertNotIn('id="interval"', panel)
+        self.assertRegex(panel, r'for="(editor-[a-f0-9]+-interval)"')
+        self.assertRegex(panel, r'aria-describedby="editor-[a-f0-9]+-help editor-[a-f0-9]+-error"')
+
     def test_no_js_migration_preview_reports_proposed_bindings_without_applying(self):
         from test_rsshub_web import RssForm
         from test_notification_contracts import TEXT

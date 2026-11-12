@@ -206,7 +206,9 @@ def _flash_of(envelope: dict[str, Any]) -> dict[str, Any]:
         bits = [f"{k}: {data[k]}" for k in ("summary", "message", "changed", "note")
                 if data.get(k)]
         summary = " · ".join(bits) or "完成"
-        if data.get("dry_run"):
+        if data.get("draft_only"):
+            summary = "草稿已调整 · 尚未保存，配置没有变化。"
+        elif data.get("dry_run"):
             summary = "校验通过 · 尚未应用；取消“仅校验，不应用”后保存才会真正写入配置。"
     return {
         "ok": ok,
@@ -229,6 +231,8 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
     token = (action_token or secrets.token_urlsafe(24)) if view_actions else ""
     from newspipe.webdrafts import Drafts
     drafts = Drafts()
+    from newspipe.webchats import DirectoryPages
+    directory_pages = DirectoryPages()
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "newspipe"
@@ -311,7 +315,7 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
             return 200, view_mod.batch_html(payload, page=page)
 
         def _config_page(self, payload: dict[str, Any], act: dict[str, Any] | None,
-                         flash: dict[str, Any] | None, query: dict[str, list[str]]) -> str:
+                         flash: dict[str, Any] | None, query: dict[str, list[str]], draft=None) -> str:
             """配置页的输入装配：schema + 目录搜索 + URL 发现 + 预填 + 编辑预填。"""
             from newspipe import config as config_mod
             from newspipe import rss as rss_mod
@@ -338,18 +342,22 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                     cand = rss_mod.as_candidate(row)
                     prefill = {"adapter": "rsshub", "feeds": [cand["feed"]],
                                "feed_label": cand["feed_label"], "fetch.trigger": "slot",
-                               "fetch.slots": ["am"]}
+                               "fetch.slots": list(payload["slots"])[:1]}
                     hint = str(cand["name_hint"])
             if query.get("feed"):
                 url = (query["feed"] or [""])[0]
                 prefill = {"adapter": "rsshub", "feeds": [url], "fetch.trigger": "slot",
-                           "fetch.slots": ["am"]}
+                           "fetch.slots": list(payload["slots"])[:1]}
                 hint = rss_mod._slug(urlparse(url).netloc or "feed")
             if prefill:
                 page["prefill"] = prefill
                 page["prefill_name"] = hint
             page.update({key: (query.get(key) or [""])[0] for key in
-                         ("new", "copy", "search", "policy_filter", "enabled_filter", "adapter_filter", "rsshub")})
+                         ("new", "copy", "search", "policy_filter", "enabled_filter", "adapter_filter", "rsshub", "acquisition")})
+            if draft and draft.get("form") and (draft["form"].get("global_scope") or [""])[0] == "acquisition":
+                from itertools import zip_longest
+                fields = draft["form"]
+                page["slot_rows"] = list(zip_longest(fields.get("slot_id", []), fields.get("slot_time", []), fillvalue=""))
             if query.get("edit"):
                 name = (query["edit"] or [""])[0]
                 try:
@@ -410,7 +418,7 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                         act = None
                     flash = view_mod.flash_decode((query.get("r") or [""])[0])
                     if draft:
-                        flash = None if draft.get("probe") else draft["flash"]
+                        flash = None if draft.get("probe") or draft.get("chat_result") else draft["flash"]
                 if is_batch:
                     parts = route.split("/")
                     if len(parts) == 4 and parts[2] and parts[3]:
@@ -432,10 +440,15 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                 elif route == "/ops":
                     page = view_mod.ops_html(payload, actions=act, flash=flash)
                 elif route == "/config":
-                    page = self._config_page(payload, act, flash, query)
+                    page = self._config_page(payload, act, flash, query, draft)
                 elif route == "/notifications":
                     from newspipe import config as config_mod
                     policy_page = {key: (query.get(key) or [""])[0] for key in ("edit", "copy", "new", "preset", "global")}
+                    if draft and draft.get("form") and draft.get("action") == "global-save":
+                        fields = draft["form"]
+                        policy_page.update(chat_value=(fields.get("chat") or [payload["chat"]])[0],
+                            chat_mode=(fields.get("chat_mode") or ["select"])[0], chat_query=(fields.get("chat_query") or [""])[0],
+                            chat_directory=draft.get("directory") or {}, chat_result=draft.get("chat_result"))
                     if draft and draft.get("action") == "policy-save" and draft.get("form"):
                         from itertools import zip_longest
                         values = draft["form"]
@@ -506,12 +519,25 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                 reject(403, "E_TOKEN", "令牌不匹配（页面可能过期，刷新重试）", "令牌在服务重启后更换；刷新页面即可")
                 return
             try:
-                envelope = actions_mod.dispatch(
-                    name, form, news_dir or config_mod.default_news_dir())
+                from newspipe import result, webdrafts
+                from newspipe.chats import DirectoryError
+                previous = None
+                if name == "chat-list":
+                    previous = directory_pages.take(form, loading=not bool(form.get("editor_intent")))
+                elif name == "global-save" and "chat" in form:
+                    previous = directory_pages.take(form)
+                if webdrafts.edit_controls(name, form):
+                    envelope = result.ok("editor.draft", {"draft_only": True}).as_dict()
+                else:
+                    envelope = actions_mod.dispatch(name, form, news_dir or config_mod.default_news_dir())
+            except (DirectoryError, actions_mod.ActionInputError) as exc:
+                envelope = result.fail("action." + name, getattr(exc, "code", "E_USAGE"), str(exc), hint=getattr(exc, "hint", "")).as_dict()
             except Exception as exc:                       # 写操作绝不能让进程崩
                 logger(f"写操作 {name} 崩了（{type(exc).__name__}: {exc}）")
                 reject(500, "E_INTERNAL", f"{type(exc).__name__}: {exc}")
                 return
+            if name == "chat-list" or (name == "global-save" and "chat" in form):
+                envelope["directory"] = directory_pages.finish(form, envelope, previous)
             logger(f"写操作 {name} → {envelope.get('command')} ok={envelope.get('ok')}")
             if "application/json" in (self.headers.get("Accept") or ""):
                 self._send(200, envelope)
@@ -522,13 +548,15 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                 return_to = "/"
             # One-use PRG memory: neither raw input nor CLI argv belongs in URLs.
             data = envelope.get("data") or {}
-            retain = not envelope.get("ok") or data.get("dry_run") or name in {"notification-preview", "rsshub-probe"}
+            retain = not envelope.get("ok") or data.get("dry_run") or data.get("draft_only") or name in {"notification-preview", "rsshub-probe", "chat-list"}
             action = name
             if name == "notification-preview":
                 kind = (form.get("preview_kind") or ["source"])[0]
                 action = {"global": "global-save", "policy": "policy-save"}.get(kind, "source-save" if form.get("create_only") else "source-patch")
             elif name == "rsshub-probe":
                 action = "rsshub-save"
+            elif name == "chat-list":
+                action = "global-save"
             query = {}
             if action in {"source-patch", "policy-save", "source-save"}:
                 query = {"new": ["1"]} if form.get("create_only") or action == "source-save" else {"edit": form.get("name", [])}
@@ -539,10 +567,12 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
             elif action == "rsshub-save":
                 query = {"rsshub": ["1"]}
             elif action == "global-save":
-                query = {"global": ["1"]}
+                query = {"acquisition": ["1"]} if (form.get("global_scope") or [""])[0] == "acquisition" else {"global": ["1"]}
             key = drafts.put({"action": action, "query": query if retain else {}, "flash": _flash_of(envelope),
                               "form": {k: v for k, v in form.items() if k != "token"} if retain else None,
                               "probe": envelope if name == "rsshub-probe" else None,
+                              "chat_result": envelope if name == "chat-list" else None,
+                              "directory": envelope.get("directory"),
                               "preview": data if name == "notification-preview" and envelope.get("ok") else None,
                               "migration": data if name == "notification-migrate" and envelope.get("ok") else None})
             self.send_response(303)

@@ -36,6 +36,17 @@ class BrowserFixtureTests(unittest.TestCase):
             self.assertEqual(fixture.store.pending_count("research"), before + 1)
             self.assertEqual(fixture.blocked_effects, [])
 
+    def test_group_directory_is_synthetic_and_real_backends_are_guarded(self):
+        from newspipe.backends.feishu_direct import FeishuDirectChannel
+        from newspipe.backends.feishu_lark_cli import LarkCliChannel
+        with offline_workbench() as fixture:
+            out = cli.run_subcommand(["chats", "list", "--json"], fixture.news_dir)
+            self.assertTrue(out.ok, out.as_dict())
+            self.assertEqual(out.data["groups"][0]["chat_id"], "oc_offline_preview")
+            for backend in (FeishuDirectChannel(), LarkCliChannel()):
+                with self.assertRaisesRegex(RuntimeError, "offline fixture"):
+                    backend.list_chats()
+
     def test_rss_discovery_cannot_escape_through_server_network(self):
         with offline_workbench() as fixture:
             with self.assertRaisesRegex(rss.RssError, "offline fixture blocks network"):

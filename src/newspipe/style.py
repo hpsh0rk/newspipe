@@ -316,7 +316,7 @@ dialog h2{margin-top:0}
 dialog p{overflow-wrap:anywhere}
 dialog .row-actions{margin-top:20px}
 #editor-dialog{width:min(1040px,calc(100vw - 40px));max-width:1040px;max-height:calc(100dvh - 40px);padding:0;overflow:auto}
-#editor-dialog:is([data-editor-kind=policy],[data-editor-kind=global],[data-editor-kind=rsshub]){width:min(760px,calc(100vw - 40px))}
+#editor-dialog:is([data-editor-kind=policy],[data-editor-kind=global],[data-editor-kind=rsshub],[data-editor-kind=acquisition]){width:min(760px,calc(100vw - 40px))}
 #editor-dialog[data-editor-kind=source-copy]{width:min(520px,calc(100vw - 40px))}
 .editor-panel{margin:20px 0;min-width:0}
 #editor-dialog .editor-panel{margin:0;padding:20px 24px}
@@ -335,6 +335,11 @@ dialog .row-actions{margin-top:20px}
 .editor details{margin:12px 0;padding:8px 0;border-top:1px solid var(--divider)}
 .field-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
 .field-grid>details{grid-column:1/-1}
+.field-grid-link{grid-column:1/-1}
+.boolean-field{align-content:start}
+.boolean-field .field-label{min-height:38px}
+.boolean-field input[type=checkbox]{flex:none;margin:0}
+.acquisition-panel{border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);margin:16px 0}
 .field{display:grid;gap:6px;min-width:0;margin:0 0 12px;color:var(--text-2);font-size:13px}
 .field input:not([type=checkbox]),.field select{width:100%;min-width:0;font-size:14px}
 .field small{font-size:12px;color:var(--muted);line-height:1.6}
@@ -377,9 +382,13 @@ form:has([name=dry]:not(:checked)) .save-actual{display:inline}
 .policy-card h3{font-size:16px;margin-top:0}
 .policy-card p{margin:12px 0;font-size:13px;overflow-wrap:anywhere}
 .notice{padding:16px;background:var(--warn-soft);border:1px solid var(--warn-line);border-radius:var(--radius-sm);color:var(--warn)}
-.slot-edit-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:8px 0}
+.slot-edit-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:end;gap:8px 12px;padding:12px 0;border-bottom:1px solid var(--divider)}
 .slot-edit-row label{display:grid;gap:4px;font-size:12px}
 .slot-edit-row input{width:100%;min-width:0}
+.slot-references{grid-column:1/-1;margin:0!important;padding:0!important;border:0!important}
+.slot-references summary{font-size:12px;color:var(--muted)}
+.slot-options .check{padding:8px 12px;border:1px solid var(--border);border-radius:var(--radius-sm)}
+.slot-options .check:has(:checked){background:var(--accent-soft);border-color:var(--accent)}
 .time-edit-row{display:flex;align-items:center;gap:8px;margin:8px 0}
 .time-edit-row input{flex:1;min-width:0;width:100%}
 input[type=time]{min-height:38px}

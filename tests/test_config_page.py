@@ -317,16 +317,10 @@ class ConfigPageTests(unittest.TestCase):
             def __init__(self):
                 super().__init__()
                 self.checked = []
-                self.active = False
             def handle_starttag(self, tag, attrs):
                 attrs = dict(attrs)
-                if tag == "select":
-                    self.active = attrs.get("name") == "f.fetch.slots"
-                if tag == "option" and self.active and "selected" in attrs:
+                if tag == "input" and attrs.get("name") == "f.fetch.slots" and "checked" in attrs:
                     self.checked.append(attrs.get("value"))
-            def handle_endtag(self, tag):
-                if tag == "select":
-                    self.active = False
         slots = SlotControls()
         slots.feed(page)
         self.assertEqual(slots.checked, ["am"])
