@@ -80,9 +80,17 @@ class ObservationTests(unittest.TestCase):
         self.assertNotEqual(self.draft().version_hash,
                             self.draft(article(source_text_complete=False)).version_hash)
 
+    def test_explicit_truncation_invalidates_completeness_with_new_evidence_version(self):
+        full = self.draft()
+        truncated = self.draft(article(source_text_truncated=True))
+        self.assertFalse(truncated.evidence.text_complete)
+        self.assertEqual(truncated.copy_hash, "")
+        self.assertNotEqual(truncated.version_hash, full.version_hash)
+        self.assertTrue(json.loads(truncated.original_json)["source_text_truncated"])
+
     def test_invalid_explicit_material_is_not_stringified(self):
         for changes in ({"ext_id": True}, {"source_text": {}}, {"facts": []},
-                        {"subscription": []}, {"content_kind": 3}, {"source_text_complete": "true"},
+                        {"subscription": []}, {"content_kind": 3}, {"source_text_complete": "true"}, {"source_text_truncated": "true"},
                         {"referenced_urls": [{"role": "article", "url": []}]},
                         {"observed_ts": float("nan")}, {"pub_ts": -1}):
             with self.subTest(changes=changes), self.assertRaises(SourceContractError):

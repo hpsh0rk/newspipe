@@ -153,6 +153,14 @@ class StoryWebTests(unittest.TestCase):
             self.assertIn(label, self.get(base, path))
         self.assertEqual(self.files(), before)
 
+    def test_oversized_cursor_is_a_visible_validation_error_not_a_broken_request(self):
+        seed(self.store)
+        base = self.serve()
+        before = self.files()
+        page = self.get(base, "/items?story_preview=1&after=9223372036854775808")
+        self.assertIn("分页参数", page)
+        self.assertEqual(self.files(), before)
+
     def test_original_evidence_is_escaped_and_secret_links_are_not_clickable(self):
         draft = prepare_observation("one", "rsshub", article(title='<script>alert("x")</script>',
             source_text='Authorization: PRIVATE\nhttps://user:PRIVATE@example.com/a?token=PRIVATE',

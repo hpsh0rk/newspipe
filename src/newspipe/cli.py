@@ -728,7 +728,7 @@ def _story_read(command, fn):
         return result.fail(command, "E_RUNTIME", str(exc), details={"storage_code": exc.code},
                            hint="检查原始版本存储与备份；读取不会自动修复，也不会重新采集")
     except ValueError:
-        return result.fail(command, "E_VALIDATION", "分页参数需要 after >= 0，limit 为 1..100 的整数",
+        return result.fail(command, "E_VALIDATION", "分页参数需要 after 在 SQLite 非负整数范围内，limit 为 1..100 的整数",
                            hint="使用 --after 0 --limit 20 重试，只读数据不受影响")
 
 

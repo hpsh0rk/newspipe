@@ -1,15 +1,17 @@
 """Store-owned history is durable, read-only to consumers, and legacy-safe."""
 from datetime import datetime, timedelta
 import json
+import os
 from pathlib import Path
 import sqlite3
+import stat
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
 from newspipe import state
 from newspipe.observations import prepare_observation
-from newspipe.story_matching import rank_candidates
+from newspipe.story_matching import propose_relation, rank_candidates
 from newspipe.story_state import Ledger, StoryStorageError
 from test_observations import article, TEXT
 
@@ -211,3 +213,87 @@ class StoryStateTests(unittest.TestCase):
         for after, limit in ((-1, 50), (0, 0), (0, 101), (0, True)):
             with self.assertRaises(ValueError):
                 self.store.observations(after=after, limit=limit)
+
+    def test_public_text_and_nested_facts_redact_mixed_case_urls_and_credentials(self):
+        draft = self.draft(title="HTTPS://user:TITLE_PRIVATE@example.com/a?token=TITLE_PRIVATE",
+            source_text='HtTpS://example.com/a?token=BODY_PRIVATE\n{"Authorization":"BODY_HEADER_PRIVATE"}',
+            facts={"version": 2, "credentials": {"api_key": "FACT_PRIVATE", "Authorization": "Bearer HEADER_PRIVATE"},
+                   "links": ["HTTPS://example.com/a?token=FACT_URL_PRIVATE"]})
+        self.record([draft])
+        before = self.db().read_bytes()
+        for output in (self.store.observation(draft.observation_id), self.store.observations()):
+            self.assertNotIn("PRIVATE", json.dumps(output))
+        facts = json.loads(self.store.observation(draft.observation_id)["evidence"]["facts_text"])
+        self.assertEqual(facts["version"], 2)
+        self.assertEqual(facts["credentials"]["api_key"], "[redacted]")
+        self.assertEqual(self.db().read_bytes(), before)
+        with sqlite3.connect(self.db()) as conn:
+            original = conn.execute("SELECT original_json FROM observations").fetchone()[0]
+        self.assertIn("FACT_PRIVATE", original)
+        long = self.draft(2, facts={"api_key": "LONG_PRIVATE", "long": "x" * 21000})
+        self.record([long])
+        output = self.store.observation(long.observation_id)
+        self.assertNotIn("LONG_PRIVATE", json.dumps(output))
+        self.assertTrue(output["evidence"]["facts_truncated"])
+
+    def test_stale_capture_does_not_rewind_contested_latest_but_keeps_originals(self):
+        a, b, c = self.draft(), self.draft(source_text=TEXT + " New corrected evidence."), self.draft(2)
+        self.record([a])
+        slow = self.snapshot([a, c])
+        self.record([b])
+        active = self.store.story_status()
+        receipt = self.record([a, c], snapshot=slow)
+        self.assertEqual(receipt["status"], "stale_history")
+        latest = self.snapshot([b, c]).latest_by_identity
+        self.assertEqual(latest[a.identity_hash].observation_id, b.observation_id)
+        self.assertEqual(latest[c.identity_hash].observation_id, c.observation_id)
+        self.assertEqual(self.store.story_status()["activation_id"], active["activation_id"])
+        self.assertEqual(propose_relation(b, latest[b.identity_hash])["reason"], "same_version")
+        self.assertEqual(self.store.story_status()["observation_count"], 3)
+
+    def test_multiple_native_versions_in_one_capture_advance_in_order(self):
+        a, b = self.draft(), self.draft(source_text=TEXT + " Second version in the same capture.")
+        self.record([a, b])
+        latest = self.snapshot([b]).latest_by_identity
+        self.assertEqual(latest[a.identity_hash].observation_id, b.observation_id)
+
+    def test_raw_ledger_and_journal_are_private_on_writer_path_only(self):
+        previous = os.umask(0o022)
+        try:
+            self.record([self.draft(extra={"Authorization": "RAW_PRIVATE"})])
+        finally:
+            os.umask(previous)
+        self.assertEqual(stat.S_IMODE(self.db().stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(self.db().parent.stat().st_mode), 0o700)
+
+        with sqlite3.connect(self.db()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("UPDATE metadata SET captures=captures+1")
+            journal = Path(str(self.db()) + "-journal")
+            self.assertEqual(stat.S_IMODE(journal.stat().st_mode), 0o600)
+            conn.rollback()
+        self.db().chmod(0o644)
+        self.db().parent.chmod(0o755)
+        self.store.story_status()
+        self.store.observations()
+        self.assertEqual(stat.S_IMODE(self.db().stat().st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE(self.db().parent.stat().st_mode), 0o755)
+        self.record([self.draft()])
+        self.assertEqual(stat.S_IMODE(self.db().stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(self.db().parent.stat().st_mode), 0o700)
+
+    def test_relative_news_directory_remains_a_valid_read_contract(self):
+        self.record([self.draft()])
+        relative = state.Store(Path(os.path.relpath(self.store.news_dir)))
+        self.assertEqual(relative.story_status()["observation_count"], 1)
+        self.assertEqual(relative.observations()["observations"][0]["observation_id"], self.draft().observation_id)
+
+    def test_detail_filters_own_proposals_before_the_capture_display_cap(self):
+        first = self.draft()
+        self.record([first])
+        drafts = [self.draft(n) for n in range(2, 204)]
+        self.record(drafts)
+        chosen = max(drafts, key=lambda d: d.observation_id)
+        receipt = self.store.story_preview(observation_id=chosen.observation_id)["receipts"][0]
+        self.assertEqual(len(receipt["proposals"]), 1)
+        self.assertEqual(receipt["proposals"][0]["current_id"], chosen.observation_id)

@@ -158,7 +158,7 @@ def drilldown(page):
         if evidence["text_truncated"]:
             body += '<p class="hint">此处正文已截断至 20,000 字符；私有原始记录仍完整保留。</p>'
         if not evidence["text_complete"]:
-            body += '<p class="hint">来源未声明完整正文，不作为确定副本证据。</p>'
+            body += '<p class="hint">来源未提供可用的完整正文声明，不作为确定副本证据。</p>'
         body += '</details><details><summary>证据与溯源</summary><dl class="receipt">'
         for label, value in (("版本 ID", row["observation_id"]), ("提取版本", row["extractor_version"]),
                              ("历史来源", row["origin"]), ("发布时间", _time(row["pub_ts"])), ("版本指纹", row["version_hash"])):

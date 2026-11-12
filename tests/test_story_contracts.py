@@ -89,11 +89,18 @@ class StoryContractTests(unittest.TestCase):
 
     def test_unknown_detail_and_invalid_pagination_have_categorical_errors(self):
         self.assertEqual(self.run_cli("observations", "show", "ob_missing").error["code"], "E_NOT_FOUND")
-        for args in (("observations", "list", "--after", "-1"), ("stories", "preview", "--limit", "101")):
+        for args in (("observations", "list", "--after", "-1"), ("stories", "preview", "--limit", "101"),
+                     ("stories", "preview", "--after", "9223372036854775808")):
             out = self.run_cli(*args)
             self.assertEqual(out.error["code"], "E_VALIDATION", out.as_dict())
             self.assertEqual(out.exit_code, 4)
             self.assertIsNone(out.data)
+
+    def test_oversized_cursor_is_validation_even_with_initialized_history(self):
+        seed(self.store)
+        for command in (("observations", "list"), ("stories", "preview")):
+            out = self.run_cli(*command, "--after", "9223372036854775808")
+            self.assertEqual(out.error["code"], "E_VALIDATION", out.as_dict())
 
     def test_corrupt_and_locked_storage_are_not_empty_success(self):
         seed(self.store)

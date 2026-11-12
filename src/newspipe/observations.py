@@ -139,13 +139,14 @@ def prepare_observation(source: str, adapter: str, item: dict) -> ObservationDra
         canonical_reference(ref["url"], ref.get("role"))
         refs.append(SourceReference(ref["role"], ref["url"]))
     complete = item.get("source_text_complete", False)
-    if type(complete) is not bool:
+    truncated = item.get("source_text_truncated", False)
+    if type(complete) is not bool or type(truncated) is not bool:
         raise SourceContractError("Source-text completeness must be an explicit boolean.")
     evidence = SourceEvidence(_text(item.get("title")),
                               _text(item.get("source_text", item.get("summary"))),
                               _json(_facts(facts)), tuple(refs),
                               _text(item.get("original_url") or item.get("url")),
-                              complete and bool(item.get("source_text")))
+                              complete and not truncated and bool(item.get("source_text")))
     identity = _hash([source, adapter, partition, identity_key(native)])
     content = [kind, evidence.title, evidence.text, evidence.facts_json,
                sorted(canonical_reference(r.url, r.role) for r in refs), evidence.text_complete]

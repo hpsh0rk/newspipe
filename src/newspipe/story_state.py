@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 import json
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -59,8 +60,8 @@ PRAGMA user_version=1;
 
 
 def _pagination(after, limit):
-    if type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= 100:
-        raise ValueError("Pagination requires after >=0 and limit 1..100.")
+    if type(after) is not int or not 0 <= after <= 9223372036854775807 or type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("Pagination requires a nonnegative SQLite integer cursor and limit 1..100.")
 
 
 def _reference(url, role="permalink", *, truncated=False):
@@ -74,8 +75,32 @@ def _reference(url, role="permalink", *, truncated=False):
 
 def _text(text, limit=20000):
     text = text[:limit]
-    text = re.sub(r"https?://[^\s<>\"\\]+", lambda m: safe_url(m[0]), text)
-    return re.sub(r"(?im)\b(authorization|cookie|api[-_]key)\s*:\s*[^\n]+", r"\1: [redacted]", text)
+    text = re.sub(r"https?://[^\s<>\"\\]+", lambda m: safe_url(m[0]), text, flags=re.IGNORECASE)
+    return re.sub(r"(?im)\b(authorization|cookie|api[-_]key)[\"']?\s*:\s*[^\n]+", r"\1: [redacted]", text)
+
+
+def _facts_text(text, *, truncated=False):
+    # Never parse a clipped JSON prefix or expose unredacted keys from it.
+    if truncated:
+        return "[structured facts display omitted: stored original exceeds 20,000 characters]"
+    sensitive = {"authorization", "cookie", "setcookie", "apikey", "accesskey", "accesstoken",
+                 "refreshtoken", "token", "password", "secret", "clientsecret", "appsecret"}
+
+    def redact(value, depth=0):
+        if depth > 16:
+            return "[nested facts omitted]"
+        if isinstance(value, dict):
+            return {_text(key): "[redacted]" if re.sub(r"[-_\s]", "", key).casefold() in sensitive
+                    else redact(item, depth + 1) for key, item in value.items()}
+        if isinstance(value, list):
+            return [redact(item, depth + 1) for item in value]
+        return _text(value) if isinstance(value, str) else value
+
+    try:
+        shown = json.dumps(redact(json.loads(text)), ensure_ascii=False, separators=(",", ":"))
+        return shown if len(shown) <= 20000 else "[structured facts display omitted: safe projection exceeds 20,000 characters]"
+    except (ValueError, RecursionError):
+        return "[structured facts cannot be safely displayed; original is retained]"
 
 
 class Ledger:
@@ -91,8 +116,13 @@ class Ledger:
                 yield None
                 return
             if write:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(str(self.path) if write else self.path.as_uri() + "?mode=ro",
+                self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                self.path.parent.chmod(0o700)
+                if not existed:
+                    descriptor = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+                    os.close(descriptor)
+                self.path.chmod(0o600)
+            conn = sqlite3.connect(str(self.path) if write else self.path.resolve().as_uri() + "?mode=ro",
                                    uri=not write, timeout=0.25, isolation_level=None)
             conn.row_factory = sqlite3.Row
             if write and not existed:
@@ -153,7 +183,8 @@ class Ledger:
                 "extractor_version": row["extractor_version"], "pub_ts": row["pub_ts"],
                 "observed_ts": row["observed_ts"], "first_seen": row["first_seen"], "origin": row["origin"],
                 "evidence": {"title": _text(row["title"], 500), "text": _text(row["body"]),
-                             "facts_text": _text(row["facts_json"]), "text_complete": bool(row["complete"]),
+                             "facts_text": _facts_text(row["facts_json"], truncated=row["facts_length"] > 20000),
+                             "text_complete": bool(row["complete"]),
                              "text_truncated": row["body_length"] > 20000,
                              "facts_truncated": row["facts_length"] > 20000,
                              "references": [_reference(r["url"], r["role"], truncated=r.get("truncated", False)) for r in json.loads(row["refs_json"])],
@@ -229,6 +260,8 @@ class Ledger:
             inserted, baseline_inserted, repeated = 0, 0, 0
             limitations = set(snapshot.limitations)
             blocked, item_rows = set(), []
+            # Stale originals still persist, but only uncontested identities may advance.
+            expected_latest = {identity: draft.observation_id for identity, draft in snapshot.latest_by_identity.items()}
             for draft in drafts if mode == "observe" else []:
                 old = snapshot.latest_by_identity.get(draft.identity_hash)
                 baseline = baselines.get(str(draft.native_id), {}) if old is None else {}
@@ -246,7 +279,14 @@ class Ledger:
                 repeated += not added
                 conn.execute("INSERT INTO seen VALUES (?,?,?) ON CONFLICT(observation_id) DO UPDATE SET last_seen=max(last_seen,excluded.last_seen),capture_sequence=excluded.capture_sequence",
                              (draft.observation_id, at.timestamp(), sequence))
-                conn.execute("INSERT INTO latest VALUES (?,?) ON CONFLICT(identity_hash) DO UPDATE SET observation_id=excluded.observation_id", (draft.identity_hash, draft.observation_id))
+                expected = expected_latest.get(draft.identity_hash)
+                if expected is None:
+                    updated = conn.execute("INSERT OR IGNORE INTO latest VALUES (?,?)", (draft.identity_hash, draft.observation_id))
+                else:
+                    updated = conn.execute("UPDATE latest SET observation_id=? WHERE identity_hash=? AND observation_id=?",
+                                           (draft.observation_id, draft.identity_hash, expected))
+                if updated.rowcount:
+                    expected_latest[draft.identity_hash] = draft.observation_id
                 item_rows.append((sequence, draft.observation_id, old.observation_id if old else material.observation_id if material else None, reason))
             accepted = [p for p in proposals if status == "recorded" and mode == "observe" and p["current_id"] not in blocked]
             conn.execute("INSERT INTO captures VALUES (?,?,?,?,?,?,?,?)", (sequence, at.timestamp(), mode, config_revision, activation, status,
@@ -269,7 +309,7 @@ class Ledger:
             receipts = []
             for row in rows[:limit]:
                 items = conn.execute("SELECT observation_id,baseline_id,baseline_reason FROM capture_items WHERE capture_sequence=? LIMIT 101", (row["sequence"],)).fetchall()
-                proposals = conn.execute("SELECT current_id,previous_id,relation,score,reason,fields_json,matcher_version FROM proposals WHERE capture_sequence=? ORDER BY CASE relation WHEN 'unclassified_change' THEN 0 WHEN 'exact_copy' THEN 1 ELSE 2 END,current_id,score DESC,previous_id LIMIT 201", (row["sequence"],)).fetchall()
+                proposals = conn.execute("SELECT current_id,previous_id,relation,score,reason,fields_json,matcher_version FROM proposals WHERE capture_sequence=? AND (?='' OR current_id=?) ORDER BY CASE relation WHEN 'unclassified_change' THEN 0 WHEN 'exact_copy' THEN 1 ELSE 2 END,current_id,score DESC,previous_id LIMIT 201", (row["sequence"], observation_id, observation_id)).fetchall()
                 limitations = json.loads(row["limitations_json"])
                 if len(items) > 100 or len(proposals) > 200:
                     limitations.append("receipt_display_truncated")
