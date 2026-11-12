@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from typing import Iterable
+from newspipe.source_contract import identity_key
 
 
 def fresh(items: Iterable[dict], store, source: str) -> list[dict]:
@@ -13,7 +14,7 @@ def fresh(items: Iterable[dict], store, source: str) -> list[dict]:
     out: list[dict] = []
     batch_seen: set[str] = set()
     for it in items:
-        ext_id = str(it.get("ext_id") or "")
+        ext_id = identity_key(it.get("ext_id"))
         if not ext_id or ext_id in seen or ext_id in batch_seen:
             continue
         batch_seen.add(ext_id)

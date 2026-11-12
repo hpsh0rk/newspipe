@@ -39,7 +39,7 @@ from newspipe.errors import ConfigError, DeliveryError, InboundError, NewsError
 SLOT_TOLERANCE = timedelta(minutes=15)
 SLOT_MAX_ATTEMPTS = 3
 SLOT_RETRY_SECONDS = 60
-SLOT_FAILURES = {"error", "config_missing", "send_failed", "overflow", "retry_exhausted", "send_result_unknown", "retry_wait"}
+SLOT_FAILURES = {"error", "partial_failure", "config_missing", "send_failed", "overflow", "retry_exhausted", "send_result_unknown", "retry_wait"}
 
 
 def parse_slot_time(text: str) -> tuple[int, int]:
@@ -188,6 +188,8 @@ def _run_once(cfg: config.Config, store: state.Store, *, now: datetime,
             runs.extend(output)
             if not dry:
                 statuses = [run.status for run in output]
+                statuses += ["partial_failure" for run in output
+                             if run.collection and run.collection["status"] == "partial_failure"]
                 complete = bool(output or source is None) and not any(s in SLOT_FAILURES for s in statuses)
                 entry.update(complete=complete, status=next((s for s in statuses if s in SLOT_FAILURES),
                                                            "ok" if complete else "error"))

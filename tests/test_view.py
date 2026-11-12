@@ -28,6 +28,8 @@ for _p in (str(SRC_ROOT), str(REPO_ROOT)):
         sys.path.insert(0, _p)
 
 from newspipe import config, inbound, net, state, view  # noqa: E402
+from newspipe.source_contract import FetchResult, SubscriptionReport
+from unittest.mock import patch
 
 from test_contract import SOURCES_YAML  # noqa: E402
 
@@ -74,6 +76,37 @@ class ViewBuildTests(unittest.TestCase):
         self.assertEqual(row["status_tone"], "muted")
         self.assertEqual(row["status_detail"]["fetched"], 2)
         self.assertEqual(row["status_note"], "攒批")
+
+    def test_collection_diagnostics_are_safe_read_only_and_visible_in_detail(self):
+        record = getattr(self.store, "record_collection_report", None)
+        self.assertIsNotNone(record, "collection diagnostics must be Store-owned")
+        result = FetchResult([], (
+            SubscriptionReport("https://user:password@host/?token=sensitive-input", "empty"),
+            SubscriptionReport("Authorization: Bearer sensitive-input", "failure", code="permission")))
+        record("aihot", result.summary(), at=NOW)
+        self.store.heartbeat("aihot", status="throttled")
+        before = {p: p.read_bytes() for p in self.news.rglob("*") if p.is_file()}
+        with patch("newspipe.pipeline._adapter", side_effect=AssertionError("collection")), patch(
+                "newspipe.net.request", side_effect=AssertionError("network")):
+            payload = view.build(self.news, now=NOW)
+            row = next(r for r in payload["sources"] if r["name"] == "aihot")
+            detail = view._drawer_body(row, [])
+        self.assertEqual(before, {p: p.read_bytes() for p in self.news.rglob("*") if p.is_file()})
+        self.assertEqual(row["status_label"], "部分采集失败")
+        self.assertEqual(row["collection"]["failed"], 1)
+        self.assertIn("permission", detail)
+        self.assertIn("订阅 2", detail)
+        for unsafe in ("password", "sensitive-input", str(self.news), "collection_reports/"):
+            self.assertNotIn(unsafe, json.dumps(row) + detail)
+
+    def test_collection_failure_does_not_hide_unresolved_delivery(self):
+        record = getattr(self.store, "record_collection_report", None)
+        self.assertIsNotNone(record)
+        record("aihot", FetchResult([], (SubscriptionReport("feed", "failure", code="network"),)).summary(), at=NOW)
+        self.store.heartbeat("aihot", status="send_result_unknown")
+        row = next(r for r in view.build(self.news, now=NOW)["sources"] if r["name"] == "aihot")
+        self.assertEqual(row["status"], "send_result_unknown")
+        self.assertEqual(row["collection"]["status"], "failure")
 
     def test_collection_and_never_statuses_have_human_labels(self) -> None:
         for status, label, tone in (("never", "从未运行", "muted"),

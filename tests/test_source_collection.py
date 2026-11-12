@@ -8,7 +8,8 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from newspipe import channel, config, pipeline, policy, runtime, state
+from newspipe import channel, cli, config, events, pipeline, policy, runtime, service, state, view
+from types import SimpleNamespace
 from newspipe.source_contract import FetchResult, SubscriptionReport
 from test_news_pipeline import _item, _src
 
@@ -278,6 +279,109 @@ class SourceCollectionTests(unittest.TestCase):
         second = pipeline.run_poll(self.cfg, self.store, now=NOW + timedelta(minutes=1))[0]
         self.assertEqual(second.status, "throttled")
         self.assertEqual(self.adapter.fetch.call_count, 1)
+
+    def test_report_survives_notification_throttle_and_restart(self):
+        self.adapter.fetch.return_value = self.result(failed=True)
+        self.collect()
+        pipeline.notify_source(self.cfg, self.store, "src", now=NOW)
+        pipeline.run_poll(self.cfg, self.store, now=NOW + timedelta(minutes=1), collect_only=True)
+        self.store = state.Store(self.store.news_dir)
+        row = view._source_row(self.source, self.store, now=NOW + timedelta(minutes=1))
+        self.assertEqual(row["status"], "partial_failure")
+        self.assertEqual(row["activity_status"], "throttled")
+        self.assertEqual(row["collection"]["failed"], 1)
+        self.assertEqual(row["collection"]["fetched"], 1)
+        self.assertEqual(row["status_tone"], "warn")
+        self.adapter.fetch.return_value = [_item(2)]
+        self.collect()
+        row = view._source_row(self.source, self.store, now=NOW)
+        self.assertNotIn("collection", row)
+        self.assertEqual(row["status"], "collected")
+
+    def test_partial_result_is_a_cli_warning(self):
+        self.adapter.fetch.return_value = self.result(failed=True)
+        with patch.object(cli, "_load", return_value=(self.cfg, self.store)), patch.object(cli, "_now", return_value=NOW):
+            result = cli._sub_phase(SimpleNamespace(cmd="collect", source="src", dry=False), self.store.news_dir)
+        self.assertTrue(result.ok)
+        self.assertTrue(result.warnings, "partial success needs a warning, not quiet success")
+
+    def test_partial_result_does_not_complete_slot(self):
+        self.adapter.fetch.return_value = self.result(failed=True)
+        for bound in (False, True):
+            with self.subTest(bound=bound):
+                self.store = state.Store(Path(self.tmp.name) / ("slot" + str(bound)))
+                source = replace(_src(trigger="slot"), notify=policy.NotifyBinding("p") if bound else None)
+                cfg = replace(self.cfg, slots={"am": "10:00"}, sources={"src": source})
+                self.adapter.fetch.reset_mock()
+                service.run_once(cfg, self.store, now=NOW, logger=lambda _: None)
+                progress = service.load_runs(self.store.news_dir)["slot_progress"][NOW.date().isoformat()]["am"]["src"]
+                self.assertFalse(progress["complete"])
+                self.assertEqual(progress["status"], "partial_failure")
+                service.run_once(cfg, self.store, now=NOW + timedelta(minutes=2), logger=lambda _: None)
+                self.assertEqual(self.adapter.fetch.call_count, 2)
+
+    def test_integer_id_zero_is_durable_delivered_once_and_never_rewritten(self):
+        item = _item(1, ext_id=0, pub_ts=NOW.timestamp())
+        self.adapter.fetch.return_value = self.result([item], watermark=NOW.timestamp())
+        self.assertEqual(self.collect().new, 1)
+        self.assertEqual(self.store.peek_pending("src", 1)[0]["ext_id"], 0)
+        self.assertEqual(pipeline.notify_source(self.cfg, self.store, "src", now=NOW).card, "sent")
+        rows = self.store.root / "pushed" / "src.jsonl"
+        before = rows.read_bytes()
+        self.assertIs(type(json.loads(before.decode().strip())["ext_id"]), int)
+        self.assertEqual(self.collect().new, 0)
+        self.assertEqual(self.store.pending_count("src"), 0)
+        self.assertEqual(rows.read_bytes(), before)
+        self.assertEqual(self.send.call_count, 1)
+
+    def test_existing_integer_pushed_id_is_not_replayed_or_rewritten(self):
+        self.store.record_pushed("src", [_item(1, ext_id=7)], NOW.date().isoformat())
+        path = self.store.root / "pushed" / "src.jsonl"
+        before = path.read_bytes()
+        self.adapter.fetch.return_value = self.result([_item(1, ext_id=7)], watermark=NOW.timestamp())
+        self.assertEqual(self.collect().new, 0)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_malformed_known_fields_and_surrogates_record_safe_failure(self):
+        self.cfg = replace(self.cfg, sources={"src": replace(self.source, filter=replace(self.source.filter, rank="score_desc"))})
+        for index, value in enumerate((self.result([_item(1, score={"bad": 1})]), self.result([_item(1, summary="\ud800")]),
+                      FetchResult([], (SubscriptionReport("\ud800", "empty"),)))):
+            with self.subTest(value=value):
+                self.store = state.Store(Path(self.tmp.name) / ("malformed" + str(index)))
+                self.store.set_cursor("src", OLD.timestamp(), at=OLD)
+                self.adapter.fetch.return_value = value
+                run = self.collect()
+                self.assertEqual(run.status, "error")
+                self.assertEqual(run.collection["reports"][0]["code"], "invalid_response")
+                self.assertEqual(self.store.status("src")["status"], "error")
+                self.assertEqual(self.store.cursor("src"), OLD.timestamp())
+                self.assertEqual(self.store.pending_count("src"), 0)
+
+    def test_confirmed_partial_slot_repair_still_retries_failed_acquisition(self):
+        source = _src(trigger="slot")
+        self.cfg = replace(self.cfg, slots={"am": "10:00"}, sources={"src": source})
+        self.adapter.fetch.return_value = self.result(failed=True)
+        append = events.append
+        def interrupted(news_dir, event_type, **kw):
+            if event_type == "delivered":
+                raise OSError("local receipt interruption")
+            return append(news_dir, event_type, **kw)
+        with patch.object(events, "append", side_effect=interrupted):
+            service.run_once(self.cfg, self.store, now=NOW, logger=lambda _: None)
+        before = self.store.unfinished_batch("src")
+        self.assertTrue(before["delivery_effect_done"])
+        self.adapter.fetch.return_value = self.result([_item(2)], watermark=NOW.timestamp())
+        service.run_once(self.cfg, self.store, now=NOW + timedelta(minutes=2), logger=lambda _: None)
+        self.assertEqual(self.adapter.fetch.call_count, 2, "receipt repair cannot complete a partially acquired slot")
+        self.assertEqual(self.store.pushed_ids("src"), {"e1", "e2"})
+        self.assertEqual(self.send.call_count, 1, "confirmed remote send must never be repeated")
+
+    def test_cleared_newer_diagnostic_cannot_resurrect_older_inflight_failure(self):
+        report = FetchResult([], (SubscriptionReport("feed", "failure", code="network"),)).summary()
+        self.store.record_collection_report("src", report, at=NOW)
+        self.store.clear_collection_report("src", at=NOW + timedelta(minutes=1))
+        self.store.record_collection_report("src", report, at=NOW)
+        self.assertIsNone(self.store.collection_report("src"))
 
 
 if __name__ == "__main__":

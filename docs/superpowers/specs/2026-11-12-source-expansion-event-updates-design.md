@@ -9,8 +9,10 @@ discarded as duplicates or overwriting earlier information.
 
 The user confirmed returning to this original design on 2026-11-12 after
 discussing, then deferring, MCP and Skill integration. Those integrations are
-not part of this scope. Product implementation has not begun; the next artifact
-is the independently executable source-foundation implementation plan.
+not part of this scope. The five-task source foundation is implemented and
+independently reviewed; see [foundation acceptance](../../source-foundation-acceptance.md).
+Story observations, source-family expansion and append-only differences are still
+separate remaining subprojects, not claimed as delivered by this foundation.
 The user previously requested a separate commit for each implementation stage.
 
 The goal is less repeated interruption without losing new facts or provenance.

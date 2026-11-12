@@ -16,6 +16,10 @@ existing PyYAML and file locking. No new runtime dependency.
 
 **Spec:** `docs/superpowers/specs/2026-11-12-source-expansion-event-updates-design.md`
 
+**Status:** Complete on 2026-11-12. Final acceptance: 767 tests on both Python
+3.11 and 3.14 with mandatory browser/JS coverage and no skips. See
+`docs/source-foundation-acceptance.md` for review fixes and the remaining scope.
+
 ## Global Constraints
 
 - No MCP or Skill integration and no Horizon runtime dependency.
@@ -89,15 +93,15 @@ existing PyYAML and file locking. No new runtime dependency.
   NaN/infinite and negative values are invalid. Legacy missing/zero publication
   timestamps remain unknown and do not acquire a fabricated publication time.
 
-- [ ] Write tests for all four aggregate statuses, legacy item preservation,
+- [x] Write tests for all four aggregate statuses, legacy item preservation,
   generator single consumption, malformed outputs and JSON-safe diagnostics.
-- [ ] Write identity tests for differing long IDs with the same 120-character
+- [x] Write identity tests for differing long IDs with the same 120-character
   prefix, differing partitions, stable repeated inputs and non-ASCII native IDs.
-- [ ] Write timestamp tests covering unknown/zero and invalid boolean/NaN values.
-- [ ] Run `python -m unittest discover -s tests -p test_source_contract.py -v`;
+- [x] Write timestamp tests covering unknown/zero and invalid boolean/NaN values.
+- [x] Run `python -m unittest discover -s tests -p test_source_contract.py -v`;
   confirm failures are missing contract behavior rather than fixture mistakes.
-- [ ] Implement the pure module; use no network, SDK imports or Store access.
-- [ ] Rerun the focused tests and existing item/pipeline tests, then commit
+- [x] Implement the pure module; use no network, SDK imports or Store access.
+- [x] Rerun the focused tests and existing item/pipeline tests, then commit
   `feat: add compatible source acquisition contracts`.
 
 ## Task 2: Pipeline Result Integration And Safe Watermarks
@@ -126,21 +130,21 @@ existing PyYAML and file locking. No new runtime dependency.
   and commit idempotently under a short lock. A concurrent completed collection
   cannot have its watermark rolled back by a slower or partial result.
 
-- [ ] Add mixed-feed success/failure tests: one good item remains pending, the
+- [x] Add mixed-feed success/failure tests: one good item remains pending, the
   prior cursor remains unchanged, and diagnostics report partial failure.
-- [ ] Add all-failed, empty-success, malformed-output and safe-diagnostic tests,
+- [x] Add all-failed, empty-success, malformed-output and safe-diagnostic tests,
   including a provider error containing an authorization-like value.
-- [ ] Add tests that dry-run writes nothing and notification does not fetch,
+- [x] Add tests that dry-run writes nothing and notification does not fetch,
   normalize or call a model when consuming existing pending content.
-- [ ] Add a frozen-send recovery test: new collection reports cannot modify its
+- [x] Add a frozen-send recovery test: new collection reports cannot modify its
   saved target, item membership, payload, send UUID or reserved sequence.
-- [ ] Add lock-scope and interleaved-result tests: transport runs outside the
+- [x] Add lock-scope and interleaved-result tests: transport runs outside the
   writer lock, while commit never moves an already advanced cursor backwards.
-- [ ] Run `python -m unittest discover -s tests -p test_source_collection.py -v`
+- [x] Run `python -m unittest discover -s tests -p test_source_collection.py -v`
   and watch the new assertions fail before production edits.
-- [ ] Implement conversion once at the acquisition boundary, retaining current
+- [x] Implement conversion once at the acquisition boundary, retaining current
   filter/dedup/delivery ordering and original items through queue persistence.
-- [ ] Rerun focused source/notification/reliability tests, then commit
+- [x] Rerun focused source/notification/reliability tests, then commit
   `feat: preserve partial source results and safe collection cursors`.
 
 ## Task 3: Separate Acquisition Attempts From Content Cursors
@@ -160,16 +164,16 @@ notification, service and pipeline tests.
 - Existing cursor records remain the incremental-content boundary; attempt
   timestamps survive restart and do not alter pushed IDs or pending membership.
 
-- [ ] Test failed and partial automatic collection followed by a second tick
+- [x] Test failed and partial automatic collection followed by a second tick
   inside the interval: no second transport call, cursor unchanged, pending retained.
-- [ ] Test retry after the interval, manual force, dry-run, restart and missing
+- [x] Test retry after the interval, manual force, dry-run, restart and missing
   new attempt records with legacy timestamp fallback.
-- [ ] Test an advancing injected clock and timezone-aware/naive fixtures using
+- [x] Test an advancing injected clock and timezone-aware/naive fixtures using
   the same execution-clock conventions as current clock/scheduler tests.
-- [ ] Run focused tests and verify the missing attempt-clock failures.
-- [ ] Implement Store-owned atomic timestamps and scheduler integration; do not
+- [x] Run focused tests and verify the missing attempt-clock failures.
+- [x] Implement Store-owned atomic timestamps and scheduler integration; do not
   add network work under the writer lock or use heartbeat writes as the clock.
-- [ ] Rerun source, clock, notification and service tests, then commit
+- [x] Rerun source, clock, notification and service tests, then commit
   `fix: separate collection throttling from successful content cursors`.
 
 ## Task 4: Code-Owned Adapter Descriptions And Settings Metadata
@@ -192,20 +196,20 @@ notification, service and pipeline tests.
 - This task provides metadata only; source-specific dialogs/settings are delivered
   with their upgraded source families, not a new placeholder plugin editor.
 
-- [ ] Test built-in labels/capabilities and custom adapter compatibility without
+- [x] Test built-in labels/capabilities and custom adapter compatibility without
   optional dependencies or network/credential access.
-- [ ] Test conflicting descriptor paths/types and every declared field's current
+- [x] Test conflicting descriptor paths/types and every declared field's current
   value, including false, zero, empty lists and preserved unrecognized legacy extras.
-- [ ] Test load/edit/copy/check round trips with a synthetic code-owned descriptor;
+- [x] Test load/edit/copy/check round trips with a synthetic code-owned descriptor;
   preserve CLI config's authoritative validation, atomic write and optimistic hash.
   Until adapter-specific editors are delivered, metadata-only custom settings must
   not be represented as supported editable controls; do not claim web acceptance
   from these CLI round trips.
-- [ ] Run `python -m unittest discover -s tests -p test_source_registry.py -v`
+- [x] Run `python -m unittest discover -s tests -p test_source_registry.py -v`
   and verify missing metadata/round-trip assertions fail.
-- [ ] Implement the registry/schema composition; keep web field definitions owned
+- [x] Implement the registry/schema composition; keep web field definitions owned
   by config.py and do not modify user configuration or trigger discovery calls.
-- [ ] Rerun schema/config/page/action tests, then commit
+- [x] Rerun schema/config/page/action tests, then commit
   `feat: describe source capabilities through the configuration contract`.
 
 ## Task 5: Diagnostics Contract And Foundation Acceptance
@@ -221,18 +225,18 @@ notification, service and pipeline tests.
 - A short README section documents legacy result compatibility, structured result
   reports, partial-result watermark behavior and separate attempt throttling.
 
-- [ ] Add view tests proving counts/codes are visible while raw provider bodies,
+- [x] Add view tests proving counts/codes are visible while raw provider bodies,
   feed credentials, authentication headers and private state paths are absent.
-- [ ] Add regression tests for reporting persistence after a later throttle tick,
+- [x] Add regression tests for reporting persistence after a later throttle tick,
   and no real provider/model/send access in the fixture preview.
-- [ ] Run focused tests, implement additive report persistence/presentation and
+- [x] Run focused tests, implement additive report persistence/presentation and
   concise documentation, then rerun the same tests.
-- [ ] Run `NEWSPIPE_REQUIRE_JS_TESTS=1 NEWSPIPE_BROWSER_TESTS=1 python -m unittest discover -s tests`.
+- [x] Run `NEWSPIPE_REQUIRE_JS_TESTS=1 NEWSPIPE_BROWSER_TESTS=1 python -m unittest discover -s tests`.
   Success means all discovered tests pass with no JS/browser coverage skip.
-- [ ] Run `python3 scripts/scan_secrets.py` and `git diff --check`; both must exit 0.
-- [ ] Request a fresh read-only review of the foundation branch; fix actual
+- [x] Run `python3 scripts/scan_secrets.py` and `git diff --check`; both must exit 0.
+- [x] Request a fresh read-only review of the foundation branch; fix actual
   contract/cursor/identity regressions and rerun affected tests plus the full suite.
-- [ ] Commit `feat: expose safe source collection diagnostics` and report this
+- [x] Commit `feat: expose safe source collection diagnostics` and report this
   foundation as complete, not the entire source-expansion design. Do not merge/push.
 
 ## Remaining Subprojects

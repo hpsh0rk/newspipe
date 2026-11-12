@@ -28,7 +28,7 @@ from newspipe import channel, clock, dedup, delivery, enrich as enrich_mod, filt
 from newspipe import events, policy, render, runtime, scheduler, state
 from newspipe.errors import ConfigError, DeliveryError
 from newspipe.state import now_iso, today
-from newspipe.source_contract import FetchResult, SubscriptionReport, SourceContractError, normalize_fetch
+from newspipe.source_contract import FetchResult, SubscriptionReport, SourceContractError, identity_key, normalize_fetch
 
 
 def _record_event(store: state.Store, event_type: str, *, payload: dict[str, Any],
@@ -97,7 +97,7 @@ def _merge(first: list[dict], second: list[dict]) -> list[dict]:
     seen: set[str] = set()
     out: list[dict] = []
     for it in [*first, *second]:
-        key = str(it.get("ext_id") or "")
+        key = identity_key(it.get("ext_id"))
         if not key or key in seen:
             continue
         seen.add(key)
@@ -114,7 +114,7 @@ def _queued_ids(store: state.Store, source: str) -> set[str]:
         if not line.strip():
             continue
         try:
-            out.add(str(json.loads(line).get("ext_id") or ""))
+            out.add(identity_key(json.loads(line).get("ext_id")))
         except ValueError:
             continue
     return out
@@ -130,7 +130,7 @@ def _queue(store: state.Store, source: str, items: list[dict]) -> int:
     if not items:
         return 0
     known = _queued_ids(store, source) | store.pushed_ids(source)
-    todo = [it for it in items if str(it.get("ext_id") or "") not in known]
+    todo = [it for it in items if identity_key(it.get("ext_id")) not in known]
     return store.append_pending(source, todo) if todo else 0
 
 
@@ -147,6 +147,8 @@ def _acquire(cfg: Any, scfg: Any, since: float | None, run: SourceRun) -> FetchR
     try:
         result = normalize_fetch(_adapter(scfg.adapter).fetch(_adapter_config(cfg, scfg), since=since),
                                  source=scfg.name, adapter=scfg.adapter)
+        if result.reported:
+            run.collection = result.summary()
     except Exception as exc:
         code = ("configuration" if isinstance(exc, ConfigError) else
                 "invalid_response" if isinstance(exc, SourceContractError) else
@@ -158,8 +160,6 @@ def _acquire(cfg: Any, scfg: Any, since: float | None, run: SourceRun) -> FetchR
                     "network": "采集失败；检查服务可达性及访问权限"}[code]
         run.collection = FetchResult([], (SubscriptionReport(scfg.name, "failure", code=code),)).summary()
         return None
-    if result.reported:
-        run.collection = result.summary()
     if result.status == "failure":
         run.status, run.note = "error", "全部订阅采集失败；检查订阅诊断及消息源设置"
         return None
@@ -169,10 +169,18 @@ def _acquire(cfg: Any, scfg: Any, since: float | None, run: SourceRun) -> FetchR
 
 
 def _collection_failure(store: state.Store, run: SourceRun, digest: str, now: datetime) -> None:
+    _save_collection_report(store, run, now)
     store.heartbeat(run.source, status=run.status, digest=digest, note=run.note)
     _record_event(store, "failed", payload={"status": run.status, "error": run.note,
                                           "collection": run.collection},
                   source=run.source, slot="collect", digest=digest, now=now)
+
+
+def _save_collection_report(store: state.Store, run: SourceRun, now: datetime) -> None:
+    if run.collection is None:
+        store.clear_collection_report(run.source, at=now)
+    else:
+        store.record_collection_report(run.source, run.collection, at=now)
 
 
 def _commit_watermark(store: state.Store, name: str, result: FetchResult,
@@ -240,9 +248,9 @@ def _prepare_batch(cfg: Any, store: state.Store, scfg: Any, digest: str, slot: s
     # 回调 payload 里要带批次路径，而卡片是 write_batch 之前渲染的 ⇒ 这里先钉死
     batch["batch"] = store.batch_rel(batch["digest"], scfg.name, batch["slot"])
     merged = list(batch.get("items") or [])
-    known = {str(i.get("ext_id") or "") for i in merged}
+    known = {identity_key(i.get("ext_id")) for i in merged}
     for it in items:
-        key = str(it.get("ext_id") or "")
+        key = identity_key(it.get("ext_id"))
         if key and key not in known:
             merged.append(it)
             known.add(key)
@@ -281,8 +289,8 @@ def _enrich_new(cfg: Any, store: state.Store, scfg: Any, items: list[dict],
             it.setdefault("enrich_state", "off")
         return items, {}
     done = enrich_mod.enrich(todo, scfg, store, cfg.models, cfg.budget(), now=now)
-    by_key = {str(d.get("ext_id") or ""): d for d in done}
-    out = [by_key.get(str(it.get("ext_id") or ""), it) for it in items]
+    by_key = {identity_key(d.get("ext_id")): d for d in done}
+    out = [by_key.get(identity_key(it.get("ext_id")), it) for it in items]
     counts: dict[str, int] = {}
     for it in out:
         key = str(it.get("enrich_state") or "?")
@@ -302,7 +310,9 @@ def _process(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slot: str,
             for key, value in (unfinished.get("delivery_run") or {}).items():
                 setattr(run, key, value)
             recovered = _complete_delivery(store, unfinished, run)
-            if recovered.status != "ok" or (unfinished["digest"], unfinished["slot"]) == (digest, slot):
+            incomplete_collection = run.collection and run.collection["status"] in {"failure", "partial_failure"}
+            if (recovered.status != "ok" or (unfinished["digest"], unfinished["slot"]) == (digest, slot)
+                    and not incomplete_collection):
                 return recovered
             run = SourceRun(source=scfg.name, adapter=scfg.adapter)
             since = store.cursor(scfg.name) if mode == "poll" else None
@@ -345,6 +355,8 @@ def _process_locked(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
     if not dry and result.reported:
         _queue(store, scfg.name, fresh)
         _commit_watermark(store, scfg.name, result, since, kept, now)
+    if not dry:
+        _save_collection_report(store, run, now)
     unfinished = None if dry else store.unfinished_batch(scfg.name)
     if unfinished:
         fresh = _merge(list(unfinished.get("items") or []), fresh)
@@ -463,7 +475,10 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
 
     try:
         _begin_delivery(batch, cfg, digest, now)
-        batch["delivery_run"] = {key: getattr(run, key) for key in ("fetched", "kept", "new", "planned", "enrich")}
+        if not pinned:
+            batch["delivery_run"] = {key: getattr(run, key) for key in ("fetched", "kept", "new", "planned", "enrich")}
+            if run.collection is not None:
+                batch["delivery_run"]["collection"] = run.collection
         if not pinned:
             if mode == "poll":
                 batch["delivery_cursor"] = _watermark(since, kept, raw, acquisition_now)
@@ -714,6 +729,7 @@ def collect_source(cfg: Any, store: state.Store, name: str, *, now: datetime | N
         _queue(store, name, fresh)
         # Cursor commits after durable pending, even when delivery is paused or fails later.
         _commit_watermark(store, name, result, since, kept, now)
+        _save_collection_report(store, run, now)
         run.status = "collected" if result.complete else "partial_failure"
         run.queued = store.pending_count(name)
         store.heartbeat(name, status=run.status, digest=digest, fetched=run.fetched,

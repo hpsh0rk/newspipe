@@ -51,6 +51,7 @@ DEFAULT_STALE_AFTER = timedelta(hours=30)
 STATUS_LABELS: dict[str, tuple[str, str]] = {
     "never": ("从未运行", "muted"),
     "collected": ("已采集", "ok"),
+    "partial_failure": ("部分采集失败", "warn"),
     "ok": ("已运行", "ok"),
     "nothing_new": ("无新内容", "ok"),
     "state_only": ("只落 state", "ok"),
@@ -108,6 +109,14 @@ def _source_row(src: config.SourceConfig, store: state.Store, *, now: datetime) 
     from newspipe.notification_view import REASONS
     hb = store.status(src.name)
     status = str(hb.get("status") or "never")
+    activity_status = status
+    collection = store.collection_report(src.name)
+    if collection and status not in {"send_failed", "overflow", "retry_exhausted", "send_result_unknown",
+                                     "receipt_repair", "config_missing", "error"}:
+        if collection["status"] == "partial_failure":
+            status = "partial_failure"
+        elif collection["status"] == "failure":
+            status = "error"
     notification_tone = ("danger" if status in {"retry_exhausted", "send_result_unknown"} else
                          "warn" if status in {"global_budget_exceeded", "budget_attribution_incomplete", "receipt_repair"} else "muted")
     label, tone = STATUS_LABELS.get(status, (REASONS.get(status, f"未知状态（{status}）"), notification_tone))
@@ -116,7 +125,7 @@ def _source_row(src: config.SourceConfig, store: state.Store, *, now: datetime) 
     stale = _is_stale(status, ts, trigger, now)
     if stale:
         label, tone = "超期未运行", "warn"
-    return {
+    row = {
         "name": src.name,
         "enabled": src.enabled,
         "adapter": src.adapter,
@@ -151,6 +160,12 @@ def _source_row(src: config.SourceConfig, store: state.Store, *, now: datetime) 
         "pushed_total": len(store.pushed_ids(src.name)),
         "pending_total": store.pending_count(src.name),
     }
+    if collection:
+        row["collection"] = collection
+        row["activity_status"] = activity_status
+        if status == "error" and collection["status"] == "failure" and activity_status != "error":
+            row["status_label"] = "采集失败"
+    return row
 
 
 def _today_batches(store: state.Store, digest: str) -> list[dict[str, Any]]:
@@ -651,15 +666,30 @@ def _drawer_body(src: dict[str, Any], hist: list[dict[str, Any]]) -> str:
             + "</p>")
     else:
         produced_line = '<p class="note">还没有历史（没有批次落盘），所以不给产出统计。</p>'
+    collection = src.get("collection")
+    collection_line = ""
+    if collection:
+        reports = " · ".join(f"订阅 {r['index']}：{r['status']}"
+                             + (f" / {r['code']}" if r["code"] else "") for r in collection["reports"])
+        omitted = collection.get("omitted_reports", 0)
+        collection_line = ('<p class="note">最近采集：'
+                           + f"成功 {collection['successful']} / 失败 {collection['failed']} 个订阅"
+                           + f" · 获取 {collection['fetched']} 条 · {html.escape(collection['ts'])}</p>"
+                           + '<p class="note">' + html.escape(reports)
+                           + (f" · 另有 {omitted} 个订阅诊断未展开" if omitted else "") + '</p>')
+        if collection["status"] in {"partial_failure", "failure"}:
+            collection_line += '<p class="note">未推进内容游标；成功内容已保留，失败订阅等待下次采集重试。</p>'
+        collection_line += '<p class="note">最近调度/投递状态：' + html.escape(str(src.get("activity_status"))) + '</p>'
     return (
         f'<p class="note">最近心跳 <code>{html.escape(str(src.get("status_ts") or "从未"))}</code>'
         + (f' · {note}' if note else "") + "</p>"
         f'<p class="note">最近一次计数：<code>{html.escape(detail_txt)}</code></p>'
+        + collection_line
         + produced_line
         + '<p class="note">生效中的闸（可能拦下它的）：<br>' + "<br>".join(gates) + "</p>"
         f'<p class="note">{queue_note} · 去重台账 {src.get("pushed_total")} 条</p>'
         '<p class="note">⚠️ 历史拦截原因<b>没有落盘</b>（只留最后一次心跳）—— 要精确归因看 '
-        "<code>actions.log</code> 或 <code>state/status/</code>。")
+        '请通过 <code>newspipe status --json</code> 与 <code>events list --json</code> 查看记录。')
 
 
 def _health_sort_key(src: dict[str, Any]) -> tuple[int, str]:

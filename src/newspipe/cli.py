@@ -765,7 +765,8 @@ def _sub_phase(args, news_dir):
         return result.fail(args.cmd, "E_DELIVERY" if args.cmd == "notify" else "E_NETWORK", run.note or run.status,
                            hint="newspipe notification preview --source <ID> --json 查看原因与安全回执信息",
                            details=run.as_dict(), changed=before != after)
-    return result.ok(args.cmd, run.as_dict(), changed=before != after)
+    warnings = [run.note or "部分采集失败；成功内容已保留"] if run.collection and run.collection["status"] == "partial_failure" else []
+    return result.ok(args.cmd, run.as_dict(), changed=before != after, warnings=warnings)
 
 
 def _sub_events(args: argparse.Namespace, news_dir: Path) -> result.Result:
@@ -842,11 +843,14 @@ def _sub_run(args: argparse.Namespace, news_dir: Path) -> result.Result:
     if not args.json:
         _print(args.verbose or True, False, runs)
     warnings = [f"{r.source} {r.status}：{r.note}" for r in failed]
+    warnings += [f"{r.source}：部分采集失败；成功内容已保留，内容游标未推进"
+                 for r in runs if r.collection and r.collection["status"] == "partial_failure"]
     if failed:
         return result.ok("run", data, changed=bool(runs), warnings=warnings,
                          printed=not args.json,
                          next=["newspipe status --json", "newspipe events list --json"])
     return result.ok("run", data, changed=bool(runs), printed=not args.json,
+                     warnings=warnings,
                      next=["newspipe status --json"])
 
 

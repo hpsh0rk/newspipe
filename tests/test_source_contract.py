@@ -116,6 +116,21 @@ class SourceContractTests(unittest.TestCase):
         self.assertNotEqual(identify("rsshub", "\u4e2d\u6587"), identify("rsshub", "\u4e2d\u6587a"))
         self.assertRegex(first, r"^rsshub:[0-9a-f]{64}$")
 
+    def test_persisted_summary_is_revalidated_and_bounded(self):
+        result = self.contract.FetchResult([], tuple(
+            self.report(str(n), "empty", 0) for n in range(150)))
+        summary = result.summary()
+        self.assertEqual(len(summary["reports"]), 100)
+        self.assertEqual(summary["omitted_reports"], 50)
+        safe = self.contract.safe_summary({**summary, "provider_body": "sensitive-input"})
+        self.assertNotIn("sensitive-input", json.dumps(safe))
+        for invalid in ({**summary, "failed": True},
+                        {**summary, "status": "sensitive-input"},
+                        {**summary, "reports": [{"key": "https://secret@host", "status": "failure",
+                                                  "code": "network", "fetched": 0, "index": 1}]}):
+            with self.assertRaises(ValueError):
+                self.contract.safe_summary(invalid)
+
 
 if __name__ == "__main__":
     unittest.main()

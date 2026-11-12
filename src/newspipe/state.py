@@ -27,6 +27,7 @@ from typing import Any, Iterable
 
 
 from newspipe.errors import ConfigError  # noqa: E402
+from newspipe.source_contract import identity_key
 from newspipe._atomic import atomic_append_line, atomic_write_text, file_lock, write_json_atomic  # noqa: E402
 
 try:
@@ -100,7 +101,7 @@ class Store:
         ids: set[str] = set()
         for line in p.read_text(encoding="utf-8").splitlines():
             try:
-                ids.add(json.loads(line)["ext_id"])
+                ids.add(identity_key(json.loads(line)["ext_id"]))
             except Exception:
                 continue
         return ids
@@ -110,12 +111,12 @@ class Store:
             known = self.pushed_ids(source)
             p = self._path("pushed", f"{source}.jsonl")
             for it in items:
-                if it["ext_id"] in known:
+                if identity_key(it["ext_id"]) in known:
                     continue
                 line = json.dumps({"ext_id": it["ext_id"], "date": digest,
                                    "title": str(it.get("title", ""))[:60]}, ensure_ascii=False)
                 atomic_append_line(p, line)
-                known.add(it["ext_id"])
+                known.add(identity_key(it["ext_id"]))
 
     def pushed_by_day(self) -> dict[str, dict[str, int]]:
         """`state/pushed/<源>.jsonl` 按日期分桶：`{date: {source: n}}`。
@@ -210,6 +211,44 @@ class Store:
             now = now.replace(tzinfo=when.tzinfo)
         return (now - when).total_seconds() / 60
 
+    def record_collection_report(self, source: str, report: dict, *, at: datetime) -> None:
+        """Latest safe acquisition diagnostics, independent of delivery/throttle heartbeats."""
+        from newspipe.source_contract import safe_summary
+        safe = safe_summary(report)
+        with self.transaction():
+            previous = self._collection_report_timestamp(source)
+            if previous is not None and previous > at.timestamp():
+                return
+            write_json_atomic(self._path("collection_reports", f"{source}.json"),
+                              {"ts": at.isoformat(), "report": safe})
+
+    def collection_report(self, source: str) -> dict | None:
+        from newspipe.source_contract import safe_summary
+        value = read_json(self.root / "collection_reports" / f"{source}.json")
+        if not isinstance(value, dict):
+            return None
+        try:
+            return {**safe_summary(value["report"]),
+                    "ts": datetime.fromisoformat(value["ts"]).isoformat()}
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def clear_collection_report(self, source: str, *, at: datetime) -> None:
+        """A later legacy success cannot keep showing a previous structured failure."""
+        with self.transaction():
+            previous = self._collection_report_timestamp(source)
+            if previous is None or previous <= at.timestamp():
+                # Retain the ordering frontier even though the public report is absent.
+                write_json_atomic(self._path("collection_reports", f"{source}.json"),
+                                  {"ts": at.isoformat(), "report": None})
+
+    def _collection_report_timestamp(self, source: str) -> float | None:
+        value = read_json(self.root / "collection_reports" / f"{source}.json")
+        try:
+            return datetime.fromisoformat(value["ts"]).timestamp()
+        except (KeyError, TypeError, ValueError):
+            return None
+
     # ── 批次 ────────────────────────────────────────────────────────────────
     def batch_rel(self, digest: str, source: str, slot: str) -> str:
         """批次的相对路径（卡片回调 payload 里带的就是它，渲染前就要知道）。"""
@@ -291,7 +330,7 @@ class Store:
         """Legacy destructive helper; workflows use peek_pending + remove_pending instead."""
         with self.transaction():
             head = self.peek_pending(source, limit)
-            self.remove_pending(source, {str(it.get("ext_id")) for it in head})
+            self.remove_pending(source, {identity_key(it.get("ext_id")) for it in head})
             return head
 
     def peek_pending(self, source: str, limit: int | None = None) -> list[dict]:
@@ -316,7 +355,7 @@ class Store:
             p = self.root / "pending" / f"{source}.jsonl"
             if not p.is_file():
                 return
-            tail = [it for it in self.peek_pending(source) if str(it.get("ext_id")) not in ids]
+            tail = [it for it in self.peek_pending(source) if identity_key(it.get("ext_id")) not in ids]
             atomic_write_text(p, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in tail))
 
     # ── 打扰预算 ────────────────────────────────────────────────────────────
@@ -552,7 +591,7 @@ class Store:
                     if not line.strip():
                         continue
                     try:
-                        key = str(json.loads(line).get("ext_id") or "")
+                        key = identity_key(json.loads(line).get("ext_id"))
                     except json.JSONDecodeError:
                         continue
                     if key and key not in seen:
