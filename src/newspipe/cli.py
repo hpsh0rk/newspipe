@@ -136,11 +136,12 @@ CONTRACT: list[dict[str, Any]] = [
      "examples": ["newspipe serve --once --dry"]},
 ]
 
-SUBCOMMANDS = ("api", "config", "doctor", "status", "view", "list-sources", "source", "rsshub", "hooks", "events", "queue",
+SUBCOMMANDS = ("api", "config", "doctor", "status", "view", "list-sources", "source", "rsshub", "chats", "hooks", "events", "queue",
                "run", "serve", "migrate", "probe-channel", "probe-model", "card",
                "card-preview", "enrich-only", "policy", "global", "notification", "collect", "notify")
 
 _WORKBENCH_EXAMPLES = {
+    "chats list": "newspipe chats list --json",
     "source patch": 'newspipe source patch my_feed --from-json \'{"enabled":false}\' --dry-run --json',
     "source copy": 'newspipe source copy my_feed --new-name copied_feed --dry-run --json',
     "policy list": 'newspipe policy list --json',
@@ -155,6 +156,7 @@ _WORKBENCH_EXAMPLES = {
     "notify": 'newspipe notify my_feed --dry --json',
 }
 for _name, _summary, _args, _writes in (
+    ("chats list", "读取当前发送机器人已加入的群；不保存、不发消息", ["--page-size", "--page-token"], False),
     ("source patch", "合并修改信源；null 删除字段，未提交字段保持原样", ["name", "--from-json", "--confirm-conversion", "--dry-run", "--base-hash"], True),
     ("source copy", "保留扩展配置复制信源，默认停用", ["name", "--new-name", "--dry-run", "--base-hash"], True),
     ("policy list", "列出可复用策略及绑定信源", [], False),
@@ -878,6 +880,20 @@ def _sub_probe_channel(args: argparse.Namespace, news_dir: Path) -> result.Resul
                      printed=not args.json)
 
 
+def _sub_chats(args, news_dir):
+    from newspipe import backends, chats
+    try:
+        chats.validate_request(args.page_size, args.page_token)
+        cfg = config.load(news_dir)
+        with runtime.activate(cfg, news_dir):
+            out = chats.list_joined(backends.get_channel(), page_size=args.page_size, page_token=args.page_token)
+    except chats.DirectoryError as exc:
+        return result.fail("chats.list", exc.code, str(exc), hint=exc.hint)
+    except Exception:
+        return result.fail("chats.list", "E_CONFIG", "当前发送通道配置不可用", hint="检查当前服务配置；不会切换应用或个人账号")
+    return result.ok("chats.list", out)
+
+
 def _sub_probe_model(args: argparse.Namespace, news_dir: Path) -> result.Result:
     cfg, _store = _load(news_dir)
     return result.ok("probe-model", llm.probe(args.capability, cfg.models))
@@ -944,6 +960,11 @@ def _build_sub_parser() -> argparse.ArgumentParser:
     hub.add_argument("--feed")
     hub.add_argument("--dry-run", action="store_true")
     hub.add_argument("--base-hash")
+
+    chatp = add("chats")
+    chatp.add_argument("action", choices=["list"])
+    chatp.add_argument("--page-size", type=int, default=100)
+    chatp.add_argument("--page-token", default="")
 
     add("doctor")
     st = add("status")
@@ -1051,6 +1072,7 @@ SUB_HANDLERS = {
         "list-sources", {"sources": config.summarize(_load(news_dir)[0])}),
     ("source", None): _sub_source,
     ("rsshub", None): _sub_rsshub,
+    ("chats", None): _sub_chats,
     ("policy", None): _sub_policy,
     ("global", None): _sub_global,
     ("notification", None): _sub_notification,

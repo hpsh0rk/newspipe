@@ -149,6 +149,7 @@ docker compose up -d --build        # ① 容器（restart: unless-stopped 兜�
 | 类别 | 命令 |
 |---|---|
 | 自检 | `doctor` / `status` / `probe-model` / `probe-channel` / `rsshub show\|probe` |
+| 通知群 | `chats list --json`（当前发送机器人已加入的群；显式联网、分页、不保存不发送） |
 | RSSHub | `rsshub set --base-url <地址>`（显式空字符串恢复继承；支持 `--dry-run` / `--base-hash`） |
 | 信源 | `source list\|show\|set\|patch\|copy\|enable\|disable\|remove`（写操作支持 `--dry-run` / `--base-hash`；新建可用 `--create-only`） |
 | 通知 | `policy list\|show\|set\|remove` / `global set` / `notification preview` / `notification retry <源> --operation-id <ID>` |

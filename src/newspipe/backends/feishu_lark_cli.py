@@ -23,8 +23,11 @@ import json
 import os
 import shutil
 import subprocess
+import selectors
+import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlencode
 
 from newspipe import hostenv
 from newspipe.errors import DeliveryError
@@ -40,7 +43,43 @@ def _lark_cli() -> str:
     return "lark-cli"
 
 
-def _call(*args: str, timeout: int = 60) -> dict:
+def _bounded_run(argv, env, *, timeout, output_limit):
+    """Read both child pipes incrementally; never spool directory data to disk."""
+    from newspipe.chats import DirectoryError
+    proc = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    streams, size, deadline = {proc.stdout: bytearray(), proc.stderr: bytearray()}, 0, time.monotonic() + timeout
+    try:
+        with selectors.DefaultSelector() as selector:
+            for pipe in streams:
+                selector.register(pipe, selectors.EVENT_READ)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise DirectoryError("群列表读取超时")
+                for key, _ in selector.select(remaining):
+                    chunk = os.read(key.fileobj.fileno(), min(65536, output_limit - size + 1))
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    size += len(chunk)
+                    if size > output_limit:
+                        raise DirectoryError("群列表响应超过大小限制")
+                    streams[key.fileobj].extend(chunk)
+            try:
+                code = proc.wait(timeout=max(.001, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                raise DirectoryError("群列表读取超时") from None
+        return subprocess.CompletedProcess(argv, code, bytes(streams[proc.stdout]).decode("utf-8", "replace"),
+                                           bytes(streams[proc.stderr]).decode("utf-8", "replace"))
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        for pipe in streams:
+            pipe.close()
+
+
+def _call(*args: str, timeout: int = 60, output_limit: int | None = None) -> dict:
     env = dict(os.environ)
     extra = ["/opt/homebrew/bin", "/usr/local/bin", str(Path.home() / ".local/bin")]
     parts = env.get("PATH", "").split(":")
@@ -48,7 +87,9 @@ def _call(*args: str, timeout: int = 60) -> dict:
     home = hostenv.host_home()
     if home is not None:
         env.setdefault(env.get("NEWSPIPE_CLI_HOME_ENV") or "HERMES_HOME", str(home))
-    proc = subprocess.run([_lark_cli(), *args], capture_output=True, text=True, timeout=timeout, env=env)
+    argv = [_lark_cli(), *args]
+    proc = (_bounded_run(argv, env, timeout=timeout, output_limit=output_limit) if output_limit is not None else
+            subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env))
     raw = proc.stdout or proc.stderr or ""
     try:
         data = json.loads(raw)
@@ -63,6 +104,23 @@ class LarkCliChannel:
     """满足 `ports.CardChannel`：靠 lark-cli 发卡与更新实体。"""
 
     name = "feishu_lark_cli"
+
+    def list_chats(self, *, page_size: int = 100, page_token: str = "") -> dict:
+        from newspipe import chats
+        chats.validate_request(page_size, page_token)
+        try:
+            data = _call("api", "GET", "/open-apis/im/v1/chats?" + urlencode({"page_size": page_size, "page_token": page_token}),
+                         "--as", "bot", timeout=10, output_limit=chats.MAX_BYTES)
+        except chats.DirectoryError:
+            raise
+        except FileNotFoundError:
+            raise chats.DirectoryError("当前通道的 lark-cli 不可用", code="E_CONFIG", hint="安装该通道所需的 lark-cli，或手动填写群 ID") from None
+        except Exception:
+            raise chats.DirectoryError("当前通道的群列表响应无法解析") from None
+        if data.get("ok") is not True:
+            error = data.get("error") or {}
+            raise chats.provider_error(error.get("code") if isinstance(error, dict) else None)
+        return data.get("data")
 
     def create_entity(self, card: dict) -> str:
         """建卡片实体，返回 card_id（后续发送与更新都用它）。"""

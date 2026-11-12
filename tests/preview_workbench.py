@@ -14,7 +14,9 @@ from unittest.mock import patch
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from newspipe import channel, credentials, inbound, llm, net, pipeline, rssconnect, runtime, state
+from newspipe import backends, channel, credentials, inbound, llm, net, pipeline, rssconnect, runtime, state
+from newspipe.backends.feishu_direct import FeishuDirectChannel
+from newspipe.backends.feishu_lark_cli import LarkCliChannel
 
 
 @dataclass
@@ -64,11 +66,22 @@ def offline_workbench(*, view_actions=True):
                 blocked.append(effect)
                 raise RuntimeError(f"offline fixture blocks {effect}")
             return fail
-        stack.enter_context(patch.object(runtime, "activate", side_effect=lambda *_: nullcontext()))
         stack.enter_context(patch.object(pipeline, "_adapter", return_value=SimpleNamespace(fetch=lambda *a, **k: [
             {"ext_id": "preview-collected", "title": "A deterministic collected item",
              "url": "https://example.invalid/collected", "source": "Preview"}])))
         stack.enter_context(patch.object(credentials, "resolve_feishu", side_effect=deny("credentials")))
+        def groups(*, page_size=100, page_token=""):
+            if page_token not in ("", "offline-next"):
+                raise RuntimeError("unknown synthetic page")
+            entries = ([{"chat_id": "oc_offline_preview", "name": "我的阅读群", "external": False},
+                        {"chat_id": "oc_engineering", "name": "工程讨论", "external": False}] if not page_token else
+                       [{"chat_id": "oc_reading", "name": "周末读书", "external": False}])
+            return {"items": entries, "has_more": not bool(page_token), "page_token": "offline-next" if not page_token else ""}
+        stack.enter_context(patch.object(channel, "list_chats", side_effect=groups))
+        stack.enter_context(patch.object(FeishuDirectChannel, "list_chats", side_effect=deny("direct group directory")))
+        stack.enter_context(patch.object(LarkCliChannel, "list_chats", side_effect=deny("CLI group directory")))
+        stack.enter_context(patch.object(runtime, "channel_for", return_value=SimpleNamespace(list_chats=groups)))
+        stack.enter_context(patch.object(runtime, "activate", side_effect=lambda *_: backends.use_channel(SimpleNamespace(list_chats=groups))))
         stack.enter_context(patch.object(net, "request", side_effect=deny("network")))
         stack.enter_context(patch.object(rssconnect, "_probe_request", side_effect=deny("RSSHub probe network")))
         stack.enter_context(patch.object(llm, "chat_json", side_effect=deny("model")))

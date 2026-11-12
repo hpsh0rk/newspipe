@@ -363,6 +363,10 @@ def _argv_rsshub_probe(form):
             *(["--feed", feed] if kind == "feed" else [])]
 
 
+def _argv_chat_list(form):
+    return ["chats", "list", "--page-token", (form.get("page_token") or [""])[0]]
+
+
 def _argv_rsshub_save(form):
     if "r.base_url" not in form:
         raise ActionInputError("缺少 RSSHub 基础地址字段；显式留空才会恢复继承")
@@ -383,6 +387,7 @@ ACTIONS: dict[str, Action] = {
         Action("notification-migrate", "迁移旧通知配置", lambda form: _write_flags(["notification", "migrate"], form), danger=True),
         Action("rsshub-save", "保存 RSSHub 地址", _argv_rsshub_save, danger=True),
         Action("rsshub-probe", "只读检测 RSSHub / RSS 订阅", _argv_rsshub_probe),
+        Action("chat-list", "读取机器人已加入的群", _argv_chat_list),
         Action("collect", "只采集一次", lambda f: ["collect", _one(f, "name"), *(["--dry"] if _flag(f, "dry") else [])]),
         Action("notify", "通知现有待处理", _argv_notify, danger=True),
         Action("notification-retry", "安全重试原操作", _argv_retry, danger=True),
@@ -411,6 +416,10 @@ def dispatch(name: str, form: dict[str, list[str]], news_dir: Path) -> dict[str,
     res = cli.run_subcommand(argv, news_dir)
     data = res.as_dict()
     displayed = list(argv)
+    if name == "chat-list":
+        for index, arg in enumerate(displayed[:-1]):
+            if arg == "--page-token":
+                displayed[index + 1] = "<分页信息>" if displayed[index + 1] else ""
     if name.startswith("rsshub-"):
         from newspipe import rssconnect
         for index, arg in enumerate(displayed[:-1]):
