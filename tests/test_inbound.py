@@ -202,13 +202,26 @@ class SignatureTests(unittest.TestCase):
             from Crypto.Util.Padding import pad
         except ImportError:
             with self.assertRaises(InboundError) as ctx:
-                inbound.decrypt_payload(key, "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=")
+                inbound.decrypt_payload(key, base64.b64encode(b"0" * 32).decode())
             self.assertIn("newspipe[crypto]", str(ctx.exception))
             return
         iv = b"0123456789abcdef"
         raw = iv + AES.new(hashlib.sha256(key.encode()).digest(), AES.MODE_CBC, iv).encrypt(
             pad(_json.dumps(payload).encode("utf-8"), 16))
         self.assertEqual(inbound.decrypt_payload(key, base64.b64encode(raw).decode()), payload)
+
+    def test_missing_crypto_dependencies_report_installation_for_valid_envelope(self) -> None:
+        import base64
+        from unittest.mock import patch
+        original_import = __import__
+        def without_crypto(name, *args, **kwargs):
+            if name.split(".")[0] in {"Crypto", "cryptography"}:
+                raise ImportError(name)
+            return original_import(name, *args, **kwargs)
+        with patch("builtins.__import__", side_effect=without_crypto):
+            with self.assertRaises(InboundError) as ctx:
+                inbound.decrypt_payload("key", base64.b64encode(b"0" * 32).decode())
+        self.assertIn("newspipe[crypto]", str(ctx.exception))
 
     def test_decrypt_wrong_key_is_loud(self) -> None:
         try:
