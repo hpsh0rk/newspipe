@@ -4,7 +4,8 @@
 
     <news_dir>/state/
       batches/<date>/<source>-<slot>.json   批次 state（含 items / view / card_id / seq）
-      cursors/<source>.json                 poll 的时间闸（兼节流计时）
+      cursors/<source>.json                 增量内容边界
+      collection_attempts/<source>.json     真实采集尝试（失败也节流）
       pushed/<source>.jsonl                 幂等闸（跨天，只增不删）
       pending/<source>.jsonl                显式顺延队列（超元素预算的条目）
       status/<source>.json                  心跳
@@ -174,6 +175,35 @@ class Store:
             when = datetime.fromisoformat(str(data["updated"]))
         except (TypeError, ValueError):
             return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=TZ or now.tzinfo)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=when.tzinfo)
+        return (now - when).total_seconds() / 60
+
+    def record_collection_attempt(self, source: str, *, at: datetime) -> None:
+        """Persist the transport-start clock independently of content completion."""
+        with self.transaction():
+            path = self.root / "collection_attempts" / f"{source}.json"
+            previous = read_json(path)
+            if isinstance(previous, dict):
+                try:
+                    if datetime.fromisoformat(previous["updated"]).timestamp() > at.timestamp():
+                        return
+                except (KeyError, TypeError, ValueError):
+                    pass
+            write_json_atomic(self._path("collection_attempts", f"{source}.json"),
+                              {"updated": at.isoformat(timespec="microseconds")})
+
+    def collection_attempt_age_min(self, source: str, now: datetime) -> float | None:
+        """Read-only; old deployments keep their cursor-based throttle until a real attempt."""
+        data = read_json(self.root / "collection_attempts" / f"{source}.json")
+        if not isinstance(data, dict) or not data.get("updated"):
+            return self.cursor_age_min(source, now)
+        try:
+            when = datetime.fromisoformat(data["updated"])
+        except (TypeError, ValueError):
+            return self.cursor_age_min(source, now)
         if when.tzinfo is None:
             when = when.replace(tzinfo=TZ or now.tzinfo)
         if now.tzinfo is None:

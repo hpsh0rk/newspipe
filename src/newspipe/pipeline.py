@@ -308,11 +308,14 @@ def _process(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slot: str,
             since = store.cursor(scfg.name) if mode == "poll" else None
             unfinished = None
         protected = unfinished and "notification_mode" in unfinished
-        if not protected and mode == "poll" and since is None and not force and not dry:
+        if (not protected and mode == "poll" and since is None and not force and not dry
+                and store.collection_attempt_age_min(scfg.name, now) is None):
             store.set_cursor(scfg.name, now.timestamp(), at=now)
             run.status = "baseline"
             store.heartbeat(scfg.name, status="baseline", digest=digest, note="首轮建基线，不发卡")
             return run
+        if not protected and not dry:
+            store.record_collection_attempt(scfg.name, at=clock.now())
     if protected:
         # Unbinding cannot turn a protected notification into an unbounded legacy send.
         collect_source(cfg, store, scfg.name, dry=dry, force=force, now=now)
@@ -684,15 +687,17 @@ def collect_source(cfg: Any, store: state.Store, name: str, *, now: datetime | N
     with nullcontext() if dry else store.transaction():
         since = store.cursor(name) if scfg.fetch.trigger == "poll" else None
         if scfg.fetch.trigger == "poll" and not force and not dry:
-            if since is None:
+            age = store.collection_attempt_age_min(name, now)
+            if since is None and age is None:
                 store.set_cursor(name, now.timestamp(), at=now)
                 run.status = "baseline"
                 store.heartbeat(name, status=run.status, digest=digest, note="首轮建基线，不发卡")
                 return run
-            age = store.cursor_age_min(name, now)
             if age is not None and age < scfg.fetch.interval_min:
                 run.status = "throttled"
                 return run
+        if not dry:
+            store.record_collection_attempt(name, at=clock.now())
     result = _acquire(cfg, scfg, since, run)
     with nullcontext() if dry else store.transaction():
         if result is None:

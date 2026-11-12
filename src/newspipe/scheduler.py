@@ -6,8 +6,9 @@
 
 poll 的三道闸（顺序有意义）：
 1. `quiet_hours` —— 窗口内整轮静默，且**不推进游标**（窗口结束后一次补发积压）；
-2. `interval_min` —— 节流，闸挂在**游标文件的 updated 时间戳**上而不是心跳：
+2. `interval_min` —— 节流，闸挂在**采集尝试时间戳**上而不是心跳：
    心跳每轮都写（包括被节流的那轮），拿它计时会把自己永久锁死；
+   老部署没有尝试记录时回退到游标文件的 updated 时间戳。
 3. 首轮无游标 → 建基线不发卡（由 pipeline 处理，scheduler 只报告 run=True）。
 
 `--source <n>` 手工调试时 force=True 跳过节流，否则改完配置看不见效果。
@@ -39,7 +40,7 @@ def poll_decisions(cfg: Any, store: Any, now: datetime, *, force: bool = False,
             continue
         interval = float(src.fetch.interval_min or 0)
         if interval and not force:
-            age = store.cursor_age_min(src.name, now)
+            age = store.collection_attempt_age_min(src.name, now)
             if age is not None and age < interval:
                 out.append(Decision(src.name, False, "throttled"))
                 continue

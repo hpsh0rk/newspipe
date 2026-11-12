@@ -1,7 +1,7 @@
 """Offline acquisition boundary and durable-content safety."""
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -207,6 +207,77 @@ class SourceCollectionTests(unittest.TestCase):
 
     def test_legacy_results_keep_serialized_run_shape(self):
         self.assertNotIn("collection", self.collect().as_dict())
+
+    def test_failure_and_partial_poll_throttle_after_restart_then_retry(self):
+        for partial in (False, True):
+            with self.subTest(partial=partial):
+                self.store = state.Store(Path(self.tmp.name) / str(partial))
+                self.store.set_cursor("src", OLD.timestamp(), at=OLD)
+                self.adapter.fetch.reset_mock()
+                self.adapter.fetch.return_value = (self.result(failed=True) if partial else
+                    FetchResult([], (SubscriptionReport("bad", "failure", code="timeout"),)))
+                first = pipeline.run_poll(self.cfg, self.store, now=NOW, collect_only=True)[0]
+                self.assertIn(first.status, {"error", "partial_failure"})
+                self.store = state.Store(self.store.news_dir)
+                second = pipeline.run_poll(self.cfg, self.store, now=NOW + timedelta(minutes=1), collect_only=True)[0]
+                self.assertEqual(second.status, "throttled")
+                self.assertEqual(self.adapter.fetch.call_count, 1)
+                self.assertEqual(self.store.cursor("src"), OLD.timestamp())
+                self.assertEqual(self.store.pending_count("src"), int(partial))
+                pipeline.run_poll(self.cfg, self.store, now=NOW + timedelta(minutes=10), collect_only=True)
+                self.assertEqual(self.adapter.fetch.call_count, 2)
+
+    def test_manual_force_bypasses_only_acquisition_interval(self):
+        self.adapter.fetch.side_effect = TimeoutError("sensitive-input")
+        self.collect(force=False)
+        self.assertEqual(self.collect(force=False, now=NOW + timedelta(minutes=1)).status, "throttled")
+        self.collect(force=True, now=NOW + timedelta(minutes=1))
+        self.assertEqual(self.adapter.fetch.call_count, 2)
+        self.send.assert_not_called()
+
+    def test_attempt_clock_falls_back_to_legacy_cursor_and_handles_timezones(self):
+        age = getattr(self.store, "collection_attempt_age_min", None)
+        record = getattr(self.store, "record_collection_attempt", None)
+        self.assertIsNotNone(age)
+        self.assertIsNotNone(record)
+        self.assertEqual(age("src", NOW), 60)
+        aware = NOW.replace(tzinfo=timezone(timedelta(hours=8)))
+        record("src", at=aware)
+        self.assertEqual(age("src", NOW + timedelta(minutes=3)), 3)
+        self.assertEqual(age("src", aware + timedelta(minutes=3)), 3)
+        record("src", at=NOW)
+        self.assertEqual(age("src", aware + timedelta(minutes=3)), 3)
+        self.assertEqual(self.store.cursor("src"), OLD.timestamp())
+
+    def test_baseline_and_dry_run_are_not_transport_attempts(self):
+        self.store = state.Store(Path(self.tmp.name) / "baseline")
+        self.assertEqual(self.collect(force=False).status, "baseline")
+        self.adapter.fetch.assert_not_called()
+        paths = {p.relative_to(self.store.root) for p in self.store.root.rglob("*") if p.is_file()}
+        self.collect(force=True, dry=True)
+        self.assertEqual(paths, {p.relative_to(self.store.root) for p in self.store.root.rglob("*") if p.is_file()})
+        self.assertFalse(any("attempt" in str(p) for p in paths))
+
+    def test_attempt_is_recorded_before_transport_not_completion(self):
+        elapsed = [0]
+        def fetch(*args, **kwargs):
+            age = getattr(self.store, "collection_attempt_age_min", None)
+            self.assertIsNotNone(age)
+            self.assertEqual(age("src", NOW), 0)
+            elapsed[0] += 600
+            raise TimeoutError("slow request")
+        self.adapter.fetch.side_effect = fetch
+        with patch("time.monotonic", side_effect=lambda: elapsed[0]):
+            self.collect()
+        self.assertEqual(self.store.collection_attempt_age_min("src", NOW + timedelta(minutes=11)), 11)
+
+    def test_legacy_error_poll_uses_attempt_clock(self):
+        self.cfg = replace(self.cfg, sources={"src": replace(self.source, notify=None)})
+        self.adapter.fetch.side_effect = TimeoutError("slow request")
+        pipeline.run_poll(self.cfg, self.store, now=NOW)
+        second = pipeline.run_poll(self.cfg, self.store, now=NOW + timedelta(minutes=1))[0]
+        self.assertEqual(second.status, "throttled")
+        self.assertEqual(self.adapter.fetch.call_count, 1)
 
 
 if __name__ == "__main__":
