@@ -114,7 +114,7 @@ JAVASCRIPT = r"""'use strict';
     try { clocks = JSON.parse(region.dataset.acquisitionClocks); } catch (_) { return; }
     const checked = [...choices.querySelectorAll('input:checked')].map(input => input.value);
     const entries = Object.entries(clocks);
-    checked.filter(key => !(key in clocks)).forEach(key => entries.push([key, '已移除的采集时间（请重新选择）']));
+    checked.filter(key => !Object.hasOwn(clocks, key)).forEach(key => entries.push([key, '已移除的采集时间（请重新选择）']));
     choices.replaceChildren();
     entries.forEach(([key, clock], index) => {
       const label = document.createElement('label');
@@ -736,6 +736,8 @@ JAVASCRIPT = r"""'use strict';
           '没有保存配置或发送消息；草稿与原版本保持不变。']);
         return;
       }
+      // Global validation/errors consume one-use directory state too.
+      if (target.endsWith('/global-save') && envelope.directory) acceptChats(form, envelope, false);
       if (!envelope.ok) {
         const error = envelope.error || {};
         show(false, `${probe ? '只读检测失败' : '未应用'} · ${error.code || response.status}`, [error.message, error.hint,

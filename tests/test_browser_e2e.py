@@ -12,6 +12,7 @@ import sys
 import unittest
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from newspipe import cli, config, rssconnect
@@ -169,6 +170,56 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 page.get_by_role("link", name="全局设置", exact=True).click()
                 self.expect(page.locator('#editor-dialog')).to_be_visible()
                 self.expect(page.locator('#editor-dialog [data-chat-picker]')).to_be_visible()
+
+    def test_chat_pagination_survives_global_validation_and_conflict(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                page.goto(fixture.url + "/notifications?global=1")
+                form = page.locator('form[action="/api/actions/global-save"]')
+                before = (fixture.news_dir / "sources.yaml").read_bytes()
+                original_hash = form.locator('[name="base_hash"]').input_value()
+                for conflict in (False, True):
+                    self.assertTrue(self.submit(page, form, "加载 / 刷新群列表")["ok"])
+                    form.locator('[data-chat-select]').select_option("oc_engineering")
+                    old_handle = form.locator('[name="chat_handle"]').input_value()
+                    if conflict:
+                        form.locator('[name="base_hash"]').evaluate("input => input.value = 'stale'")
+                    out = self.submit(page, form)
+                    self.assertEqual(out["ok"], not conflict, out)
+                    if conflict:
+                        self.assertEqual(out["error"]["code"], "E_CONFLICT")
+                    self.assertNotEqual(form.locator('[name="chat_handle"]').input_value(), old_handle)
+                    self.assertTrue(self.submit(page, form, "加载更多群")["ok"])
+                    self.expect(form.locator('[data-chat-select]')).to_contain_text("周末读书")
+                    self.expect(form.locator('[data-chat-select]')).to_have_value("oc_engineering")
+                    self.assertEqual(form.locator('[name="base_hash"]').input_value(), "stale" if conflict else original_hash)
+                self.assertEqual(fixture.group_calls, ["", "offline-next", "", "offline-next"])
+                self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
+
+    def test_acquisition_removed_prototype_named_key_remains_in_source_draft(self):
+        for engine in self.browsers:
+            for key in ("constructor", "__proto__"):
+                with self.subTest(engine=engine, key=key), self.scenario(engine) as (fixture, page):
+                    path = fixture.news_dir / "sources.yaml"
+                    raw = yaml.safe_load(path.read_text())
+                    raw["slots"][key] = "12:00"
+                    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+                    form = self.editor(fixture, page)
+                    old_hash = form.locator('[name="base_hash"]').input_value()
+                    form.locator('[name="f.fetch.trigger"]').select_option("slot")
+                    form.locator(f'[name="f.fetch.slots"][value="{key}"]').check()
+                    form.get_by_role("link", name="管理采集时间", exact=True).click()
+                    acquisition = page.locator('#editor-dialog form[action="/api/actions/global-save"]')
+                    self.expect(acquisition.locator('[name="slot_time"]')).to_have_count(3)
+                    acquisition.locator('[data-remove-slot]').last.click()
+                    acquisition.locator('[name="dry"]').uncheck()
+                    self.assertTrue(self.submit(page, acquisition)["ok"])
+                    page.get_by_role("link", name="继续编辑消息源", exact=True).click()
+                    form = page.locator('#editor-dialog form[action="/api/actions/source-patch"]')
+                    self.expect(form.locator(f'[name="f.fetch.slots"][value="{key}"]')).to_be_checked()
+                    self.expect(form.locator('[data-slot-choices]')).to_contain_text("已移除的采集时间")
+                    self.assertEqual(form.locator('[name="base_hash"]').input_value(), old_hash)
+                    self.assertNotIn(key, config.load(fixture.news_dir).slots)
 
     def test_acquisition_clocks_have_no_ids_and_keep_source_draft_and_hash(self):
         for engine in self.browsers:

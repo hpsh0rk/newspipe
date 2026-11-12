@@ -24,6 +24,7 @@ import os
 import shutil
 import subprocess
 import selectors
+import signal
 import time
 import uuid
 from pathlib import Path
@@ -46,8 +47,10 @@ def _lark_cli() -> str:
 def _bounded_run(argv, env, *, timeout, output_limit):
     """Read both child pipes incrementally; never spool directory data to disk."""
     from newspipe.chats import DirectoryError
-    proc = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            start_new_session=os.name == "posix")
     streams, size, deadline = {proc.stdout: bytearray(), proc.stderr: bytearray()}, 0, time.monotonic() + timeout
+    completed = False
     try:
         with selectors.DefaultSelector() as selector:
             for pipe in streams:
@@ -69,9 +72,16 @@ def _bounded_run(argv, env, *, timeout, output_limit):
                 code = proc.wait(timeout=max(.001, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
                 raise DirectoryError("群列表读取超时") from None
+        completed = True
         return subprocess.CompletedProcess(argv, code, bytes(streams[proc.stdout]).decode("utf-8", "replace"),
                                            bytes(streams[proc.stderr]).decode("utf-8", "replace"))
     finally:
+        # CLI launchers may wrap a native child; deadline cleanup covers both.
+        if not completed and os.name == "posix":
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         if proc.poll() is None:
             proc.kill()
         proc.wait()

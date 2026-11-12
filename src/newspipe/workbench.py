@@ -337,7 +337,14 @@ def _acquisition_settings(payload, token, page):
     for index, (key, clock) in enumerate(entries):
         sources = [(name, values) for name, values in payload["source_values"].items() if key and key in values.get("fetch.slots", [])]
         policies = [name for name, item in payload["notification"]["policies"].items() if key and key in item["values"].get("slots", [])]
-        legacy = [r["source"] for r in payload["notification"]["sources"] if key and key in r["after"]["values"].get("slots", [])]
+        legacy = []
+        for row in payload["notification"]["sources"]:
+            rule = row["after"]["values"]
+            source = payload["source_values"][row["source"]]
+            scheduled_send = (rule.get("mode") == "legacy" and rule.get("form") != "state_only"
+                              and source["fetch.trigger"] == "slot" and key in source.get("fetch.slots", []))
+            if key and (key in rule.get("slots", []) or scheduled_send):
+                legacy.append(row["source"])
         locked = bool(sources or policies or legacy)
         form += '<div class="slot-edit-row">' + _hidden('slot_id', key)
         form += f'<label>采集时间 {index + 1}<input type="time" name="slot_time" value="{E(clock)}" aria-label="采集时间 {index + 1}"></label>'
@@ -349,7 +356,7 @@ def _acquisition_settings(payload, token, page):
                 form += f'<li>{E(name)} · {E(state)}</li>'
             form += '</ul>'
             if policies or legacy:
-                form += '<p class="notice">旧通知策略仍引用此采集时间，修改也会改变旧发送时刻。请先迁移为独立发送时间：' + E('、'.join(policies + legacy)) + '。<a href="/notifications">查看迁移</a></p>'
+                form += '<p class="notice">旧通知策略或未绑定策略的源仍使用此采集时间，修改也会改变旧发送时刻。请先迁移为独立发送时间：' + E('、'.join(policies + legacy)) + '。<a href="/notifications">查看迁移</a></p>'
             form += '<p class="note">解除以上全部引用后才能移除。</p></details>'
         form += '</div>'
     if not entries:

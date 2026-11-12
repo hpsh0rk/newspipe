@@ -1,7 +1,9 @@
 """Joined-group reads use the delivery identity and never expose provider data."""
 import json
+import os
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -156,6 +158,23 @@ class DirectDirectoryTests(unittest.TestCase):
 
 
 class CliDirectoryTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "Process-group cleanup applies to supported POSIX runners")
+    def test_bounded_wrapper_terminates_descendants_on_timeout_and_overflow(self):
+        from newspipe.backends.feishu_lark_cli import _bounded_run
+        with TemporaryDirectory() as tmp:
+            for overflow in (False, True):
+                with self.subTest(overflow=overflow):
+                    marker = Path(tmp) / str(overflow)
+                    child = f"import time; from pathlib import Path; time.sleep(.7); Path({str(marker)!r}).touch()"
+                    wrapper = ("import subprocess, sys, time; "
+                               f"subprocess.Popen([sys.executable, '-c', {child!r}]); "
+                               + ("sys.stdout.write('x' * 2048); sys.stdout.flush(); " if overflow else "")
+                               + "time.sleep(5)")
+                    with self.assertRaises(chats.DirectoryError):
+                        _bounded_run([sys.executable, "-c", wrapper], {}, timeout=.25, output_limit=1024)
+                    time.sleep(1)
+                    self.assertFalse(marker.exists(), "A CLI descendant survived the bounded request")
+
     def test_external_cli_explicit_bot_and_same_application_environment(self):
         with patch("newspipe.backends.feishu_lark_cli._call", return_value={"ok": True, "data": page([GROUP])}) as call:
             self.assertEqual(chats.list_joined(LarkCliChannel())["groups"][0]["name"], "Readers")

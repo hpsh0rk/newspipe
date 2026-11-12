@@ -11,6 +11,28 @@ from test_chat_web import values
 
 
 class AcquisitionWebTests(unittest.TestCase):
+    def test_unbound_scheduled_sends_warn_but_local_only_and_inactive_refs_do_not(self):
+        with offline_workbench() as fixture:
+            path = fixture.news_dir / "sources.yaml"
+            for trigger, form, enabled, expected in (("slot", "card", True, True),
+                                                    ("slot", "append_card", False, True),
+                                                    ("slot", "state_only", True, False),
+                                                    ("poll", "card", True, False),
+                                                    ("manual", "card", True, False)):
+                with self.subTest(trigger=trigger, form=form, enabled=enabled):
+                    raw = yaml.safe_load(path.read_text())
+                    source = raw["sources"]["products"]
+                    source.pop("notify", None)
+                    source["fetch"] = {"trigger": trigger, "slots": ["am"], "interval_min": 10}
+                    source["deliver"] = {"form": form}
+                    source["enabled"] = enabled
+                    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+                    text = self.get(fixture)
+                    self.assertEqual("修改也会改变旧发送时刻" in text, expected)
+                    if expected:
+                        self.assertIn('href="/notifications">查看迁移</a>', text)
+                    self.assertIn("products", text)
+
     def get(self, fixture, route="/config?acquisition=1"):
         with urllib.request.urlopen(fixture.url + route) as response:
             return response.read().decode()
