@@ -42,7 +42,10 @@ class Drafts:
 
 
 def edit_controls(action, form):
-    """Code-owned draft intents; these never dispatch a configuration writer."""
+    """Translate explicit validation and draft-only intents after POST gates."""
+    if (form.get("validate_only") or [""])[0] == "1" and action in {
+            "source-save", "source-patch", "source-copy", "policy-save", "global-save", "rsshub-save"}:
+        form["dry"] = ["1"]
     intent = (form.get("editor_intent") or [""])[0]
     if not intent:
         return False
@@ -50,6 +53,30 @@ def edit_controls(action, form):
     if action == "chat-list" and intent in {"manual-chat", "select-chat", "filter-chat"}:
         if intent != "filter-chat":
             form["chat_mode"] = ["manual" if intent == "manual-chat" else "select"]
+        return True
+    slot = action == "global-save" and (form.get("global_scope") or [""])[0] == "acquisition"
+    timing = action == "policy-save"
+    suffix = "slot" if slot else "time" if timing else ""
+    if suffix and (intent == "add-" + suffix or intent.startswith("remove-" + suffix + ":")):
+        key_name, clock_name = ("slot_id", "slot_time") if slot else ("p.times_key", "p.times")
+        keys, clocks = list(form.get(key_name, [])), list(form.get(clock_name, []))
+        if len(keys) != len(clocks) or len(keys) > 100:
+            raise ActionInputError("时间行不完整或超过 100 行，请重新打开编辑器")
+        if intent.startswith("add-"):
+            if len(keys) >= 100:
+                raise ActionInputError("最多添加 100 个时间")
+            keys.append("")
+            clocks.append("")
+        else:
+            index_text = intent.split(":", 1)[1]
+            if not index_text.isascii() or not index_text.isdigit() or not 0 <= int(index_text) < len(keys):
+                raise ActionInputError("要移除的时间行已不存在")
+            index = int(index_text)
+            keys.pop(index)
+            clocks.pop(index)
+        form[key_name], form[clock_name] = keys, clocks
+        if slot:
+            form["slots_present"] = ["1"]
         return True
     raise ActionInputError("编辑操作不可用，请重新打开编辑器")
 

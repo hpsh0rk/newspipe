@@ -35,20 +35,21 @@ def _indent(line: str) -> int:
 
 def _top_span(lines: list[str], top_key: str) -> tuple[int, int, int] | None:
     """返回 `(标题行号, 缩进, 体结束行号)`。"""
-    pattern = re.compile(rf"^([ \t]*){re.escape(top_key)}\s*:.*$")
-    for index, raw in enumerate(lines):
-        match = pattern.match(raw.rstrip("\n"))
-        if not match:
-            continue
-        indent = len(match.group(1))
-        end = index + 1
-        while end < len(lines):
-            body = lines[end].rstrip("\n")
-            if body.strip() and _indent(body) <= indent:
-                break
-            end += 1
-        return index, indent, end
-    return None
+    root = yaml.compose("".join(lines))
+    if not isinstance(root, yaml.MappingNode):
+        return None
+    key = next((key for key, _ in root.value if key.value == top_key), None)
+    if key is None:
+        return None
+    # Parser marks identify the real root key, including quoted keys.
+    index, indent = key.start_mark.line, key.start_mark.column
+    end = index + 1
+    while end < len(lines):
+        body = lines[end].rstrip("\n")
+        if body.strip() and _indent(body) <= indent:
+            break
+        end += 1
+    return index, indent, end
 
 
 def _child_span(lines: list[str], start: int, end: int, child_indent: int,

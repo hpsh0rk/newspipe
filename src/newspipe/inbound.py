@@ -206,7 +206,9 @@ def _flash_of(envelope: dict[str, Any]) -> dict[str, Any]:
         bits = [f"{k}: {data[k]}" for k in ("summary", "message", "changed", "note")
                 if data.get(k)]
         summary = " · ".join(bits) or "完成"
-        if data.get("dry_run"):
+        if data.get("draft_only"):
+            summary = "草稿已调整 · 尚未保存，配置没有变化。"
+        elif data.get("dry_run"):
             summary = "校验通过 · 尚未应用；取消“仅校验，不应用”后保存才会真正写入配置。"
     return {
         "ok": ok,
@@ -313,7 +315,7 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
             return 200, view_mod.batch_html(payload, page=page)
 
         def _config_page(self, payload: dict[str, Any], act: dict[str, Any] | None,
-                         flash: dict[str, Any] | None, query: dict[str, list[str]]) -> str:
+                         flash: dict[str, Any] | None, query: dict[str, list[str]], draft=None) -> str:
             """配置页的输入装配：schema + 目录搜索 + URL 发现 + 预填 + 编辑预填。"""
             from newspipe import config as config_mod
             from newspipe import rss as rss_mod
@@ -340,18 +342,22 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                     cand = rss_mod.as_candidate(row)
                     prefill = {"adapter": "rsshub", "feeds": [cand["feed"]],
                                "feed_label": cand["feed_label"], "fetch.trigger": "slot",
-                               "fetch.slots": ["am"]}
+                               "fetch.slots": list(payload["slots"])[:1]}
                     hint = str(cand["name_hint"])
             if query.get("feed"):
                 url = (query["feed"] or [""])[0]
                 prefill = {"adapter": "rsshub", "feeds": [url], "fetch.trigger": "slot",
-                           "fetch.slots": ["am"]}
+                           "fetch.slots": list(payload["slots"])[:1]}
                 hint = rss_mod._slug(urlparse(url).netloc or "feed")
             if prefill:
                 page["prefill"] = prefill
                 page["prefill_name"] = hint
             page.update({key: (query.get(key) or [""])[0] for key in
-                         ("new", "copy", "search", "policy_filter", "enabled_filter", "adapter_filter", "rsshub")})
+                         ("new", "copy", "search", "policy_filter", "enabled_filter", "adapter_filter", "rsshub", "acquisition")})
+            if draft and draft.get("form") and (draft["form"].get("global_scope") or [""])[0] == "acquisition":
+                from itertools import zip_longest
+                fields = draft["form"]
+                page["slot_rows"] = list(zip_longest(fields.get("slot_id", []), fields.get("slot_time", []), fillvalue=""))
             if query.get("edit"):
                 name = (query["edit"] or [""])[0]
                 try:
@@ -434,7 +440,7 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                 elif route == "/ops":
                     page = view_mod.ops_html(payload, actions=act, flash=flash)
                 elif route == "/config":
-                    page = self._config_page(payload, act, flash, query)
+                    page = self._config_page(payload, act, flash, query, draft)
                 elif route == "/notifications":
                     from newspipe import config as config_mod
                     policy_page = {key: (query.get(key) or [""])[0] for key in ("edit", "copy", "new", "preset", "global")}
@@ -561,7 +567,7 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
             elif action == "rsshub-save":
                 query = {"rsshub": ["1"]}
             elif action == "global-save":
-                query = {"global": ["1"]}
+                query = {"acquisition": ["1"]} if (form.get("global_scope") or [""])[0] == "acquisition" else {"global": ["1"]}
             key = drafts.put({"action": action, "query": query if retain else {}, "flash": _flash_of(envelope),
                               "form": {k: v for k, v in form.items() if k != "token"} if retain else None,
                               "probe": envelope if name == "rsshub-probe" else None,

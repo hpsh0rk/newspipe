@@ -23,6 +23,8 @@ def _start(action, token, base_hash, route, *, cls="editor", confirm=""):
     return (f'<form method="post" action="/api/actions/{E(action)}" class="{E(cls)}"'
             + validation + (f' data-confirm="{E(confirm)}"' if confirm else "") + ">"
             + _hidden("token", token) + _hidden("base_hash", base_hash) + _hidden("return_to", route)
+            # Implicit Enter validates, never clicks an auxiliary submitter or writes.
+            + ('<button type="submit" name="validate_only" value="1" hidden></button>' if validation else '')
             + (f'<label class="check"><input type="checkbox" name="confirm_delete" value="1" required>{E(confirm)}</label>' if confirm else ""))
 
 
@@ -52,21 +54,26 @@ def _field(field, value, *, prefix, scope, slots):
         control = _hidden(name, "0") + f'<input type="checkbox" {attr} value="1"' + (" checked" if value else "") + ">"
     elif kind == "enum":
         labels = {**ADAPTER_LABELS, "immediate": "有新内容即通知", "digest": "定时汇总", "collect": "只采集，不通知", "card": "每批新卡", "append_card": "追加已有卡片"}
+        labels.update(field.get("labels", {}))
         options = "".join(f'<option value="{E(c)}"' + (" selected" if str(c) == str(value) else "") + f'>{E(labels.get(c, c))}</option>'
                           for c in field.get("choices", []))
         control = f'<select {attr}>{options}</select>'
     elif kind == "slots":
-        control = _hidden(name, "") + f'<select {attr} multiple size="{min(max(len(slots), 2), 5)}">' + "".join(
-            f'<option value="{E(c)}"' + (" selected" if c in (value or []) else "")
-            + f'>{E(c)} · {E(slots.get(c, ""))}</option>' for c in slots) + '</select>'
+        control = _hidden(name, "") + f'<div class="slot-options" id="{E(ident)}" data-slot-choices role="group" aria-labelledby="{E(ident)}-label">'
+        for index, (key, clock) in enumerate(slots.items()):
+            label = clock + (f" · 计划 {index + 1}" if list(slots.values()).count(clock) > 1 else "")
+            control += f'<label class="check"><input type="checkbox" name="{E(name)}" value="{E(key)}" data-slot-clock="{E(clock)}" {described}' + (' checked' if key in (value or []) else '') + f'><span>{E(label)}</span></label>'
+        control += ('<p class="note">尚未设置采集时间，请先点击“管理采集时间”。</p>' if not slots else '') + '</div>'
     elif kind == "times":
-        entries = (list(value.items()) if isinstance(value, dict) else list(value or [])) + [("", "")]
+        entries = list(value.items()) if isinstance(value, dict) else list(value or [])
+        if not entries:
+            entries = [("", "")]
         control = '<div data-times-editor><div data-time-rows>'
         for index, (key, time) in enumerate(entries):
             control += ('<div class="time-edit-row">' + _hidden(name + "_key", key)
                         + f'<input type="time" id="{E(ident)}-{index}" name="{E(name)}" value="{E(time)}" {described} aria-label="发送时间 {index + 1}">'
-                        + '<button class="btn" type="button" data-remove-time aria-label="移除发送时间">移除</button></div>')
-        control += '</div><button class="btn" type="button" data-add-time>添加发送时间</button><p class="note">可填写多个时间；清空或移除一行即可删除。</p></div>'
+                        + f'<button class="btn" type="submit" name="editor_intent" value="remove-time:{index}" formnovalidate data-remove-time aria-label="移除发送时间">移除</button></div>')
+        control += '</div><button class="btn" type="submit" name="editor_intent" value="add-time" formnovalidate data-add-time>添加发送时间</button><p class="note">24 小时制，可填写多个发送时间。</p></div>'
     else:
         shown = ", ".join(str(v) for v in (value or [])) if kind == "list" else "" if value is None else str(value)
         numeric = kind in ("int", "float")
@@ -76,9 +83,12 @@ def _field(field, value, *, prefix, scope, slots):
         if path == "quiet_hours" or path.endswith(".quiet_hours"):
             extra += ' placeholder="23:00-07:30 或留空" pattern="([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]"'
         control = f'<input type="{"number" if numeric else "text"}" {attr} value="{E(shown)}"{extra}>'
-    label = f'<label for="{E(ident)}">{E(field["label"])}</label>' if kind != "times" else f'<span id="{E(ident)}-label">{E(field["label"])}</span>'
+    label = f'<label for="{E(ident)}">{E(field["label"])}</label>' if kind not in {"times", "slots"} else f'<span id="{E(ident)}-label">{E(field["label"])}</span>'
     help_node = help_tip(help_text, ident + "-help", field["label"] + "说明") if help_text else f'<small id="{E(ident)}-help"></small>'
-    return (f'<div class="field"' + (' data-digest-times' if kind == "times" else '') + f'><div class="field-label">{label}{help_node}</div>{control}'
+    if kind == "bool":
+        label, control = control + label, ''
+    return (f'<div class="field{" boolean-field" if kind == "bool" else ""}"' + (' data-digest-times' if kind == "times" else '')
+            + (f' data-fetch-for="{E(field["active_for"])}"' if field.get("active_for") else '') + f'><div class="field-label">{label}{help_node}</div>{control}'
             f'<small class="field-error" id="{E(ident)}-error"></small></div>')
 
 
@@ -211,6 +221,8 @@ def _source_editor(payload, schema, token, page):
         if advanced:
             inner += f'<details><summary>高级（{len(advanced)} 项）</summary><div class="field-grid">' + "".join(
                 _field(f, values.get(f["path"], f.get("default")), prefix="f.", scope=action, slots=payload["slots"]) for f in advanced) + '</div></details>'
+        if axis["key"] == "fetch":
+            inner += '<div class="field-grid-link">' + editor_link('/config?acquisition=1', '管理采集时间') + '</div>'
         group = f'<fieldset><legend>{E(axis["label"])}' + help_tip(axis["hint"], action + "-axis-" + axis["key"], axis["label"] + "说明") + f'</legend><div class="field-grid">{inner}</div></fieldset>'
         if axis["key"] in ("filter", "enrich", "card", "deliver"):
             group = '<details' + (' data-legacy-deliver' if axis["key"] == "deliver" else '') + f'><summary>{E(axis["label"])}' + (" · 旧设置，绑定策略后不参与通知" if axis["key"] == "deliver" else "") + f'</summary>{group}</details>'
@@ -265,7 +277,7 @@ def sources_body(payload, schema, actions, page):
             continue
         cadence = ("每 " + str(src["interval_min"]) + " 分钟采集" if src["trigger"] == "poll" else
                    "手动采集（通知仍由策略决定）" if src["trigger"] == "manual" else
-                   "采集 " + " / ".join(f"{s} {payload['slots'].get(s, '')}" for s in src["slots"]))
+                   "采集 " + " / ".join(payload['slots'].get(s, '') for s in src["slots"]))
         links = ''
         if token:
             links = (editor_link(f'/config?edit={quote(src["name"])}', "编辑")
@@ -291,9 +303,11 @@ def sources_body(payload, schema, actions, page):
     body = ('<div class="page-intro"><div><p class="eyebrow">SOURCE LIBRARY</p><p class="lead">采集什么，与何时打扰你，是两件事。</p></div>'
             + (editor_link("/config?new=1", "添加消息源", primary=True) if token else "") + '</div>'
             + '<div data-editor-result></div><p data-editor-drafts class="note" hidden></p>'
-            + _rsshub_settings(payload, schema, token, page) + filter_form
+            + _acquisition_settings(payload, token, page) + _rsshub_settings(payload, schema, token, page) + filter_form
             + '<h2>信源清单</h2><div class="source-list" data-read-region="sources">' + ("".join(cards) or '<p class="empty">还没有匹配的消息源。先创建通知策略，再添加消息源。</p>') + '</div>')
-    if page.get("copy") and token:
+    if page.get("acquisition") and token:
+        pass
+    elif page.get("copy") and token:
         form = '<p class="note">新源默认停用。</p>' + _start("source-copy", token, payload["sources_hash"], "/config")
         form += _hidden("name", page["copy"]) + '<label class="field">新的稳定 ID<input name="new_name" required pattern="[A-Za-z0-9_][A-Za-z0-9_-]*"></label>' + _buttons(preview=False) + '</form>'
         body = editor_panel("source-copy", "复制消息源", form, "/config", "source-copy:" + str(page["copy"])) + body
@@ -304,6 +318,45 @@ def sources_body(payload, schema, actions, page):
     elif not token:
         body += '<p class="notice">写操作未开启，表单不渲染。需要 service.yaml 的 view.actions。</p>'
     return body + _rss(page) + _policy_catalog(payload, schema) + (delete_dialog() + editor_dialog() if token else "")
+
+
+def _acquisition_settings(payload, token, page):
+    clocks = payload["slots"]
+    body = '<section class="acquisition-panel summary-strip" data-read-region="acquisition" data-acquisition-clocks="' + E(json.dumps(clocks)) + '"><div><h2>采集时间'
+    body += help_tip("只决定消息源何时抓取，不控制通知策略的发送时间。共用一个采集时间的源同步变化；内部关联不会因修改时刻而改变。", 'acquisition-summary-help', '采集时间说明') + '</h2>'
+    body += '<p>' + E(' / '.join(sorted(clocks.values())) or '尚未设置采集时间') + '</p></div>'
+    if token:
+        body += editor_link('/config?acquisition=1', '管理采集时间')
+    body += '</section>'
+    if not token or not page.get("acquisition"):
+        return body
+    form = _start('global-save', token, payload["sources_hash"], '/config')
+    form += _hidden('preview_kind', 'global') + _hidden('global_scope', 'acquisition') + _hidden('slots_present', '1')
+    form += '<p class="note">24 小时制。保存后，共用此时间的消息源会同步更新采集时刻；通知策略的独立发送时间不变。</p><div data-slot-rows>'
+    entries = page.get("slot_rows", list(clocks.items()))
+    for index, (key, clock) in enumerate(entries):
+        sources = [(name, values) for name, values in payload["source_values"].items() if key and key in values.get("fetch.slots", [])]
+        policies = [name for name, item in payload["notification"]["policies"].items() if key and key in item["values"].get("slots", [])]
+        legacy = [r["source"] for r in payload["notification"]["sources"] if key and key in r["after"]["values"].get("slots", [])]
+        locked = bool(sources or policies or legacy)
+        form += '<div class="slot-edit-row">' + _hidden('slot_id', key)
+        form += f'<label>采集时间 {index + 1}<input type="time" name="slot_time" value="{E(clock)}" aria-label="采集时间 {index + 1}"></label>'
+        form += f'<button class="btn" type="submit" name="editor_intent" value="remove-slot:{index}" formnovalidate data-remove-slot' + (' disabled' if locked else '') + '>移除</button>'
+        if locked:
+            form += f'<details class="slot-references"><summary>{len(sources)} 个源引用 · 查看影响范围</summary><ul>'
+            for name, values in sources:
+                state = ('已停用' if not values["enabled"] else '定时采集' if values["fetch.trigger"] == 'slot' else '保留引用，当前不按此时间采集')
+                form += f'<li>{E(name)} · {E(state)}</li>'
+            form += '</ul>'
+            if policies or legacy:
+                form += '<p class="notice">旧通知策略仍引用此采集时间，修改也会改变旧发送时刻。请先迁移为独立发送时间：' + E('、'.join(policies + legacy)) + '。<a href="/notifications">查看迁移</a></p>'
+            form += '<p class="note">解除以上全部引用后才能移除。</p></details>'
+        form += '</div>'
+    if not entries:
+        form += '<p class="empty" data-slot-empty>尚未设置采集时间，点击下方添加。</p>'
+    form += '</div><button class="btn" type="submit" name="editor_intent" value="add-slot" formnovalidate data-add-slot>添加采集时间</button>'
+    form += _buttons() + '</form>'
+    return editor_panel('acquisition', '采集时间', form, '/config', 'acquisition') + body
 
 
 def _chat_picker(payload, page):
@@ -371,15 +424,12 @@ def notifications_body(payload, schema, actions, page):
         body += editor_link("/notifications?global=1", "全局设置")
     body += '</section>'
     if token and page.get("global"):
-        form = _start("global-save", token, payload["sources_hash"], "/notifications") + _hidden("preview_kind", "global")
+        form = _start("global-save", token, payload["sources_hash"], "/notifications") + _hidden("preview_kind", "global") + _hidden("global_scope", "notifications")
         form += _chat_picker(payload, page)
         form += '<div class="field-grid">' + "".join(_field(f, gates.get(f["path"], f.get("default")), prefix="g.", scope="global",
                                                            slots=payload["slots"]) for f in schema["notification_fields"]) + '</div>'
         form += '<p class="note">全局上限留空 = 未配置硬上限；0 = 完全不发送。策略的每源限制仍独立生效。</p>'
-        form += '<details><summary>采集计划 · 不控制策略发送时间</summary><div class="slot-editor">'
-        for ident, clock in [*payload["slots"].items(), ("", ""), ("", "")]:
-            form += f'<div class="slot-edit-row"><label>采集计划标识<input name="slot_id" value="{E(ident)}"></label><label>采集时间<input type="time" name="slot_time" value="{E(clock)}"></label></div>'
-        form += '</div><button class="btn" type="button" data-add-slot>添加采集计划</button><p class="note">共用此采集计划的源会同步修改采集时间。旧通知策略需先迁移；移除仍被引用的计划会被拒绝。</p></details>' + _buttons() + '</form>'
+        form += '<p class="note">采集时刻在消息源页管理：' + editor_link('/config?acquisition=1', '管理采集时间') + '</p>' + _buttons() + '</form>'
         body += editor_panel("global", "全局通知设置", form, "/notifications", "global")
     elif not token:
         body += '<p class="notice">写操作未开启，配置表单不渲染。</p>'

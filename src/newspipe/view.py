@@ -685,7 +685,7 @@ def _health_rows(view: dict[str, Any]) -> str:
         label = "超期未运行" if src.get("stale") else str(src.get("status_label") or "未知")
         pill = _pill(str(src.get("status_tone") or ""), label)
         trigger = (f"轮询 {src['interval_min']:g}min" if src["trigger"] == "poll"
-                   else ("定时 " + "/".join(src["slots"]) if src["slots"] else "手动"))
+                   else "手动采集" if src["trigger"] == "manual" else "定时 " + "/".join(view["slots"].get(key, '') for key in src["slots"]))
         note = str(src.get("status_note") or "")
         if not note:
             detail = {k: v for k, v in (src.get("status_detail") or {}).items()

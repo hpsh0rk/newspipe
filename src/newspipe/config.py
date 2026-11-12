@@ -387,11 +387,11 @@ def describe_schema(news_dir: Path | None = None) -> dict[str, Any]:
          "advanced": True, "help": "CF Bot Management 对 HTTP/1.1 指纹一律 403 时才需要"},
         # ---- ① 何时拉
         {"path": "fetch.trigger", "axis": "fetch", "label": "触发方式", "type": "enum",
-         "choices": list(TRIGGERS), "default": "slot"},
-        {"path": "fetch.slots", "axis": "fetch", "label": "采集计划", "type": "slots",
-         "choices": slots, "default": [], "help": "定时采集时选择；多个源共用同一采集计划。发送时间在通知策略中独立配置。"},
+         "choices": list(TRIGGERS), "labels": {"slot": "定时采集", "poll": "间隔采集", "manual": "手动采集"}, "default": "slot"},
+        {"path": "fetch.slots", "axis": "fetch", "label": "采集时间（定时采集时使用）", "type": "slots", "active_for": "slot",
+         "choices": slots, "default": [], "help": "勾选采集时刻，可多选；时间由消息源页统一管理，共用时间的源同步生效。发送时间在通知策略中独立配置。"},
         {"path": "fetch.interval_min", "axis": "fetch", "label": "轮询间隔（分钟）", "type": "float",
-         "default": 0.0, "help": "trigger=poll 用：两次真抓取之间的最小间隔"},
+         "default": 0.0, "active_for": "poll", "help": "仅间隔采集使用：两次抓取之间的最小间隔；定时或手动采集时不生效"},
         # ---- ② 留什么
         {"path": "filter.include_keywords", "axis": "filter", "label": "包含关键词", "type": "list",
          "default": [], "help": "命中任一即保留；留空 = 不过滤"},

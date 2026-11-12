@@ -98,6 +98,42 @@ JAVASCRIPT = r"""'use strict';
     times.hidden = mode.value !== 'digest';
     times.querySelectorAll('input').forEach(field => { field.disabled = times.hidden; });
   };
+  const sourceFetch = form => {
+    const trigger = form.querySelector('[name="f.fetch.trigger"]');
+    if (!trigger) return;
+    form.querySelectorAll('[data-fetch-for]').forEach(field => {
+      field.hidden = field.dataset.fetchFor !== trigger.value;
+      field.querySelectorAll('input, select').forEach(control => { control.disabled = field.hidden; });
+    });
+  };
+  const sourceClocks = form => {
+    const choices = form.querySelector('[data-slot-choices]');
+    const region = document.querySelector('[data-read-region="acquisition"]');
+    if (!choices || !region) return;
+    let clocks;
+    try { clocks = JSON.parse(region.dataset.acquisitionClocks); } catch (_) { return; }
+    const checked = [...choices.querySelectorAll('input:checked')].map(input => input.value);
+    const entries = Object.entries(clocks);
+    checked.filter(key => !(key in clocks)).forEach(key => entries.push([key, '已移除的采集时间（请重新选择）']));
+    choices.replaceChildren();
+    entries.forEach(([key, clock], index) => {
+      const label = document.createElement('label');
+      label.className = 'check';
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.name = 'f.fetch.slots';
+      input.value = key;
+      input.dataset.slotClock = clock;
+      input.checked = checked.includes(key);
+      input.setAttribute('aria-describedby', `${choices.id}-help ${choices.id}-error`);
+      input.setAttribute('aria-errormessage', `${choices.id}-error`);
+      label.append(input);
+      appendText('span', clock + (Object.values(clocks).filter(value => value === clock).length > 1 ? ` · 计划 ${index + 1}` : ''), label);
+      choices.append(label);
+    });
+    if (!entries.length) appendText('p', '尚未设置采集时间，请先点击“管理采集时间”。', choices);
+    sourceFetch(form);
+  };
   const sourcePolicy = (form, refresh = false) => {
     const select = form.querySelector('[name="notify_policy"]');
     const details = form.querySelector('[data-bound-policy-details]');
@@ -231,7 +267,7 @@ JAVASCRIPT = r"""'use strict';
     picker.querySelector('[name="page_token"]').value = data.page_token || '';
     renderChats(form);
   };
-  document.querySelectorAll('form').forEach(form => { policyTiming(form); sourcePolicy(form); renderChats(form); });
+  document.querySelectorAll('form').forEach(form => { policyTiming(form); sourcePolicy(form); sourceFetch(form); renderChats(form); });
   // Native validation precedes submit and does not bubble. Reveal before the
   // browser tries to focus an invalid control inside a closed details element.
   document.addEventListener('invalid', event => {
@@ -352,7 +388,7 @@ JAVASCRIPT = r"""'use strict';
     editors.set(panel.dataset.editorKey, panel);
     editorHost.append(panel);
     editorTrigger = trigger;
-    editorForms(panel).forEach(form => { policyTiming(form); sourcePolicy(form, true); renderChats(form); });
+    editorForms(panel).forEach(form => { policyTiming(form); sourcePolicy(form, true); sourceClocks(form); sourceFetch(form); renderChats(form); });
     panel.querySelectorAll('form[data-server-validation]').forEach(form => { form.noValidate = false; });
     editorDialog.setAttribute('aria-labelledby', panel.getAttribute('aria-labelledby'));
     editorDialog.dataset.editorKind = panel.dataset.editorPanel;
@@ -370,7 +406,7 @@ JAVASCRIPT = r"""'use strict';
   };
   const safePanel = panel => {
     const actions = new Set(['source-save', 'source-patch', 'source-copy', 'policy-save', 'global-save', 'rsshub-save', 'rsshub-probe', 'chat-list', 'notification-preview']);
-    if (!panel.dataset.editorKey || !['source', 'source-copy', 'policy', 'global', 'rsshub'].includes(panel.dataset.editorPanel) ||
+    if (!panel.dataset.editorKey || !['source', 'source-copy', 'policy', 'global', 'rsshub', 'acquisition'].includes(panel.dataset.editorPanel) ||
         !panel.querySelector('h2') || !safeMarkup(panel)) return false;
     return [panel, ...panel.querySelectorAll('*')].every(node => {
       if (node.getAttributeNames().some(attr => /^on/i.test(attr) || ['srcdoc', 'src', 'style'].includes(attr.toLowerCase()))) return false;
@@ -478,7 +514,7 @@ JAVASCRIPT = r"""'use strict';
     const form = event.target.closest('form[method="post"]');
     if (form && event.target.hasAttribute?.('data-chat-query')) { renderChats(form); return; }
     if (form) markDirty(form);
-    if (form) { policyTiming(form); sourcePolicy(form); renderChats(form); }
+    if (form) { policyTiming(form); sourcePolicy(form); sourceFetch(form); renderChats(form); }
     updateDraftCount();
   });
   window.addEventListener('beforeunload', event => {
@@ -504,6 +540,7 @@ JAVASCRIPT = r"""'use strict';
       if (busy.has(form)) return;
       const rows = button.closest('[data-times-editor]').querySelector('[data-time-rows]');
       if (addTime) {
+        if (rows.children.length >= 100) return;
         const row = rows.firstElementChild.cloneNode(true);
         row.querySelectorAll('input').forEach(input => { input.value = ''; input.removeAttribute('aria-invalid'); });
         const field = row.querySelector('[type="time"]');
@@ -516,6 +553,10 @@ JAVASCRIPT = r"""'use strict';
         else row.querySelectorAll('input').forEach(input => { input.value = ''; });
         rows.querySelector('[type="time"]').focus();
       }
+      rows.querySelectorAll('.time-edit-row').forEach((row, index) => {
+        row.querySelector('[data-remove-time]').value = `remove-time:${index}`;
+        row.querySelector('[type="time"]').setAttribute('aria-label', `发送时间 ${index + 1}`);
+      });
       markDirty(form);
       updateDraftCount();
       return;
@@ -559,16 +600,46 @@ JAVASCRIPT = r"""'use strict';
       if (!window.confirm('还有未保存的编辑，离开此页？')) event.preventDefault();
       else dirty.clear();
     }
-    const button = event.target.closest('[data-add-slot]');
+    const button = event.target.closest('[data-add-slot], [data-remove-slot]');
     if (button) {
-      const rows = button.parentElement.querySelector('.slot-editor');
-      const row = rows.querySelector('.slot-edit-row').cloneNode(true);
-      row.querySelectorAll('input').forEach(input => { input.value = ''; });
-      rows.append(row);
-      row.querySelector('input').focus();
+      event.preventDefault();
+      const form = button.closest('form');
+      if (button.disabled || busy.has(form)) return;
+      const rows = form.querySelector('[data-slot-rows]');
+      if (button.hasAttribute('data-add-slot')) {
+        if (rows.querySelectorAll('.slot-edit-row').length >= 100) return;
+        rows.querySelector('[data-slot-empty]')?.remove();
+        const row = document.createElement('div');
+        row.className = 'slot-edit-row';
+        const key = document.createElement('input');
+        key.type = 'hidden'; key.name = 'slot_id'; key.value = '';
+        row.append(key);
+        const label = appendText('label', '采集时间', row);
+        const time = document.createElement('input');
+        time.type = 'time'; time.name = 'slot_time'; time.setAttribute('aria-label', '新增采集时间');
+        label.append(time);
+        const remove = appendText('button', '移除', row);
+        remove.className = 'btn'; remove.type = 'submit'; remove.name = 'editor_intent';
+        remove.setAttribute('formnovalidate', ''); remove.setAttribute('data-remove-slot', '');
+        rows.append(row);
+        time.focus();
+      } else {
+        button.closest('.slot-edit-row').remove();
+        if (!rows.querySelector('.slot-edit-row')) {
+          const empty = appendText('p', '尚未设置采集时间，点击下方添加。', rows);
+          empty.setAttribute('data-slot-empty', '');
+        }
+        (rows.querySelector('[type="time"]') || form.querySelector('[data-add-slot]')).focus();
+      }
+      rows.querySelectorAll('.slot-edit-row').forEach((row, index) => {
+        row.querySelector('[data-remove-slot]').value = `remove-slot:${index}`;
+        row.querySelector('[type="time"]').setAttribute('aria-label', `采集时间 ${index + 1}`);
+      });
+      markDirty(form);
+      updateDraftCount();
     }
   });
-  const regionNames = new Set(['sources', 'policies', 'operations', 'legacy-sources', 'legacy-pending', 'queue', 'rsshub', 'global', 'policy-catalog', 'migration']);
+  const regionNames = new Set(['sources', 'policies', 'operations', 'legacy-sources', 'legacy-pending', 'queue', 'rsshub', 'global', 'policy-catalog', 'migration', 'acquisition']);
   let readRevision = 0;
   const refreshReads = async owner => {
     const revision = ++readRevision;
@@ -606,7 +677,7 @@ JAVASCRIPT = r"""'use strict';
           if (match) node.textContent = match.textContent;
         });
       }
-      document.querySelectorAll('[data-editor-panel] form').forEach(form => sourcePolicy(form, true));
+      document.querySelectorAll('[data-editor-panel] form').forEach(form => { sourcePolicy(form, true); sourceClocks(form); });
     } catch (_) { warnings.push('写入已确认，但看板刷新失败；可手动刷新读取最新状态。不要重复已确认的写操作。'); }
     return [...new Set(warnings)];
   };
@@ -648,6 +719,7 @@ JAVASCRIPT = r"""'use strict';
       if (payload.items != null) addText('p', `RSS 条目：${payload.items}`);
     };
     const buttons = [...form.querySelectorAll('button[type="submit"], button:not([type])')];
+    const disabledBefore = new Map(buttons.map(button => [button, button.disabled]));
     busy.add(form);
     if (groupRead) reading.add(form);
     form.setAttribute('aria-busy', 'true');
@@ -755,7 +827,7 @@ JAVASCRIPT = r"""'use strict';
         if (button.hasAttribute?.('data-chat-more')) {
           const state = chatState(button.closest('[data-chat-picker]'));
           button.disabled = !state.has_more || state.limited;
-        } else button.disabled = form.dataset.created === '1';
+        } else button.disabled = form.dataset.created === '1' || disabledBefore.get(button);
       });
       if (obsolete) return;
       if (deletion && dialog.open) feedback.focus({preventScroll: true});

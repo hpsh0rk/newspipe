@@ -19,7 +19,7 @@ def editor_link(href, label, *, primary=False):
 def editor_panel(kind, title, body, route, key):
     prefix = "editor-" + hashlib.sha256(str(key).encode()).hexdigest()[:12] + "-"
     # Cached sibling forms need distinct label/error/help IDs too.
-    body = re.sub(r'\b(id|for|aria-describedby|aria-labelledby|aria-errormessage|popovertarget)="([^"]*)"',
+    body = re.sub(r'(?<![\w:-])(id|for|aria-describedby|aria-labelledby|aria-errormessage|popovertarget)="([^"]*)"',
                   lambda m: m[1] + '="' + " ".join(prefix + ident for ident in m[2].split()) + '"', body)
     title_id = prefix + "title"
     return (f'<section class="editor-panel" data-editor-panel="{E(kind)}" data-editor-key="{E(key)}" '

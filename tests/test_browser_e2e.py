@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import sys
 import unittest
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -169,6 +169,101 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 page.get_by_role("link", name="全局设置", exact=True).click()
                 self.expect(page.locator('#editor-dialog')).to_be_visible()
                 self.expect(page.locator('#editor-dialog [data-chat-picker]')).to_be_visible()
+
+    def test_acquisition_clocks_have_no_ids_and_keep_source_draft_and_hash(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine, width=360) as (fixture, page):
+                form = self.editor(fixture, page)
+                old_hash = form.locator('[name="base_hash"]').input_value()
+                form.locator('[name="f.feed_label"]').fill("Retained acquisition draft")
+                form.get_by_role("link", name="管理采集时间", exact=True).click()
+                acquisition = page.locator('#editor-dialog form[action="/api/actions/global-save"]')
+                self.expect(acquisition.locator('[type="time"]')).to_have_count(2)
+                self.expect(acquisition.locator('[name="slot_id"]').first).not_to_be_visible()
+                acquisition.locator('[name="slot_time"]').first.fill("09:45")
+                acquisition.locator('[name="dry"]').uncheck()
+                out = self.submit(page, acquisition)
+                self.assertTrue(out["ok"], out)
+                page.get_by_role("link", name="继续编辑消息源", exact=True).click()
+                form = page.locator('#editor-dialog form[action="/api/actions/source-patch"]')
+                self.expect(form.locator('[name="f.feed_label"]')).to_have_value("Retained acquisition draft")
+                self.assertEqual(form.locator('[name="base_hash"]').input_value(), old_hash)
+                form.locator('[name="f.fetch.trigger"]').select_option("slot")
+                self.expect(form.locator('[data-fetch-for="slot"]')).to_contain_text("09:45")
+                self.assertEqual(config.load(fixture.news_dir).sources["products"].fetch.slots, ("am",))
+
+    def test_acquisition_trigger_controls_preserve_inactive_configuration(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):
+                form = self.editor(fixture, page)
+                trigger = form.locator('[name="f.fetch.trigger"]')
+                self.expect(form.locator('[data-fetch-for="slot"]')).not_to_be_visible()
+                form.locator('[name="f.fetch.interval_min"]').fill("21")
+                trigger.select_option("slot")
+                self.expect(form.locator('[data-fetch-for="poll"]')).not_to_be_visible()
+                self.expect(form.locator('[data-fetch-for="slot"]')).to_be_visible()
+                form.locator('[name="f.fetch.slots"][value="am"]').check()
+                trigger.select_option("manual")
+                self.expect(form.locator('[data-fetch-for="slot"]')).not_to_be_visible()
+                trigger.select_option("poll")
+                self.expect(form.locator('[name="f.fetch.interval_min"]')).to_have_value("21")
+                trigger.select_option("manual")
+                form.locator('[name="dry"]').uncheck()
+                out = self.submit(page, form)
+                self.assertTrue(out["ok"], out)
+                cfg = config.load(fixture.news_dir)
+                self.assertEqual(cfg.sources["research"].fetch.trigger, "manual")
+                self.assertEqual(cfg.sources["research"].fetch.interval_min, 10)
+
+    def test_acquisition_add_remove_empty_and_policy_time_rows_without_spares(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine, width=360) as (fixture, page):
+                page.goto(fixture.url + "/config?acquisition=1")
+                form = page.locator('#editor-dialog form[action="/api/actions/global-save"]')
+                self.expect(form.locator('[data-remove-slot]').first).to_be_disabled()
+                self.assertTrue(self.submit(page, form)["ok"])
+                self.expect(form.locator('[data-remove-slot]').first).to_be_disabled()
+                form.locator('[data-remove-slot]').last.click()
+                self.assertEqual(form.locator('[name="slot_time"]').count(), 1)
+                form.locator('[data-add-slot]').click()
+                form.locator('[name="slot_time"]').last.fill("20:30")
+                self.assertEqual(form.locator('[name="slot_time"]').count(), 2)
+                self.close_editor(page, dirty=True)
+                page.goto(fixture.url + "/notifications?edit=digest")
+                self.assertEqual(page.locator('[name="p.times"]').count(), 2)
+
+    def test_acquisition_add_is_available_without_javascript(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine, javascript=False) as (fixture, page):
+                page.goto(fixture.url + "/config?acquisition=1")
+                form = page.locator('form[action="/api/actions/global-save"]')
+                form.get_by_role("button", name="添加采集时间", exact=True).click()
+                self.assertEqual(form.locator('[name="slot_time"]').count(), 3)
+                form.locator('[name="slot_time"]').last.fill("13:30")
+                form.get_by_role("button", name="校验配置", exact=True).click()
+                self.assertEqual(form.locator('[name="slot_time"]').count(), 3)
+                self.expect(form.locator('[name="slot_time"]').last).to_have_value("13:30")
+
+    def test_editor_enter_submits_validation_not_auxiliary_row_or_group_actions(self):
+        for engine in self.browsers:
+            for javascript in (True, False):
+                with self.subTest(engine=engine, javascript=javascript), self.scenario(engine, javascript=javascript) as (fixture, page):
+                    before = (fixture.news_dir / "sources.yaml").read_bytes()
+                    for route, action, field in (("/notifications?edit=digest", "policy-save", "p.label"),
+                                                ("/notifications?global=1", "global-save", "g.max_cards_per_day")):
+                        page.goto(fixture.url + route)
+                        form = page.locator(f'form[action="/api/actions/{action}"]')
+                        form.locator('input[name="dry"]').uncheck()
+                        clocks = form.locator('[name="p.times"]').count()
+                        with page.expect_request(lambda request: "/api/actions/" in request.url) as sent:
+                            form.locator(f'[name="{field}"]').press("Enter")
+                        self.assertTrue(sent.value.url.endswith("/api/actions/" + action), sent.value.url)
+                        submitted = parse_qs(sent.value.post_data or "")
+                        self.assertNotIn("editor_intent", submitted)
+                        self.assertEqual(submitted.get("validate_only"), ["1"])
+                        self.expect(form.locator('[name="p.times"]')).to_have_count(clocks)
+                    self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
+                    self.assertEqual(fixture.group_calls, [])
 
     def test_policy_owned_times_can_add_remove_and_do_not_change_other_policy(self):
         for engine in self.browsers:
