@@ -42,8 +42,8 @@ class WorkbenchBrowserTests(unittest.TestCase):
             cls.browsers[engine] = browser
 
     @contextmanager
-    def scenario(self, engine, *, width=1440, javascript=True):
-        with offline_workbench() as fixture:
+    def scenario(self, engine, *, width=1440, javascript=True, story_history=False):
+        with offline_workbench(story_history=story_history) as fixture:
             context = self.browsers[engine].new_context(
                 viewport={"width": width, "height": 900}, java_script_enabled=javascript,
                 reduced_motion="reduce", service_workers="block")
@@ -98,6 +98,103 @@ class WorkbenchBrowserTests(unittest.TestCase):
 
     def source_label(self, fixture):
         return config.source_values(config.load(fixture.news_dir).sources["research"])["feed_label"]
+
+    def test_story_preview_detail_pagination_and_responsive_read_only_navigation(self):
+        for engine in self.browsers:
+            for width in (360, 1440):
+                with self.subTest(engine=engine, width=width), self.scenario(engine, width=width, story_history=True) as (fixture, page):
+                    before = {p: p.read_bytes() for p in fixture.news_dir.rglob("*") if p.is_file()}
+                    page.goto(fixture.url + "/items")
+                    self.expect(page.get_by_text("A browsable offline article", exact=True)).to_be_visible()
+                    page.get_by_role("link", name="查看关联预览", exact=True).click()
+                    self.expect(page.locator('.story-relations strong').filter(has_text="提案").first).to_be_visible()
+                    self.expect(page.locator('.story-relations strong').filter(has_text="未分类变化").first).to_be_visible()
+                    self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), width + 1)
+                    self.assertEqual(page.locator("nav a.tab").count(), 5)
+                    page.get_by_role("link", name="下一页回执", exact=True).click()
+                    self.expect(page.get_by_text("旧原文缺失或不完整", exact=False)).to_be_attached()
+                    page.goto(fixture.url + "/items?observation=" + fixture.story_ids["change"])
+                    page.get_by_text("原始正文", exact=True).click()
+                    self.expect(page.locator('.story-text').first).to_contain_text("Later correction")
+                    self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), width + 1)
+                    page.get_by_role("link", name="返回条目", exact=True).click()
+                    self.expect(page.get_by_text("A browsable offline article", exact=True)).to_be_visible()
+                    self.assertEqual(before, {p: p.read_bytes() for p in fixture.news_dir.rglob("*") if p.is_file()})
+
+    def test_story_settings_modal_keyboard_validation_save_and_prospective_activation(self):
+        for engine in self.browsers:
+            for width in (360, 1440):
+                with self.subTest(engine=engine, width=width), self.scenario(engine, width=width, story_history=True) as (fixture, page):
+                    page.goto(fixture.url + "/items")
+                    opener = page.get_by_role("link", name="预览设置", exact=True)
+                    opener.focus()
+                    page.keyboard.press("Enter")
+                    self.expect(page.locator('#editor-dialog')).to_be_visible()
+                    form = page.locator('form[action="/api/actions/story-settings"]')
+                    before_config = (fixture.news_dir / "sources.yaml").read_bytes()
+                    before_history = fixture.store.story_status()
+                    self.expect(form.locator('[name="s.scan_limit"]')).not_to_be_visible()
+                    form.get_by_text("检索范围", exact=True).click()
+                    form.locator('[name="s.window_days"]').fill("0")
+                    form.locator('[data-save-button]').click()
+                    self.expect(form.locator('[name="s.window_days"]')).to_be_focused()
+                    self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before_config)
+                    form.locator('[name="s.window_days"]').fill("21")
+                    self.assertTrue(self.submit(page, form)["ok"])
+                    self.expect(page.locator('#editor-dialog')).to_be_visible()
+                    self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before_config)
+                    form.locator('[name="s.mode"]').select_option("off")
+                    form.locator('[name="dry"]').uncheck()
+                    self.assertTrue(self.submit(page, form)["ok"])
+                    self.expect(page.locator('#editor-dialog')).not_to_be_visible()
+                    self.assertEqual(config.load(fixture.news_dir).stories.mode, "off")
+                    self.assertEqual(fixture.store.story_status(), before_history)
+                    self.expect(page.locator('#action-result')).to_contain_text("下一次真实采集")
+                    self.expect(page.locator('[data-story-status]')).to_contain_text("已保存：关闭")
+                    self.expect(page.locator('[data-story-status]')).to_contain_text("等待真实采集激活")
+                    self.expect(page.locator('#action-result')).to_be_focused()
+                    opener.click()
+                    self.expect(page.locator('#editor-dialog')).to_be_visible()
+                    page.keyboard.press("Escape")
+                    self.expect(page.locator('#editor-dialog')).not_to_be_visible()
+                    self.expect(opener).to_be_focused()
+
+    def test_story_settings_and_preview_are_usable_without_javascript(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine, width=360, javascript=False, story_history=True) as (fixture, page):
+                page.goto(fixture.url + "/items")
+                page.get_by_role("link", name="预览设置", exact=True).click()
+                form = page.locator('form[action="/api/actions/story-settings"]')
+                form.get_by_text("检索范围", exact=True).click()
+                form.locator('[name="s.window_days"]').fill("0")
+                form.locator('[data-save-button]').click()
+                self.expect(form.locator('[name="s.window_days"]')).to_have_value("0")
+                self.expect(form.locator('[data-save-button]')).to_be_visible()
+                self.expect(page.get_by_text("stories.window_days", exact=False)).to_be_visible()
+                form.locator('[name="s.window_days"]').fill("21")
+                form.locator('[data-save-button]').click()
+                self.expect(form.locator('[name="s.window_days"]')).to_have_value("21")
+                form.locator('[name="s.mode"]').select_option("off")
+                form.locator('[name="dry"]').uncheck()
+                form.locator('[data-save-button]').click()
+                self.expect(form).to_have_count(0)
+                self.assertEqual(config.load(fixture.news_dir).stories.mode, "off")
+                page.get_by_role("link", name="查看关联预览", exact=True).click()
+                self.expect(page.locator('.story-relations strong').filter(has_text="提案").first).to_be_visible()
+
+    def test_story_storage_warning_does_not_hide_off_switch(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine, width=360, story_history=True) as (fixture, page):
+                db = fixture.store.root / "stories" / "history.sqlite3"
+                db.write_bytes(b"synthetic corrupt history")
+                page.goto(fixture.url + "/items?story_preview=1")
+                self.expect(page.locator('.notice')).to_contain_text("历史暂不可用")
+                page.get_by_role("link", name="预览设置", exact=True).click()
+                form = page.locator('form[action="/api/actions/story-settings"]')
+                form.locator('[name="s.mode"]').select_option("off")
+                form.locator('[name="dry"]').uncheck()
+                self.assertTrue(self.submit(page, form)["ok"])
+                self.assertEqual(db.read_bytes(), b"synthetic corrupt history")
 
     def test_chat_picker_search_more_manual_and_selection_are_unsaved(self):
         for engine in self.browsers:

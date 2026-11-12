@@ -72,10 +72,10 @@ def entry(status, *, token=""):
     else:
         message = f'{status.get("observation_count", 0)} 个原始版本 · {status.get("capture_count", 0)} 次采集回执'
     if status.get("awaiting_collection"):
-        message += " · 新设置等待真实采集激活"
+        message += " · 上次激活：" + MODES.get(status.get("activated_mode"), "尚未激活") + " · 新设置等待真实采集激活"
     return ('<section class="rsshub-panel summary-strip story-entry"><div><h2>关联预览 '
             + help_tip("仅比较已保存原文，不调 AI，不自动合并、不改变通知或收藏。检索范围只影响候选召回，历史不会自动删除。", "story-help", "关联预览说明")
-            + f'</h2><p class="hint">{E(saved)} · {E(message)}</p></div><div class="row-actions">'
+            + f'</h2><p class="hint" data-story-status>已保存：{E(saved)} · {E(message)}</p></div><div class="row-actions">'
             + '<a class="btn" href="/items?story_preview=1">查看关联预览</a>'
             + (editor_link("/items?story_settings=1", "预览设置") if token else "") + '</div></section>')
 

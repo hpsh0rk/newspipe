@@ -400,13 +400,13 @@ JAVASCRIPT = r"""'use strict';
   };
   const editorURL = href => {
     const url = new URL(href, location.href);
-    if (url.origin !== location.origin || !['/config', '/notifications'].includes(url.pathname)) throw new Error('unsafe editor URL');
+    if (url.origin !== location.origin || !['/config', '/notifications', '/items'].includes(url.pathname)) throw new Error('unsafe editor URL');
     url.hash = '';
     return url;
   };
   const safePanel = panel => {
     const actions = new Set(['source-save', 'source-patch', 'source-copy', 'policy-save', 'global-save', 'rsshub-save', 'rsshub-probe', 'chat-list', 'notification-preview', 'story-settings']);
-    if (!panel.dataset.editorKey || !['source', 'source-copy', 'policy', 'global', 'rsshub', 'acquisition'].includes(panel.dataset.editorPanel) ||
+    if (!panel.dataset.editorKey || !['source', 'source-copy', 'policy', 'global', 'rsshub', 'acquisition', 'story-settings'].includes(panel.dataset.editorPanel) ||
         !panel.querySelector('h2') || !safeMarkup(panel)) return false;
     return [panel, ...panel.querySelectorAll('*')].every(node => {
       if (node.getAttributeNames().some(attr => /^on/i.test(attr) || ['srcdoc', 'src', 'style'].includes(attr.toLowerCase()))) return false;
@@ -670,7 +670,7 @@ JAVASCRIPT = r"""'use strict';
         region.replaceWith(replacement);
         messages.forEach(message => placeFeedback(message, replacement, placements.get(message)));
       });
-      for (const selector of ['[data-effective]', '[data-policy-summary]', '[data-global-count]']) {
+      for (const selector of ['[data-effective]', '[data-policy-summary]', '[data-global-count]', '[data-story-status]']) {
         document.querySelectorAll(selector).forEach(node => {
           const match = [...page.querySelectorAll(selector)].find(fresh =>
             fresh.dataset.effective === node.dataset.effective && fresh.dataset.policySummary === node.dataset.policySummary);

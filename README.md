@@ -76,8 +76,42 @@ WS 退出会取消未启动的连接并等待 SDK 关闭；若 SDK 未退出，�
 最近采集诊断通过 `view --json` 和驾驶舱消息源详情展示，不会被后续节流或通知心跳覆盖；
 最多展开 100 个订阅诊断，多余数量明确列出。
 
-本阶段仅完成消息源基础边界，尚未新增 Horizon 全部信源，也未启用跨源去重、
-事件进展追加或 AI 差异比较；不依赖 Horizon，不接入 MCP / Skill。
+消息源基础边界与本地原始版本观察已实现；尚未新增 Horizon 全部信源，也未启用跨源通知去重、
+事件进展追加或 AI 差异比较。不依赖 Horizon，不接入 MCP / Skill。
+
+### 原始版本与关联预览
+
+“条目”页的“关联预览”展示已保存的采集回执和原始版本；“预览设置”使用弹窗，
+只支持关闭（默认）和记录原始版本与候选。保存后等待下一次真实采集激活，
+不会迁移已有队列、回看后自动重发、改收藏或合并事件。读取与 dry-run 不初始化历史。
+
+```sh
+newspipe stories settings --json
+newspipe stories set --from-json '{"mode":"observe"}' --dry-run --json
+newspipe observations list --source research --limit 20 --json
+newspipe observations show ob_ID --json
+newspipe stories preview --limit 5 --json
+```
+
+同一原生 ID 的正文或事实改变会保留新版本，互动计数或时间戳变化不单独创建版本。
+采集在过滤和 AI 加工之前记录原始材料，不把生成的摘要当证据；同 ID 的历史版本独立于候选回看窗口。
+“完整正文相同”也只是提案：必须是明确声明的文章与完整 `source_text`，正文至少 160 个非空白字符，
+标题、正文、事实与类型化引用一致。共享链接或词面相似只给候选，不能证明同一事件。
+旧适配器未声明内容类型/正文完整性时不会产生确定副本提案。未分类变化尚不代表进展、纠正或不同观点。
+历史只有生成内容、截断内容或没有原文时，只建立不确定迁移基线，不伪装成去重或新进展。
+
+高级检索默认回看 14 天、每条最多 5 个候选、扫描最近 500 条；边界分别为 1..90、1..20、50..2000。
+本地词面匹配最多使用 20,000 字符和 256 个词/中文双字项，不调比较模型、不花比较 token。
+这些范围只限制召回，不删除原始历史。页面每页 5 次回执，每次展示前 5 个提案/版本，
+完整有界回执通过 CLI 读取；预览总是使用采集时保存的范围，不按新设置重算旧提案。
+
+私有 SQLite 保存完整原始 JSON，版本不可变且不自动删除，磁盘占用会持续增长，需要部署侧备份与容量监控。
+公共契约只输出有界、脱敏的允许字段；脱敏/截断链接不能当成原文跳转。
+`/view` 只附带计数、已保存模式、已激活模式及前沿，不输出全部原文。
+历史缺失、锁定、损坏会明确区分，读取不修复历史；损坏不隐藏关闭开关。
+开启观察后记录失败时，成功内容留在待处理队列，内容游标不推进；新完成可能延迟，
+已冻结的旧投递独立恢复。关闭观察后旧历史不可用只警告，不阻断采集与通知。
+验收范围与已知限制见 [`docs/story-observations-preview-acceptance.md`](docs/story-observations-preview-acceptance.md)。
 
 ### 不做什么
 
@@ -98,6 +132,8 @@ WS 退出会取消未启动的连接并等待 SDK 关闭；若 SDK 未退出，�
 ```
 配置层 (config.py)      sources.yaml / models.yaml / service.yaml / hooks.yaml —— 唯一人工编辑入口
 采集层 (pipeline.py)    按四轴取数、去重、写 state
+观察层 (observations + story_matching + story_capture) 原文指纹、本地提案、采集边界协调
+历史层 (Store → story_state) 不可变版本/采集回执，只读预览；不感知配置或投递
 加工层 (llm.py)         模型调用 + 回执复用 + 预算熔断（解析器可替换：自带配置 / 跟随宿主）
 投递层 (render + backends)  纯函数渲染卡片 + 通道实现（直连 OpenAPI / 委托外部 CLI）
 交互层 (interaction.py) 卡片点击 → 改状态 + 更新卡片实体（自己不直接发消息）
@@ -178,6 +214,7 @@ WS 退出会取消未启动的连接并等待 SDK 关闭；若 SDK 未退出，�
   state/pushed/<source>.jsonl                        去重（推过就不再推）
   state/cursors/                                     分页游标
   state/status/                                      各源心跳
+  state/stories/history.sqlite3                      私有不可变原文与提案（只读契约访问）
   state/budget/<date>.json                           发卡打扰预算
   llm/usage/<date>.json                              模型用量与小时窗口
   state/events/<date>.jsonl + acks.jsonl             事件流与消费确认
