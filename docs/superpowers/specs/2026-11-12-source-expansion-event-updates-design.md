@@ -7,8 +7,10 @@ without running or depending on Horizon. They explicitly want later progress
 and different viewpoints appended, with the differences visible, rather than
 discarded as duplicates or overwriting earlier information.
 
-This document translates that direction into a proposed implementation design.
-The detailed design awaits user approval; product implementation has not begun.
+The user confirmed returning to this original design on 2026-11-12 after
+discussing, then deferring, MCP and Skill integration. Those integrations are
+not part of this scope. Product implementation has not begun; the next artifact
+is the independently executable source-foundation implementation plan.
 The user previously requested a separate commit for each implementation stage.
 
 The goal is less repeated interruption without losing new facts or provenance.
@@ -310,11 +312,11 @@ Use standard-library/local dependencies where sufficient; optional capabilities
 must not become mandatory imports. Record chosen limits and measured outcomes
 in the plan/tests rather than claiming a universal similarity threshold.
 
-User approval is requested for this detailed scope and the proposed notification
-scope/presentation semantics above. These are design proposals, not claims that
-the user already selected each implementation detail.
+The user confirmed proceeding with the original design. The notification scope,
+presentation and migration defaults above are the author's proposed engineering
+decisions, not claims that the user independently specified each detail.
 
-Builder-check decisions made by the author, also subject to this approval:
+Builder-check decisions made by the author:
 silent legacy baseline with an honest missing-update warning; prospective mode
 activation plus explicit old-queue migration; initial X support through Apify
 without requiring browser-cookie automation. A fresh independent builder check
