@@ -609,7 +609,8 @@ class PipelineTests(unittest.TestCase):
                           lambda name: _FakeAdapter(raise_exc=RuntimeError("502"))):
             runs = pipeline.run_slot(self.cfg, self.store, "am", now=NOW)
         self.assertEqual(runs[0].status, "error")
-        self.assertIn("502", runs[0].note)
+        self.assertIn("采集失败", runs[0].note)
+        self.assertNotIn("502", runs[0].note, "provider exception text is not a public diagnostic")
         self.assertEqual(self.store.status("s")["status"], "error")
         self.assertEqual(self.sent, [])
 

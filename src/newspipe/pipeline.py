@@ -21,12 +21,14 @@ import json
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from contextlib import nullcontext
 from typing import Any
 
 from newspipe import channel, clock, dedup, delivery, enrich as enrich_mod, filter as filter_mod
 from newspipe import events, policy, render, runtime, scheduler, state
 from newspipe.errors import ConfigError, DeliveryError
 from newspipe.state import now_iso, today
+from newspipe.source_contract import FetchResult, SubscriptionReport, SourceContractError, normalize_fetch
 
 
 def _record_event(store: state.Store, event_type: str, *, payload: dict[str, Any],
@@ -63,6 +65,7 @@ class SourceRun:
     card: str = "none"        # sent | updated | none
     enrich: dict[str, int] = field(default_factory=dict)
     note: str = ""
+    collection: dict | None = None
 
     def as_dict(self) -> dict[str, Any]:
         out = {"source": self.source, "adapter": self.adapter, "status": self.status,
@@ -72,6 +75,8 @@ class SourceRun:
             out["enrich"] = self.enrich
         if self.note:
             out["note"] = self.note
+        if self.collection is not None:
+            out["collection"] = self.collection
         return out
 
 
@@ -135,6 +140,60 @@ def _watermark(since: float | None, kept: list[dict], raw: list[dict], now: date
         if stamps:
             return max(stamps)
     return now.timestamp()
+
+
+def _acquire(cfg: Any, scfg: Any, since: float | None, run: SourceRun) -> FetchResult | None:
+    """The only adapter-result boundary. Never expose arbitrary provider exceptions."""
+    try:
+        result = normalize_fetch(_adapter(scfg.adapter).fetch(_adapter_config(cfg, scfg), since=since),
+                                 source=scfg.name, adapter=scfg.adapter)
+    except Exception as exc:
+        code = ("configuration" if isinstance(exc, ConfigError) else
+                "invalid_response" if isinstance(exc, SourceContractError) else
+                "timeout" if isinstance(exc, TimeoutError) else "network")
+        run.status = "config_missing" if code == "configuration" else "error"
+        run.note = {"configuration": "采集配置不可用；检查消息源设置及凭据引用",
+                    "invalid_response": "采集返回格式无效；检查适配器结果契约",
+                    "timeout": "采集超时；检查服务可达性，等待采集间隔后重试",
+                    "network": "采集失败；检查服务可达性及访问权限"}[code]
+        run.collection = FetchResult([], (SubscriptionReport(scfg.name, "failure", code=code),)).summary()
+        return None
+    if result.reported:
+        run.collection = result.summary()
+    if result.status == "failure":
+        run.status, run.note = "error", "全部订阅采集失败；检查订阅诊断及消息源设置"
+        return None
+    if result.status == "partial_failure":
+        run.note = "部分订阅采集失败；已保留成功内容，未推进内容游标"
+    return result
+
+
+def _collection_failure(store: state.Store, run: SourceRun, digest: str, now: datetime) -> None:
+    store.heartbeat(run.source, status=run.status, digest=digest, note=run.note)
+    _record_event(store, "failed", payload={"status": run.status, "error": run.note,
+                                          "collection": run.collection},
+                  source=run.source, slot="collect", digest=digest, now=now)
+
+
+def _commit_watermark(store: state.Store, name: str, result: FetchResult,
+                      since: float | None, kept: list[dict], now: datetime) -> None:
+    if not result.complete:
+        return
+    current = float(store.cursor(name) or 0)
+    if not result.reported:
+        watermark = _watermark(since, kept, result.items, now)
+    else:
+        # Every partition must attest its boundary; unknown dates cannot invent one.
+        stamps = [report.watermark for report in result.reports]
+        if all(stamp is not None for stamp in stamps):
+            watermark = min(stamps)
+        else:
+            known = [item["pub_ts"] for item in result.items if item.get("pub_ts")]
+            watermark = max(known) if known else float(since or 0)
+            if any(stamp is not None for stamp in stamps):
+                watermark = min(watermark, *(stamp for stamp in stamps if stamp is not None))
+        watermark = min(watermark, now.timestamp())
+    store.set_cursor(name, max(current, float(since or 0), watermark), at=now)
 
 
 def _assign_ids(batch: dict) -> None:
@@ -235,57 +294,54 @@ def _enrich_new(cfg: Any, store: state.Store, scfg: Any, items: list[dict],
 @clock.scoped
 def _process(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slot: str,
              dry: bool, now: datetime, mode: str, force: bool = False) -> SourceRun:
-    if dry:
-        return _process_locked(cfg, store, scfg, digest=digest, slot=slot, dry=dry,
-                               now=now, mode=mode, force=force)
-    with store.transaction():
-        return _process_locked(cfg, store, scfg, digest=digest, slot=slot, dry=dry,
-                               now=now, mode=mode, force=force)
-
-
-def _process_locked(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slot: str,
-                    dry: bool, now: datetime, mode: str, force: bool = False) -> SourceRun:
     run = SourceRun(source=scfg.name, adapter=scfg.adapter)
-    since = store.cursor(scfg.name) if mode == "poll" else None
-    unfinished = None if dry else store.unfinished_batch(scfg.name)
-    if unfinished and "notification_mode" in unfinished and not unfinished.get("delivery_effect_done"):
+    with nullcontext() if dry else store.transaction():
+        since = store.cursor(scfg.name) if mode == "poll" else None
+        unfinished = None if dry else store.unfinished_batch(scfg.name)
+        if unfinished and unfinished.get("delivery_effect_done"):
+            for key, value in (unfinished.get("delivery_run") or {}).items():
+                setattr(run, key, value)
+            recovered = _complete_delivery(store, unfinished, run)
+            if recovered.status != "ok" or (unfinished["digest"], unfinished["slot"]) == (digest, slot):
+                return recovered
+            run = SourceRun(source=scfg.name, adapter=scfg.adapter)
+            since = store.cursor(scfg.name) if mode == "poll" else None
+            unfinished = None
+        protected = unfinished and "notification_mode" in unfinished
+        if not protected and mode == "poll" and since is None and not force and not dry:
+            store.set_cursor(scfg.name, now.timestamp(), at=now)
+            run.status = "baseline"
+            store.heartbeat(scfg.name, status="baseline", digest=digest, note="首轮建基线，不发卡")
+            return run
+    if protected:
         # Unbinding cannot turn a protected notification into an unbounded legacy send.
         collect_source(cfg, store, scfg.name, dry=dry, force=force, now=now)
         return notify_source(cfg, store, scfg.name, dry=dry, slot=slot if mode == "slot" else None, now=now)
-    if unfinished and unfinished.get("delivery_effect_done"):
-        # A confirmed remote success needs only local repair, even if fetching/budgets now fail.
-        for key, value in (unfinished.get("delivery_run") or {}).items():
-            setattr(run, key, value)
-        recovered = _complete_delivery(store, unfinished, run)
-        if recovered.status != "ok" or (unfinished["digest"], unfinished["slot"]) == (digest, slot):
-            return recovered
-        # Repairing yesterday must not consume today's only scheduled collection.
-        run = SourceRun(source=scfg.name, adapter=scfg.adapter)
-        since = store.cursor(scfg.name) if mode == "poll" else None
-    if mode == "poll" and since is None and not force and not dry:
-        # 首轮只建基线：否则会把全部历史条目当新内容推给用户
-        store.set_cursor(scfg.name, now.timestamp(), at=now)
-        run.status = "baseline"
-        store.heartbeat(scfg.name, status="baseline", digest=digest, note="首轮建基线，不发卡")
-        return run
+    result = _acquire(cfg, scfg, since, run)
+    with nullcontext() if dry else store.transaction():
+        if result is None:
+            if not dry:
+                _collection_failure(store, run, digest, now)
+            unfinished = None if dry else store.unfinished_batch(scfg.name)
+            if not unfinished:
+                return run
+            # Acquisition outages do not cancel a persisted remote operation.
+            result = FetchResult([], (SubscriptionReport(scfg.name, "failure", code="incomplete"),))
+        return _process_locked(cfg, store, scfg, run, result, digest=digest, slot=slot,
+                               dry=dry, now=now, mode=mode, since=since)
 
-    try:
-        raw = _adapter(scfg.adapter).fetch(_adapter_config(cfg, scfg), since=since)
-    except ConfigError as exc:
-        run.status, run.note = "config_missing", str(exc)[:200]
-        if not dry:
-            store.heartbeat(scfg.name, status="config_missing", digest=digest, note=run.note)
-        return run
-    except Exception as exc:
-        run.status, run.note = "error", f"{type(exc).__name__}: {exc}"[:200]
-        if not dry:
-            store.heartbeat(scfg.name, status="error", digest=digest, note=run.note)
-        return run
 
+def _process_locked(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
+                    result: FetchResult, *, digest: str, slot: str, dry: bool,
+                    now: datetime, mode: str, since: float | None) -> SourceRun:
+    raw = result.items
     run.fetched = len(raw)
     kept = filter_mod.apply(raw, scfg)
     run.kept = len(kept)
     fresh = dedup.fresh(kept, store, scfg.name)
+    if not dry and result.reported:
+        _queue(store, scfg.name, fresh)
+        _commit_watermark(store, scfg.name, result, since, kept, now)
     unfinished = None if dry else store.unfinished_batch(scfg.name)
     if unfinished:
         fresh = _merge(list(unfinished.get("items") or []), fresh)
@@ -295,7 +351,8 @@ def _process_locked(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slo
     pending = [] if dry else dedup.fresh(store.peek_pending(scfg.name, max(cap, 1) * 2), store, scfg.name)
     candidates = _merge(pending, fresh)
     return _deliver_candidates(cfg, store, scfg, run, candidates, digest=digest, slot=slot,
-                               dry=dry, now=now, mode=mode, since=since, kept=kept, raw=raw)
+                               dry=dry, now=now, mode="collected" if result.reported else mode,
+                               since=since, kept=kept, raw=raw)
 
 
 def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
@@ -322,7 +379,7 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
         store.heartbeat(scfg.name, status=reason, digest=digest, fetched=run.fetched,
                         kept=run.kept, new=run.new, queued=queued)
         if mode == "poll" and reason not in NO_CURSOR_ADVANCE:
-            store.set_cursor(scfg.name, _watermark(since, kept, raw, acquisition_now))
+            _advance(store, scfg, mode, since, kept, raw, acquisition_now)
         return run
 
     if plan.reason != "ok":
@@ -404,10 +461,11 @@ def _deliver_candidates(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
     try:
         _begin_delivery(batch, cfg, digest, now)
         batch["delivery_run"] = {key: getattr(run, key) for key in ("fetched", "kept", "new", "planned", "enrich")}
-        if mode == "poll":
-            batch["delivery_cursor"] = _watermark(since, kept, raw, acquisition_now)
-        else:
-            batch.pop("delivery_cursor", None)
+        if not pinned:
+            if mode == "poll":
+                batch["delivery_cursor"] = _watermark(since, kept, raw, acquisition_now)
+            else:
+                batch.pop("delivery_cursor", None)
         batch["delivery_pending"] = True
         batch["delivery_effect_done"] = False
         batch["delivery_payload"] = card
@@ -532,7 +590,8 @@ def _complete_delivery(store: state.Store, batch: dict, run: SourceRun) -> Sourc
 def _advance(store: state.Store, scfg: Any, mode: str, since: float | None,
              kept: list[dict], raw: list[dict], now: datetime) -> None:
     if mode == "poll":
-        store.set_cursor(scfg.name, _watermark(since, kept, raw, now), at=now)
+        store.set_cursor(scfg.name, max(float(store.cursor(scfg.name) or 0),
+                                       _watermark(since, kept, raw, now)), at=now)
 
 
 @clock.scoped
@@ -622,7 +681,6 @@ def collect_source(cfg: Any, store: state.Store, name: str, *, now: datetime | N
     if not scfg.enabled:
         run.status = "disabled"
         return run
-    from contextlib import nullcontext
     with nullcontext() if dry else store.transaction():
         since = store.cursor(name) if scfg.fetch.trigger == "poll" else None
         if scfg.fetch.trigger == "poll" and not force and not dry:
@@ -635,32 +693,32 @@ def collect_source(cfg: Any, store: state.Store, name: str, *, now: datetime | N
             if age is not None and age < scfg.fetch.interval_min:
                 run.status = "throttled"
                 return run
-        try:
-            raw = _adapter(scfg.adapter).fetch(_adapter_config(cfg, scfg), since=since)
-            kept = filter_mod.apply(raw, scfg)
-            fresh = dedup.fresh(kept, store, name)
-        except Exception as exc:
-            run.status = "config_missing" if isinstance(exc, ConfigError) else "error"
-            run.note = f"{type(exc).__name__}: {exc}"[:200]
+    result = _acquire(cfg, scfg, since, run)
+    with nullcontext() if dry else store.transaction():
+        if result is None:
             if not dry:
-                store.heartbeat(name, status=run.status, digest=digest, note=run.note)
-                _record_event(store, "failed", payload={"status": run.status, "error": run.note},
-                              source=name, slot="collect", digest=digest, now=now)
+                _collection_failure(store, run, digest, now)
             return run
+        raw = result.items
+        kept = filter_mod.apply(raw, scfg)
+        fresh = dedup.fresh(kept, store, name)
         run.fetched, run.kept, run.new = len(raw), len(kept), len(fresh)
         if dry:
             run.status, run.note = "dry", "只预览采集；不写游标、队列或批次"
             return run
         _queue(store, name, fresh)
         # Cursor commits after durable pending, even when delivery is paused or fails later.
-        store.set_cursor(name, max(float(since or 0), _watermark(since, kept, raw, now)), at=now)
-        run.status, run.queued = "collected", store.pending_count(name)
+        _commit_watermark(store, name, result, since, kept, now)
+        run.status = "collected" if result.complete else "partial_failure"
+        run.queued = store.pending_count(name)
         store.heartbeat(name, status=run.status, digest=digest, fetched=run.fetched,
                         kept=run.kept, new=run.new, queued=run.queued, card="none")
         rule = policy.resolve(cfg, scfg)
-        if rule is not None and rule.values["mode"] == "collect":
-            return notify_source(cfg, store, name, now=now)
-        return run
+    if rule is not None and rule.values["mode"] == "collect":
+        notified = notify_source(cfg, store, name, now=now)
+        notified.collection = run.collection
+        return notified
+    return run
 
 
 @clock.scoped
