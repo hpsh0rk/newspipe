@@ -9,8 +9,8 @@ settings; and show source acquisition controls relevant to the chosen trigger.
 The purpose is to reduce manual input and make acquisition, notification and
 shared-setting effects understandable for the current single-user deployment.
 
-This document records the implementation design for approval. The scope has
-been approved; product implementation has not started.
+The user approved this implementation design on 2026-11-12 and requested
+execution. Product implementation follows the corresponding staged plan.
 
 ## Approaches
 
