@@ -341,7 +341,9 @@ dialog .row-actions{margin-top:20px}
 .boolean-field input[type=checkbox]{flex:none;margin:0}
 .acquisition-panel{border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);margin:16px 0}
 .field{display:grid;gap:6px;min-width:0;margin:0 0 12px;color:var(--text-2);font-size:13px}
-.field input:not([type=checkbox]),.field select{width:100%;min-width:0;font-size:14px}
+.field input:not([type=checkbox]),.field select,.field textarea{width:100%;min-width:0;font-size:14px}
+.field:has(textarea){grid-column:1/-1}
+.field textarea{resize:vertical}
 .field small{font-size:12px;color:var(--muted);line-height:1.6}
 .field-error{color:var(--danger)!important}
 [aria-invalid=true]{border-color:var(--danger)!important}

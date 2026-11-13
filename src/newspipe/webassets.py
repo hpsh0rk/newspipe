@@ -10,7 +10,7 @@ JAVASCRIPT = r"""'use strict';
   // SSR imports need inert markup, not a growing blacklist of loadable media.
   // This only constrains the browser surface; CLI/actions remain the writer authority.
   const inertTags = new Set('SECTION ARTICLE HEADER ASIDE DIV SPAN P SMALL B STRONG EM I A CODE PRE BR HR UL OL LI DL DT DD TABLE THEAD TBODY TFOOT TR TH TD H2 H3 H4 H5 FORM INPUT SELECT OPTION OPTGROUP BUTTON LABEL FIELDSET LEGEND DETAILS SUMMARY TEXTAREA'.split(' '));
-  const inertAttributes = new Set('class id role tabindex hidden title action formaction formnovalidate method name type value readonly required checked disabled selected multiple placeholder pattern min max step size rows cols for colspan rowspan open href target rel novalidate popover popovertarget'.split(' '));
+  const inertAttributes = new Set('class id role tabindex hidden title action formaction formnovalidate method name type value readonly required checked disabled selected multiple placeholder pattern maxlength min max step size rows cols for colspan rowspan open href target rel novalidate popover popovertarget'.split(' '));
   const domProperties = new Set('action method elements reportValidity dataset querySelectorAll querySelector closest hasAttribute getAttribute setAttribute removeAttribute append remove noValidate classList'.toLowerCase().split(' '));
   const actionNames = new Set('run source-toggle source-save source-patch source-copy policy-save policy-remove global-save notification-preview notification-migrate rsshub-save rsshub-probe chat-list story-settings collect notify notification-retry source-remove queue-ack events-ack flush'.split(' '));
   const safeAction = value => {
@@ -288,7 +288,7 @@ JAVASCRIPT = r"""'use strict';
     const form = event.target.closest('form[action*="/api/actions/"]');
     if (form) {
       fieldError(event.target, event.target.validationMessage);
-      if (event.target === form.querySelector('input:invalid, select:invalid')) {
+      if (event.target === form.querySelector('input:invalid, select:invalid, textarea:invalid')) {
         requestAnimationFrame(() => event.target.focus());
       }
     }
@@ -758,7 +758,7 @@ JAVASCRIPT = r"""'use strict';
           probe ? '没有保存、采集或通知。草稿与版本保持不变；不会自动重试检测。' :
           error.code === 'E_CONFLICT' ? '编辑内容已保留。对照最新配置后手动刷新；不会自动覆盖或重试。' : '输入已保留，可修正后重新提交。']);
         if (probe) probeDetails(error.details || {});
-        const field = [...form.querySelectorAll('input, select')].find(input =>
+        const field = [...form.querySelectorAll('input, select, textarea')].find(input =>
           input.type !== 'hidden' && error.message?.includes(input.name.replace(/^[fpngrs]\./, '')));
         if (field) {
           fieldError(field, error.message);

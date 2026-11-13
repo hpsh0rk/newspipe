@@ -20,8 +20,31 @@ def validate_value(value, field: dict) -> None:
     if kind == "list" and ("max_items" in field and len(value) > field["max_items"]
                            or field.get("item_pattern") and any(not re.fullmatch(field["item_pattern"], v) for v in value)):
         raise ValueError("Adapter subscriptions do not match their declared syntax or limit.")
+    if kind == "str" and ("max_length" in field and len(value) > field["max_length"]
+                          or field.get("pattern") and not re.fullmatch(field["pattern"], value)):
+        raise ValueError("Adapter text does not match its declared syntax or limit.")
+    if kind == "list" and field.get("disallowed_operators"):
+        operators = "|".join(re.escape(v) for v in field["disallowed_operators"])
+        for query in value:
+            unquoted = re.sub(r'"(?:\\.|[^"\\])*"', " ", query)
+            if re.search(r"(?<![\w:])(?:" + operators + r")\s*:", unquoted, re.IGNORECASE):
+                raise ValueError("Query time operators conflict with the configured search window.")
     if field.get("credential") and value and not re.fullmatch(r"[A-Z_][A-Z0-9_]*", value):
         raise ValueError("Credential setting must name an environment variable, never a literal secret.")
+
+
+def validate_relations(values: dict, fields) -> None:
+    """Cross-field constraints stay code-owned and work without importing providers."""
+    def get(path):
+        current = values
+        for part in path.split("."):
+            current = current.get(part) if isinstance(current, dict) else None
+        return current
+    for field in fields:
+        if field.get("prefix_from"):
+            value = get(field["path"])
+            if value and value.split(":", 1)[0] != get(field["prefix_from"]):
+                raise ValueError(field["path"] + " must match " + field["prefix_from"])
 
 
 @dataclass(frozen=True)
@@ -68,6 +91,23 @@ class AdapterDescriptor:
 
 
 REGISTRY = {
+    "google_news": AdapterDescriptor("google_news", "Google News", ("rss_search", "original_evidence", "subscription_results", "bounded_search_window"), fields=(
+        {"path": "settings.queries", "type": "list", "default": [], "label": "新闻查询词", "max_items": 25, "separator": "lines",
+         "item_pattern": r"[^\x00-\x1f\x7f-\x9f\ud800-\udfff]{1,1024}", "disallowed_operators": ("when", "after", "before"),
+         "help": "每行一条查询，支持关键词、引号短语及 Google 搜索语法。时间范围由下方回看天数管理，不要同时填写 when:/after:/before: 时间条件。只读取搜索 RSS，不抓取文章全文。"},
+        {"path": "settings.language", "type": "str", "default": "zh-CN", "label": "搜索界面语言",
+         "pattern": r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", "max_length": 35,
+         "help": "语言代码，例如 zh-CN、zh-TW、en-US。不是严格的文章原文语言过滤；不同地区/语言的在线可用性需要单独验证。"},
+        {"path": "settings.region", "type": "str", "default": "CN", "label": "新闻地区",
+         "pattern": r"[A-Z]{2}", "max_length": 2, "help": "两个大写字母的地区代码，例如 CN、TW、US、BR。影响 Google News 版面，不保证所有代码均有可用内容。"},
+        {"path": "settings.edition", "type": "str", "default": "", "label": "版面代码（可选）", "advanced": True,
+         "pattern": r"(?:[A-Z]{2}:[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*)?", "max_length": 38,
+         "prefix_from": "settings.region", "help": "通常留空，根据地区和语言生成。特殊版面可填 BR:pt-419 等代码，冒号前必须与新闻地区一致；修改地区时需同步修改或清空。"},
+        {"path": "settings.lookback_days", "type": "int", "default": 7, "min": 1, "max": 90,
+         "label": "回看天数", "advanced": True, "help": "每次重查最近 1..90 天，默认 7 天。搜索结果是有限窗口，不是完整历史；长时间停机后不能保证补齐。无日期条目保留未知日期。"},
+        {"path": "settings.max_results", "type": "int", "default": 50, "min": 1, "max": 100,
+         "label": "每条查询最多保留", "advanced": True, "help": "每条查询保留 1..100 条，默认 50 条，优先最新已知发布时间。受窗口/条数上限影响，不推进完整历史游标；重复采集保持原生身份幂等。"},
+    ), hidden_core_fields=("feeds", "http2")),
     "github": AdapterDescriptor("github", "GitHub", ("public_user_events", "repository_releases", "original_evidence", "subscription_results", "optional_token", "rate_limit_status"), fields=(
         {"path": "settings.users", "type": "list", "default": [], "label": "公开用户动态", "max_items": 100,
          "item_pattern": r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", "help": "填写 GitHub 用户名，用逗号或换行分隔。只读取公开动态，不包含私有仓库事件；仓库发布可在下一项单独订阅。"},

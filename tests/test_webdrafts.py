@@ -1,11 +1,34 @@
 from __future__ import annotations
 import sys
+import json
 import unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 
 class WebDraftTests(unittest.TestCase):
+    def test_inactive_adapter_snapshot_restores_raw_selected_controls(self):
+        from newspipe.webdrafts import restore
+        raw = '\n"ACME, Inc." & </textarea>\nNext'
+        page = '<form action="/api/actions/source-save"><input name="adapter_rendered" value="google_news"><textarea name="f.settings.queries">normalized</textarea></form>'
+        values = {"adapter_rendered": ["rsshub"], "f.adapter": ["google_news"],
+                  "adapter_draft": [json.dumps({"google_news": {"settings.queries": [raw]}})]}
+        out = restore(page, "source-save", values)
+        self.assertIn('\n\n"ACME, Inc." &amp; &lt;/textarea&gt;\nNext</textarea>', out)
+        self.assertIn('name="adapter_rendered" value="google_news"', out)
+        self.assertNotIn('>normalized</textarea>', out)
+
+    def test_multiline_raw_draft_restores_matching_textarea_without_active_markup(self):
+        from newspipe.webdrafts import restore
+        raw = '\n"ACME, Inc." & </textarea><script>bad()</script>\nNext'
+        page = '<form action="/api/actions/source-save"><textarea name="f.settings.queries">old &amp; text</textarea></form>'
+        page += '<form action="/api/actions/global-save"><textarea name="f.settings.queries">untouched &amp; text</textarea></form>'
+        out = restore(page, "source-save", {"f.settings.queries": [raw]})
+        self.assertIn('\n"ACME, Inc." &amp; &lt;/textarea&gt;&lt;script&gt;bad()&lt;/script&gt;\nNext', out)
+        self.assertNotIn('<script>', out)
+        self.assertIn('>untouched &amp; text</textarea>', out)
+        self.assertNotIn('>old &amp; text</textarea>', out)
+
     def test_raw_controls_restore_only_matching_form_and_not_security_token(self):
         from newspipe.webdrafts import restore
         page = '<form action="/api/actions/policy-save"><input name="token" value="fresh"><input name="name" value="old"><input name="p.label" value="old"><input type="checkbox" name="dry" value="1" checked><select name="p.mode"><option value="digest" selected>D</option><option value="immediate">I</option></select></form><form action="/api/actions/global-save"><input name="p.label" value="untouched"></form>'

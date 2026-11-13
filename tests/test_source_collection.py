@@ -69,6 +69,36 @@ class SourceCollectionTests(unittest.TestCase):
         self.assertEqual(self.store.pending_count("src"), 1)
         self.assertEqual(self.store.cursor("src"), OLD.timestamp())
 
+    def test_acquisition_notes_distinguish_search_windows_from_pagination(self):
+        for kind, expected in (("search_window", "搜索窗口"), ("result_cap", "保留条数上限"),
+                               ("page_cap", "分页上限"), (None, "分页上限")):
+            with self.subTest(kind=kind):
+                diagnostic = {"window_limited": True, **({"window_kind": kind} if kind else {})}
+                self.adapter.fetch.return_value = FetchResult([], (SubscriptionReport("search", "empty", diagnostics=diagnostic),))
+                run = self.collect()
+                self.assertIn(expected, run.note)
+                if kind in {"search_window", "result_cap"}:
+                    self.assertNotIn("分页上限", run.note)
+                self.assertEqual(self.store.cursor("src"), OLD.timestamp())
+
+    def test_native_google_searches_preserve_cursor_and_pending_native_identity_across_retries(self):
+        import importlib
+        from test_google_news_source import search_feed, search_entry, STAMP
+        try:
+            adapter = importlib.import_module("newspipe.adapters.google_news")
+        except ModuleNotFoundError:
+            self.fail("native Google News adapter has not been implemented")
+        with patch.object(adapter, "request", return_value=search_feed(search_entry())), patch.object(
+                adapter.time, "time", return_value=STAMP + 7200):
+            result = adapter.fetch({"settings": {"queries": ["AI", "Models"]}})
+        self.adapter.fetch.return_value = result
+        for _ in range(2):
+            self.collect()
+            self.assertEqual(self.store.cursor("src"), OLD.timestamp())
+            self.assertEqual(self.store.pending_count("src"), 1)
+        self.assertEqual(self.store.peek_pending("src", 1)[0]["original_url"], "https://news.google.com/rss/articles/one")
+        self.send.assert_not_called()
+
     def test_failed_and_partial_empty_are_not_empty_success(self):
         for result, status in (
             (FetchResult([], (SubscriptionReport("bad", "failure", code="permission"),)), "error"),

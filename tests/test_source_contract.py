@@ -116,6 +116,16 @@ class SourceContractTests(unittest.TestCase):
         self.assertNotEqual(identify("rsshub", "\u4e2d\u6587"), identify("rsshub", "\u4e2d\u6587a"))
         self.assertRegex(first, r"^rsshub:[0-9a-f]{64}$")
 
+    def test_search_window_kind_survives_summary_without_accepting_arbitrary_diagnostics(self):
+        result = self.contract.FetchResult([], (self.report(status="empty", fetched=0,
+            diagnostics={"window_limited": True, "window_kind": "search_window"}),))
+        summary = self.contract.safe_summary(result.summary())
+        self.assertEqual(summary["reports"][0]["diagnostics"]["window_kind"], "search_window")
+        for invalid in ("sensitive-input", True, None, {}):
+            with self.assertRaises(ValueError):
+                self.contract.FetchResult([], (self.report(status="empty", fetched=0,
+                    diagnostics={"window_kind": invalid}),)).summary()
+
     def test_persisted_summary_is_revalidated_and_bounded(self):
         result = self.contract.FetchResult([], tuple(
             self.report(str(n), "empty", 0) for n in range(150)))

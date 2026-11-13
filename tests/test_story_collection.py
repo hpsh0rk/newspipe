@@ -56,6 +56,40 @@ class StoryCollectionTests(unittest.TestCase):
         self.collect(dry=True)
         self.assertEqual(before, {p: p.read_bytes() for p in self.news.rglob("*") if p.is_file()})
 
+    def test_google_article_identity_survives_multiple_queries_and_search_setting_changes(self):
+        from newspipe.adapters import google_news
+        from test_google_news_source import search_feed, search_entry, STAMP
+        changed = cli.run_subcommand(["source", "patch", "src", "--from-json",
+            '{"adapter":"google_news","settings":{"queries":["AI","Models"]}}'], self.news)
+        self.assertTrue(changed.ok, changed.as_dict())
+        self.setting("observe")
+        def response(settings, title="Article title"):
+            with patch.object(google_news, "request", return_value=search_feed(search_entry(title=title))), patch.object(
+                    google_news.time, "time", return_value=STAMP + 7200):
+                return google_news.fetch({"settings": settings})
+        self.adapter.fetch.return_value = response({"queries": ["AI", "Models"]})
+        self.collect()
+        self.assertEqual(self.store.story_status()["observation_count"], 1)
+        first = self.store.observations()["observations"][0]
+        for settings in ({"queries": ["Different query"], "max_results": 100},
+                         {"queries": ["Models"], "language": "en-US", "region": "US", "lookback_days": 30}):
+            changed = cli.run_subcommand(["source", "patch", "src", "--from-json",
+                                         json.dumps({"settings": settings})], self.news)
+            self.assertTrue(changed.ok, changed.as_dict())
+            self.cfg = config.load(self.news)
+            self.adapter.fetch.return_value = response(settings)
+            self.collect()
+            self.assertEqual(self.store.story_status()["observation_count"], 1)
+            self.assertEqual(self.store.observations()["observations"][0]["identity_hash"], first["identity_hash"])
+        self.adapter.fetch.return_value = response(self.cfg.sources["src"].extra["settings"], title="Corrected article title")
+        self.collect()
+        rows = self.store.observations()["observations"]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row["identity_hash"] for row in rows}, {first["identity_hash"]})
+        self.assertEqual(self.store.pending_count("src"), 1)
+        self.assertEqual(self.store.cursor("src"), OLD.timestamp())
+        self.assertEqual(self.store.usage(NOW.date().isoformat())["calls"], 0)
+
     def test_originals_are_captured_even_when_filtered_out(self):
         self.setting("observe")
         source = self.cfg.sources["src"]

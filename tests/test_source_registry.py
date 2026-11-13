@@ -68,6 +68,14 @@ class SourceRegistryTests(unittest.TestCase):
                     with self.assertRaises(ConfigError):
                         config.describe_schema()
 
+    def test_declared_string_pattern_and_length_reject_bad_values_not_only_types(self):
+        field = {"path": "settings.locale", "type": "str", "default": "en", "pattern": r"[a-z]+", "max_length": 5}
+        for value in ("EN", "abc123", "abcdef"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    self.registry.validate_value(value, field)
+        self.registry.validate_value("fr", field)
+
     def test_current_values_keep_false_zero_empty_lists_and_unknown_extras(self):
         descriptor = self.descriptor()
         extra = {"settings": {"comments": False, "limit": 0, "tags": [], "token_env": "NEWS_API_TOKEN",

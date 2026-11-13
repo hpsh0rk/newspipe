@@ -685,7 +685,9 @@ def _drawer_body(src: dict[str, Any], hist: list[dict[str, Any]]) -> str:
             if "rate_reset_ts" in diagnostic:
                 text += f" · 重置时间（Unix 秒）{diagnostic['rate_reset_ts']}"
             if diagnostic.get("window_limited"):
-                text += " · 已达分页上限，未推进游标，不保证历史补齐"
+                limit = {"search_window": "搜索窗口有限", "result_cap": "已达保留条数上限"}.get(
+                    diagnostic.get("window_kind"), "已达分页上限")
+                text += f" · {limit}，未推进游标，不保证历史补齐"
             return text
         reports = " · ".join(report_label(r) for r in collection["reports"])
         omitted = collection.get("omitted_reports", 0)

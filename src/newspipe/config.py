@@ -388,6 +388,10 @@ def _adapter_extras(name: str, extra: dict) -> dict:
                 raise ConfigError(f"适配器参数 {field['path']} 的父级需要映射")
             current = current[part]
         current[parts[-1]] = value
+    try:
+        source_registry.validate_relations(out, _adapter_descriptor(name).fields)
+    except ValueError as error:
+        raise ConfigError(f"适配器参数关联无效：{error}；同步相关字段或清空可选版面") from None
     return out
 
 

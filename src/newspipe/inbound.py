@@ -395,7 +395,11 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                 from newspipe import webdrafts, actions
                 selected = (draft["form"].get("f.adapter") or [""])[0]
                 if selected in schema["adapters"]:
-                    snapshot = webdrafts.adapter_drafts(draft["form"])
+                    try:
+                        snapshot = webdrafts.adapter_drafts(draft["form"])
+                    except actions.ActionInputError:
+                        # POST already returned the error; keep direct raw edits editable.
+                        snapshot = {}
                     values = {**page.get("values", page.get("prefill", {})), "adapter": selected}
                     for field in schema["adapter_descriptors"][selected]["fields"]:
                         raw = snapshot.get(selected, {}).get(field["path"])

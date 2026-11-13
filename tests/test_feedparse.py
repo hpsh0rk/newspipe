@@ -40,6 +40,26 @@ class FeedParseTests(unittest.TestCase):
         self.assertEqual(item.body_field, "content:encoded")
         self.assertFalse(item.text_truncated)
 
+    def test_rss_publisher_source_is_bounded_and_not_the_article_or_author(self):
+        body = rss().replace(b'</item>', b'<source xml:base="https://publisher.example.invalid/news/" url="../">Publisher</source></item>')
+        item, = self.parser.parse(body)
+        self.assertEqual(getattr(item, "publisher_name", None), "Publisher")
+        self.assertEqual(item.publisher_url, "https://publisher.example.invalid/")
+        self.assertEqual(item.author, "")
+        self.assertEqual(item.permalink, "https://publisher.example.invalid/one")
+        clipped, = self.parser.parse(body.replace(b'Publisher</source>', b'x' * 501 + b'</source>'))
+        self.assertEqual(len(clipped.publisher_name), 500)
+        self.assertTrue(clipped.text_truncated)
+
+    def test_atom_source_title_and_alternate_homepage_preserve_child_base(self):
+        body = ATOM.replace(b'</entry>', b'<source xml:base="https://publisher.example.invalid/base/">'
+            b'<title>Publisher &amp; Co</title><link rel="self" href="feed.xml"/>'
+            b'<link rel="alternate" xml:base="../" href="home"/></source></entry>')
+        item, = self.parser.parse(body)
+        self.assertEqual(getattr(item, "publisher_name", None), "Publisher & Co")
+        self.assertEqual(item.publisher_url, "https://publisher.example.invalid/home")
+        self.assertEqual(item.author, "Alice")
+
     def test_atom_xhtml_alternate_link_and_xml_base_are_preserved(self):
         item, = self.parser.parse(ATOM)
         self.assertEqual(item.native_id, "urn:post:one")
