@@ -8,9 +8,10 @@ from newspipe.notification_view import REASONS
 from newspipe.policy import human_summary as rule_summary
 from newspipe.webconfirmation import delete_link, delete_dialog
 from newspipe.webui import editor_link, editor_panel, editor_dialog, help_tip
+from newspipe.source_registry import REGISTRY
 
 E = lambda value: html.escape(str(value), quote=True)
-ADAPTER_LABELS = {"rsshub": "RSS / RSSHub"}
+ADAPTER_LABELS = {name: descriptor.label for name, descriptor in REGISTRY.items()}
 
 
 def _hidden(name, value):
@@ -91,7 +92,9 @@ def _field(field, value, *, prefix, scope, slots):
     help_node = help_tip(help_text, ident + "-help", field["label"] + "说明") if help_text else f'<small id="{E(ident)}-help"></small>'
     if kind == "bool":
         label, control = control + label, ''
-    return (f'<div class="field{" boolean-field" if kind == "bool" else ""}"' + (' data-digest-times' if kind == "times" else '')
+    return (f'<div class="field{" boolean-field" if kind == "bool" else ""}"' + (' hidden' if field.get("inactive") else '')
+            + (f' data-adapter-exclude="{E(field["excluded_adapters"])}"' if field.get("excluded_adapters") else '')
+            + (' data-digest-times' if kind == "times" else '')
             + (f' data-fetch-for="{E(field["active_for"])}"' if field.get("active_for") else '') + f'><div class="field-label">{label}{help_node}</div>{control}'
             f'<small class="field-error" id="{E(ident)}-error"></small></div>')
 
@@ -194,10 +197,32 @@ def probe_result(envelope):
 
 
 def _source_editor(payload, schema, token, page):
+    from newspipe import config as config_mod
+
     snap = payload["notification"]
     name = str(page.get("edit") or "")
     existing = bool(name)
     values = page.get("values") or payload.get("source_values", {}).get(name) or page.get("prefill") or {}
+    adapter = values.get("adapter", "rsshub")
+    action = "source-patch" if existing else "source-save"
+    descriptors = schema.get("adapter_descriptors", {})
+    adapter_groups = ""
+    for adapter_name, descriptor in descriptors.items():
+        extra_fields = [f for f in config_mod.source_fields(adapter_name, schema)
+                        if f["path"] not in {f["path"] for f in schema["fields"]}]
+        if not extra_fields:
+            continue
+        active = adapter_name == adapter
+        extra = "".join(_field(f, values.get(f["path"], f.get("default")), prefix="f.",
+                               scope=action + "-adapter-" + adapter_name, slots=payload["slots"])
+                        for f in extra_fields if not f.get("advanced"))
+        advanced = [f for f in extra_fields if f.get("advanced")]
+        if advanced:
+            extra += '<details><summary>高级采集参数</summary><div class="field-grid">' + "".join(
+                _field(f, values.get(f["path"], f.get("default")), prefix="f.", scope=action + "-adapter-" + adapter_name,
+                       slots=payload["slots"]) for f in advanced) + '</div></details>'
+        adapter_groups += (f'<fieldset data-adapter-for="{E(adapter_name)}"' + ('' if active else ' hidden disabled')
+                           + f'><legend>{E(descriptor["label"])} 订阅参数</legend><div class="field-grid">{extra}</div></fieldset>')
     row = next((r for r in snap["sources"] if r["source"] == name), None)
     if existing and row is None:
         return '<p class="notice">消息源不存在，请返回清单重新选择；不会把编辑转换为新建。</p>'
@@ -205,6 +230,8 @@ def _source_editor(payload, schema, token, page):
     action = "source-patch" if existing else "source-save"
     route = "/config"
     form = _start(action, token, payload["sources_hash"], route)
+    form += _hidden("adapter_rendered", adapter)
+    form += _hidden("adapter_draft", json.dumps(page.get("adapter_drafts", {})))
     form += _hidden("source_revision", payload.get("source_revisions", {}).get(name, "new"))
     form += _hidden("preview_kind", "source")
     if existing:
@@ -217,7 +244,13 @@ def _source_editor(payload, schema, token, page):
     for axis in schema["axes"]:
         if axis["key"] == "deliver" and (binding and binding["policy_id"] or not existing):
             continue
-        fields = [f for f in schema["fields"] if f["axis"] == axis["key"]]
+        fields = []
+        for field in schema["fields"]:
+            if field["axis"] != axis["key"]:
+                continue
+            excluded = [key for key, desc in descriptors.items() if field["path"] in desc.get("hidden_core_fields", [])]
+            fields.append({**field, "excluded_adapters": ",".join(excluded), "inactive": adapter in excluded,
+                           **({"labels": {k: d["label"] for k, d in descriptors.items()}} if field["path"] == "adapter" else {})})
         # Retained legacy values stay editable for rollback, but never participate while bound.
         inner = "".join(_field(f, values.get(f["path"], False if f["path"] == "enabled" and not existing else f.get("default")),
                                prefix="f.", scope=action, slots=payload["slots"]) for f in fields if not f.get("advanced"))
@@ -230,6 +263,9 @@ def _source_editor(payload, schema, token, page):
         group = f'<fieldset><legend>{E(axis["label"])}' + help_tip(axis["hint"], action + "-axis-" + axis["key"], axis["label"] + "说明") + f'</legend><div class="field-grid">{inner}</div></fieldset>'
         if axis["key"] in ("filter", "enrich", "card", "deliver"):
             group = '<details' + (' data-legacy-deliver' if axis["key"] == "deliver" else '') + f'><summary>{E(axis["label"])}' + (" · 旧设置，绑定策略后不参与通知" if axis["key"] == "deliver" else "") + f'</summary>{group}</details>'
+        if axis["key"] == "identity":
+            group += ('<button class="btn" type="submit" name="editor_intent" value="select-adapter" formnovalidate data-adapter-refresh>更新订阅参数</button>'
+                      + adapter_groups)
         groups.append(group)
     # Source identity/acquisition first, then notification choice, then optional processing.
     form += "".join(groups[:2])

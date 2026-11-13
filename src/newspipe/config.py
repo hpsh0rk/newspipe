@@ -391,6 +391,15 @@ def _adapter_extras(name: str, extra: dict) -> dict:
     return out
 
 
+def source_fields(adapter: str, schema: dict | None = None) -> list[dict]:
+    """Compose one adapter's form/writer fields from the public schema only."""
+    schema = schema or describe_schema()
+    descriptor = schema.get("adapter_descriptors", {}).get(adapter, {})
+    hidden = set(descriptor.get("hidden_core_fields", []))
+    return deepcopy([f for f in schema["fields"] if f["path"] not in hidden]
+                    + descriptor.get("fields", []))
+
+
 def describe_schema(news_dir: Path | None = None) -> dict[str, Any]:
     """配置的**自描述字段表** —— 页面表单与 Agent 改配置的唯一事实来源。
 
@@ -419,7 +428,7 @@ def describe_schema(news_dir: Path | None = None) -> dict[str, Any]:
         # ---- 身份与通道
         {"path": "adapter", "axis": "identity", "label": "适配器", "type": "enum",
          "choices": adapter_names(), "default": "rsshub",
-         "help": "决定怎么抓：aihot/hn/reddit 是专用源；rsshub 走任意 RSS 地址或 RSSHub 路由"},
+         "help": "选择采集方式，下面显示对应订阅参数。GitHub 读取公开动态/发布；RSS 支持完整订阅地址或 RSSHub 路由。"},
         {"path": "enabled", "axis": "identity", "label": "启用", "type": "bool", "default": True,
          "help": "关掉后调度会跳过它（等价于页面上的「停用」）"},
         {"path": "tier", "axis": "identity", "label": "层级", "type": "enum",

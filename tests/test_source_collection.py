@@ -61,6 +61,14 @@ class SourceCollectionTests(unittest.TestCase):
         self.assertEqual(self.store.pushed_ids("src"), set())
         self.send.assert_not_called()
 
+    def test_window_limited_success_retains_content_without_advancing_cursor(self):
+        self.adapter.fetch.return_value = FetchResult([_item(1, pub_ts=NOW.timestamp())], (
+            SubscriptionReport("bounded", "success", 1, diagnostics={"window_limited": True}),))
+        run = self.collect()
+        self.assertEqual(run.collection["status"], "success")
+        self.assertEqual(self.store.pending_count("src"), 1)
+        self.assertEqual(self.store.cursor("src"), OLD.timestamp())
+
     def test_failed_and_partial_empty_are_not_empty_success(self):
         for result, status in (
             (FetchResult([], (SubscriptionReport("bad", "failure", code="permission"),)), "error"),

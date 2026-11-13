@@ -224,6 +224,8 @@ def _acquire(cfg: Any, scfg: Any, since: float | None, run: SourceRun) -> FetchR
         return None
     if result.status == "partial_failure":
         run.note = "部分订阅采集失败；已保留成功内容，未推进内容游标"
+    elif any(report.diagnostics.get("window_limited") for report in result.reports):
+        run.note = "采集达到分页上限；已保留窗口内内容，未推进内容游标，不保证历史补齐"
     return result
 
 
@@ -245,6 +247,8 @@ def _save_collection_report(store: state.Store, run: SourceRun, now: datetime) -
 def _commit_watermark(store: state.Store, name: str, result: FetchResult,
                       since: float | None, kept: list[dict], now: datetime) -> None:
     if not result.complete:
+        return
+    if any(report.diagnostics.get("window_limited") for report in result.reports):
         return
     current = float(store.cursor(name) or 0)
     if not result.reported:

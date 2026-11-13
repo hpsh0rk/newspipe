@@ -113,7 +113,8 @@ class StoryWebTests(unittest.TestCase):
         self.assertIn("'story-settings'", JAVASCRIPT)
         self.assertIn("/^[fpngrs]\\./", JAVASCRIPT)
 
-    def test_no_js_invalid_and_dry_run_retain_settings_draft_without_activation(self):
+    @patch("newspipe.webdrafts.secrets.token_urlsafe", return_value="opaque37token")
+    def test_no_js_invalid_and_dry_run_retain_settings_draft_without_activation(self, _token):
         base = self.serve()
         before_config = (self.news / "sources.yaml").read_bytes()
         for number, dry in (("0", "1"), ("37", "1")):
@@ -121,7 +122,9 @@ class StoryWebTests(unittest.TestCase):
                 self.post(base, values={"s.window_days": number, "dry": dry}, json_accept=False)
             self.assertEqual(caught.exception.code, 303)
             location = caught.exception.headers["Location"]
-            self.assertNotIn("37", location)
+            redirect = urllib.parse.urlsplit(location)
+            self.assertEqual(redirect.path, "/items")
+            self.assertEqual(urllib.parse.parse_qs(redirect.query), {"draft": ["opaque37token"]})
             page = self.get(base, location)
             self.assertIn('action="/api/actions/story-settings"', page)
             self.assertIn('name="s.window_days"', page)
