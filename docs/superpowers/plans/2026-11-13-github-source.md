@@ -33,7 +33,7 @@
 
 ### Task 1: Native Provider Boundary
 
-**Files:** Create `src/newspipe/adapters/github.py`, `tests/test_github_source.py`; modify `source_registry.py`, `source_contract.py`, `net.py`; test existing source/worker/transport suites.
+**Files:** Create `src/newspipe/adapters/github.py`, `tests/test_github_source.py`; modify `source_registry.py`, `source_contract.py`, `net.py`, `pipeline.py`, `tests/test_source_collection.py`; test existing source/worker/transport suites.
 
 **Interfaces:** Consumes `net.request`, `FetchResult`, `SubscriptionReport`, worker `fetch_partitions(cfg, since)`. Produces importable GitHub `fetch`/`fetch_partitions`, declarative settings and optional safe `SubscriptionReport.diagnostics`. Extend `net.request` with opt-in response-header capture without changing byte return values or old callers.
 

@@ -126,7 +126,7 @@ def _http1_chunks(response, limit):
 
 
 def _request_h2(url: str, proxy: str | None, headers: dict, timeout: float,
-                *, max_bytes=None, max_redirects=None) -> bytes:
+                *, max_bytes=None, max_redirects=None, response_headers=None) -> bytes:
     """httpx + h2（ALPN 协商 HTTP/2）。异常统一转成 urllib 风格，调用方按同一套处理。"""
     import httpx
 
@@ -170,16 +170,22 @@ def _request_h2(url: str, proxy: str | None, headers: dict, timeout: float,
     if resp.status_code >= 400:
         raise urllib.error.HTTPError(url, resp.status_code, f"HTTP {resp.status_code}",
                                      Message(), None)
+    if response_headers is not None:
+        response_headers.update({key.lower(): value for key, value in resp.headers.items()})
     return body
 
 
 def request(url: str, method: str = "GET", data: bytes | None = None,
             headers: dict | None = None, timeout: float = 30,
             http2: bool = False, *, max_bytes: int | None = None,
-            max_redirects: int | None = None) -> bytes:
+            max_redirects: int | None = None, response_headers: dict | None = None) -> bytes:
     if (max_bytes is not None and (type(max_bytes) is not int or max_bytes < 1)
             or max_redirects is not None and (type(max_redirects) is not int or max_redirects < 0)):
         raise ValueError("Source limits must be positive bytes and nonnegative redirect counts.")
+    if response_headers is not None:
+        if not isinstance(response_headers, dict):
+            raise ValueError("Response headers need a mapping.")
+        response_headers.clear()
     hdr = {"User-Agent": _UA}
     if headers:
         hdr.update(headers)
@@ -191,7 +197,8 @@ def request(url: str, method: str = "GET", data: bytes | None = None,
     for proxy, tmo in ((None, min(timeout, 8.0)), (proxy_url(), timeout)):
         if http2:
             try:
-                return _request_h2(url, proxy, hdr, tmo, max_bytes=max_bytes, max_redirects=max_redirects)
+                options = {"response_headers": response_headers} if response_headers is not None else {}
+                return _request_h2(url, proxy, hdr, tmo, max_bytes=max_bytes, max_redirects=max_redirects, **options)
             except (ResponseLimitError, ResponseFormatError):
                 raise
             except urllib.error.HTTPError as exc:
@@ -213,6 +220,8 @@ def request(url: str, method: str = "GET", data: bytes | None = None,
                 timeout=tmo) as resp:
                 body = (_bounded_body(_http1_chunks(resp, max_bytes), resp.headers.get("Content-Encoding", "identity"), max_bytes)
                         if max_bytes is not None else resp.read())
+                if response_headers is not None:
+                    response_headers.update({key.lower(): value for key, value in resp.headers.items()})
                 return body
         except (ResponseLimitError, ResponseFormatError):
             raise

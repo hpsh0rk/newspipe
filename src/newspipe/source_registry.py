@@ -15,6 +15,11 @@ def validate_value(value, field: dict) -> None:
              "enum": lambda: isinstance(value, str) and value in field.get("choices", [])}
     if kind not in valid or not valid[kind]():
         raise ValueError("Adapter setting must match its declared type and choices.")
+    if kind in {"int", "float"} and ("min" in field and value < field["min"] or "max" in field and value > field["max"]):
+        raise ValueError("Adapter number is outside its declared range.")
+    if kind == "list" and ("max_items" in field and len(value) > field["max_items"]
+                           or field.get("item_pattern") and any(not re.fullmatch(field["item_pattern"], v) for v in value)):
+        raise ValueError("Adapter subscriptions do not match their declared syntax or limit.")
     if field.get("credential") and value and not re.fullmatch(r"[A-Z_][A-Z0-9_]*", value):
         raise ValueError("Credential setting must name an environment variable, never a literal secret.")
 
@@ -61,6 +66,16 @@ class AdapterDescriptor:
 
 
 REGISTRY = {
+    "github": AdapterDescriptor("github", "GitHub", ("public_user_events", "repository_releases", "original_evidence", "subscription_results", "optional_token", "rate_limit_status"), fields=(
+        {"path": "settings.users", "type": "list", "default": [], "label": "公开用户动态", "max_items": 100,
+         "item_pattern": r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", "help": "填写 GitHub 用户名，用逗号或换行分隔。只读取公开动态，不包含私有仓库事件；仓库发布可在下一项单独订阅。"},
+        {"path": "settings.repositories", "type": "list", "default": [], "label": "仓库发布", "max_items": 100,
+         "item_pattern": r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9_.-]{1,100}", "help": "填写 owner/repo，用逗号或换行分隔。订阅公开 Release（含预发布、不含草稿），不是提交列表。"},
+        {"path": "settings.token_env", "type": "str", "default": "", "label": "Token 环境变量名（可选）",
+         "credential": True, "reference": "environment", "help": "留空使用匿名公开 API；需要更高额度时填环境变量名，例如 GITHUB_TOKEN，不能填写 token 本身。已填写但环境变量缺失会报错，不会切换账号或降级匿名。"},
+        {"path": "settings.max_pages", "type": "int", "default": 1, "min": 1, "max": 3, "advanced": True,
+         "label": "每个订阅最多拉取页数", "help": "每页最多 100 条，1..3 页，共享此源采集超时。动态 API 只提供有限历史；满页时不推进游标，不保证长时间停机后的历史补齐。"},
+    )),
     "aihot": AdapterDescriptor("aihot", "AI 热榜", ("legacy_items", "hot_list")),
     "hn": AdapterDescriptor("hn", "Hacker News", ("legacy_items", "front_page", "article_links", "original_evidence", "subscription_results")),
     "reddit": AdapterDescriptor("reddit", "Reddit", ("legacy_items", "communities", "original_evidence", "subscription_results")),

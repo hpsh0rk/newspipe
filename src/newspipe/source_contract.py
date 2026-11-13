@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 import math
@@ -60,6 +60,27 @@ class SubscriptionReport:
     fetched: int = 0
     code: str = ""
     watermark: float | None = None
+    diagnostics: dict = field(default_factory=dict)
+
+
+def _diagnostics(value, *, stored=False):
+    if not isinstance(value, dict):
+        raise SourceContractError("Acquisition diagnostics must be an allowlisted mapping.")
+    checks = {"credential_mode": lambda v: v in {"anonymous", "token"} if isinstance(v, str) else False,
+              "window_limited": lambda v: type(v) is bool,
+              "rate_remaining": lambda v: type(v) is int and 0 <= v <= 2**31 - 1,
+              "rate_limit": lambda v: type(v) is int and 0 <= v <= 2**31 - 1,
+              "rate_reset_ts": lambda v: _timestamp(v) and v is not None}
+    out = {}
+    for key, item in value.items():
+        if key not in checks:
+            if stored:
+                continue
+            raise SourceContractError("Acquisition diagnostic key is unsupported.")
+        if not checks[key](item):
+            raise SourceContractError("Acquisition diagnostic value is invalid.")
+        out[key] = item
+    return out
 
 
 def _validate_reports(reports: tuple[SubscriptionReport, ...]) -> None:
@@ -84,6 +105,7 @@ def _validate_reports(reports: tuple[SubscriptionReport, ...]) -> None:
                 or report.status == "failure" and report.watermark is not None):
             raise SourceContractError("Subscription counts, error code and watermark contradict its status.")
         keys.add(report.key)
+        _diagnostics(report.diagnostics)
 
 
 @dataclass(frozen=True)
@@ -112,7 +134,8 @@ class FetchResult:
                 "failed": sum(report.status == "failure" for report in self.reports),
                 "reports": [{"key": "subscription-" + hashlib.sha256(report.key.encode()).hexdigest()[:16],
                              "index": index + 1, "status": report.status,
-                             "fetched": report.fetched, "code": report.code}
+                             "fetched": report.fetched, "code": report.code,
+                             **({"diagnostics": _diagnostics(report.diagnostics)} if report.diagnostics else {})}
                             for index, report in enumerate(self.reports[:MAX_DIAGNOSTIC_REPORTS])]}
         if len(self.reports) > MAX_DIAGNOSTIC_REPORTS:
             out["omitted_reports"] = len(self.reports) - MAX_DIAGNOSTIC_REPORTS
@@ -137,8 +160,11 @@ def safe_summary(value: dict) -> dict:
                 or not re.fullmatch(r"subscription-[0-9a-f]{16}", row["key"])
                 or type(row.get("index")) is not int or row["index"] != index + 1):
             raise SourceContractError("Invalid public subscription diagnostic.")
-        reports.append(SubscriptionReport(row["key"], row.get("status"), row.get("fetched"), row.get("code")))
+        diagnostic = _diagnostics(row.get("diagnostics", {}), stored=True)
+        reports.append(SubscriptionReport(row["key"], row.get("status"), row.get("fetched"), row.get("code"), diagnostics=diagnostic))
         safe_rows.append({k: row[k] for k in ("key", "index", "status", "fetched", "code")})
+        if diagnostic:
+            safe_rows[-1]["diagnostics"] = diagnostic
     _validate_reports(tuple(reports))
     status = ("failure" if counts[2] and not counts[1] else "partial_failure" if counts[2]
               else "success" if counts[0] else "empty")
