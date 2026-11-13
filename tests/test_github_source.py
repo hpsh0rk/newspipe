@@ -121,6 +121,42 @@ class GitHubSourceTests(unittest.TestCase):
         self.assertFalse(out.items[0]["source_text_complete"])
         self.assertNotIn("SECRET", json.dumps(out.items))
 
+    def test_unknown_event_does_not_interpret_a_known_payload_shape(self):
+        out, _ = self.collect([event(type="FutureEvent", payload={"comment": {
+            "body": "Unverified interpretation", "html_url": "https://github.com/Owner/Repo/issues/7#comment-9"}})],
+            {"settings": {"users": ["Alice"]}})
+        self.assertEqual(len(out.items), 1)
+        self.assertEqual(out.items[0]["source_text"], "")
+        self.assertEqual(out.items[0]["original_url"], "")
+        self.assertNotIn("comment", out.items[0]["facts"])
+
+    def test_release_event_drafts_are_excluded_and_unknown_visibility_fails(self):
+        for draft, want in ((True, "empty"), (None, "failure"), ("false", "failure"), (False, "success")):
+            with self.subTest(draft=draft):
+                nested = release(draft=draft, body="Unpublished notes" if draft else "Published notes")
+                out, _ = self.collect([event(type="ReleaseEvent", payload={"action": "published", "release": nested})],
+                    {"settings": {"users": ["Alice"]}})
+                self.assertEqual(out.status, want)
+                if draft is not False:
+                    self.assertEqual(out.items, [])
+
+    def test_authenticated_release_collection_proves_repository_is_public_first(self):
+        for private, visibility, want in ((True, "private", "failure"), (None, None, "failure"),
+                                           (False, "private", "failure"), (False, "public", "success")):
+            calls = []
+            def transport(url, **options):
+                calls.append(url)
+                return json.dumps([release(body="Confidential notes")] if "/releases?" in url else
+                                  {"private": private, "visibility": visibility}).encode()
+            with self.subTest(private=private, visibility=visibility), patch.dict(os.environ, {"NEWSPIPE_TEST_TOKEN": "synthetic-token"}), patch.object(self.github, "request", side_effect=transport):
+                out = self.github.fetch({"settings": {"repositories": ["Owner/Repo"], "token_env": "NEWSPIPE_TEST_TOKEN"}})
+                self.assertEqual(out.status, want)
+                self.assertEqual(calls[0], "https://api.github.com/repos/owner/repo")
+                if want == "failure":
+                    self.assertEqual(len(calls), 1)
+                    self.assertEqual(out.reports[0].code, "permission")
+                    self.assertNotIn("Confidential", json.dumps(out.items))
+
     def test_invalid_nested_or_required_provider_fields_fail_the_subscription(self):
         for row in (release(id=True), release(body={"SECRET": 1}), release(author="bad"),
                     release(author=[]), release(published_at="bad"), release(html_url="http://127.0.0.1/admin"),

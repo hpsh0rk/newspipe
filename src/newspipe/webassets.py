@@ -103,6 +103,8 @@ JAVASCRIPT = r"""'use strict';
     if (!trigger) return;
     const adapter = form.querySelector('[name="f.adapter"]');
     if (adapter) {
+      const rendered = form.querySelector('[name="adapter_rendered"]');
+      if (rendered) rendered.value = adapter.value;
       form.querySelectorAll('[data-adapter-for]').forEach(group => {
         group.hidden = group.dataset.adapterFor !== adapter.value;
         group.disabled = group.hidden;

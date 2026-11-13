@@ -164,6 +164,30 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 self.assertEqual(source.extra["settings"]["repositories"], ["Owner/Repo"])
                 self.assertEqual(source.notify.policy, "archive")
 
+    def test_no_js_adapter_roundtrip_preserves_inactive_unsaved_settings(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine, width=360, javascript=False) as (fixture, page):
+                before = (fixture.news_dir / "sources.yaml").read_bytes()
+                page.goto(fixture.url + "/config?new=1")
+                form = page.locator('form[action="/api/actions/source-save"]')
+                form.locator('[name="f.adapter"]').select_option("github")
+                with page.expect_navigation():
+                    form.get_by_role("button", name="更新订阅参数", exact=True).click()
+                form = page.locator('form[action="/api/actions/source-save"]')
+                form.locator('[name="f.settings.users"]').fill("Alice")
+                form.locator('[name="f.settings.repositories"]').fill("Owner/Repo")
+                form.locator('[data-adapter-for="github"] summary').click()
+                form.locator('[name="f.settings.max_pages"]').fill("2")
+                for adapter in ("rsshub", "github"):
+                    form.locator('[name="f.adapter"]').select_option(adapter)
+                    with page.expect_navigation():
+                        form.get_by_role("button", name="更新订阅参数", exact=True).click()
+                    form = page.locator('form[action="/api/actions/source-save"]')
+                self.expect(form.locator('[name="f.settings.users"]')).to_have_value("Alice")
+                self.expect(form.locator('[name="f.settings.repositories"]')).to_have_value("Owner/Repo")
+                self.expect(form.locator('[name="f.settings.max_pages"]')).to_have_value("2")
+                self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
+
     def test_story_preview_detail_pagination_and_responsive_read_only_navigation(self):
         for engine in self.browsers:
             for width in (360, 1440):

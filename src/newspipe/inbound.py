@@ -392,9 +392,19 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
             elif page["q"]:
                 page["catalog"] = rss_mod.search(page["q"])
             if draft and draft.get("form") and draft.get("action") in {"source-save", "source-patch"}:
+                from newspipe import webdrafts, actions
                 selected = (draft["form"].get("f.adapter") or [""])[0]
                 if selected in schema["adapters"]:
-                    page["values"] = {**page.get("values", page.get("prefill", {})), "adapter": selected}
+                    snapshot = webdrafts.adapter_drafts(draft["form"])
+                    values = {**page.get("values", page.get("prefill", {})), "adapter": selected}
+                    for field in schema["adapter_descriptors"][selected]["fields"]:
+                        raw = snapshot.get(selected, {}).get(field["path"])
+                        if raw is not None:
+                            try:
+                                values[field["path"]] = actions._coerce(field, raw)
+                            except actions.ActionInputError:
+                                values[field["path"]] = raw[0] if raw else ""
+                    page.update(values=values, adapter_drafts=snapshot)
             return view_mod.config_html(payload, schema=schema, actions=act, flash=flash, page=page)
 
         def do_GET(self) -> None:                          # noqa: N802（stdlib 命名）

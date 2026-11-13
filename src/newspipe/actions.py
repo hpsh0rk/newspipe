@@ -165,6 +165,8 @@ def build_source_body(form: dict[str, list[str]],
     schema = schema or config_mod.describe_schema()
     body: dict[str, Any] = {}
     adapter = (form.get("f.adapter") or [""])[0]
+    if "adapter_rendered" in form and form["adapter_rendered"] != [adapter]:
+        raise ActionInputError("适配器已切换，请先点击“更新订阅参数”再校验或保存")
     for field in config_mod.source_fields(adapter, schema):
         path = str(field.get("path") or "")
         raw = form.get(f"{FORM_PREFIX}{path}")

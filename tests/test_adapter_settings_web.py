@@ -135,6 +135,24 @@ class AdapterSettingsWebTests(unittest.TestCase):
             self.assertIn("额度剩余 0 / 60", page)
             self.assertIn("分页上限", page)
 
+    def test_inactive_drafts_are_sanitized_bounded_and_not_cli_parameters(self):
+        from newspipe.webdrafts import safe_values, adapter_drafts
+        form = self.form(**{"adapter_rendered": ["rsshub"], "f.adapter": ["rsshub"], "adapter_draft": [json.dumps({
+            "github": {"settings.users": ["Alice"], "settings.token_env": ["Bearer sensitive-input"]}})]})
+        retained = safe_values(form)
+        self.assertNotIn("sensitive-input", json.dumps(retained))
+        self.assertEqual(adapter_drafts(retained)["github"]["settings.users"], ["Alice"])
+        self.assertNotIn("settings", actions.build_source_body(retained))
+        with self.assertRaises(actions.ActionInputError):
+            adapter_drafts({"adapter_draft": ["x" * 32769]})
+
+    def test_no_js_save_requires_refresh_after_adapter_changes(self):
+        with offline_workbench() as fixture:
+            before = (fixture.news_dir / "sources.yaml").read_bytes()
+            out = actions.dispatch("source-save", self.form(adapter_rendered=["rsshub"]), fixture.news_dir)
+            self.assertFalse(out["ok"])
+            self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
+
 
 if __name__ == "__main__":
     unittest.main()

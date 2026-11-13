@@ -230,6 +230,8 @@ def _source_editor(payload, schema, token, page):
     action = "source-patch" if existing else "source-save"
     route = "/config"
     form = _start(action, token, payload["sources_hash"], route)
+    form += _hidden("adapter_rendered", adapter)
+    form += _hidden("adapter_draft", json.dumps(page.get("adapter_drafts", {})))
     form += _hidden("source_revision", payload.get("source_revisions", {}).get(name, "new"))
     form += _hidden("preview_kind", "source")
     if existing:

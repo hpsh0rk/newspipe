@@ -20,6 +20,23 @@ class _MissingToken(Exception):
     pass
 
 
+class _NonPublicRepository(Exception):
+    pass
+
+
+EVENT_FIELDS = {
+    "PushEvent": ("ref", "head", "before", "size", "distinct_size", "commits"),
+    "CreateEvent": ("ref", "ref_type"), "DeleteEvent": ("ref", "ref_type"),
+    "CommitCommentEvent": ("comment",), "IssueCommentEvent": ("action", "issue", "comment"),
+    "IssuesEvent": ("action", "issue"), "PullRequestEvent": ("action", "pull_request"),
+    "PullRequestReviewEvent": ("action", "pull_request", "review"),
+    "PullRequestReviewCommentEvent": ("action", "pull_request", "comment"),
+    "PullRequestReviewThreadEvent": ("action", "pull_request"),
+    "ReleaseEvent": ("action", "release"), "DiscussionEvent": ("action", "discussion"),
+    "MemberEvent": ("action",), "WatchEvent": ("action",),
+}
+
+
 def _settings(cfg):
     settings = cfg.get("settings", {})
     if not isinstance(settings, dict):
@@ -145,7 +162,14 @@ def _activity(row, key):
         raise ValueError("Missing public event repository/type.")
     repo_url = "https://github.com/" + repo
     actor = _text(_object(row, "actor"), "login")[:500]
-    payload = _object(row, "payload")
+    original_payload = _object(row, "payload")
+    payload = {k: v for k, v in original_payload.items() if k in EVENT_FIELDS.get(kind, ())}
+    if kind == "ReleaseEvent":
+        nested = _object(payload, "release")
+        if type(nested.get("draft")) is not bool:
+            raise ValueError("Unknown nested release visibility.")
+        if nested["draft"]:
+            return None
     facts = {"event_type": kind, "repository": repo, "author": actor}
     for field in ("action", "ref", "ref_type", "head", "before"):
         if field in payload:
@@ -224,6 +248,16 @@ def fetch_partitions(cfg: dict | None = None, since: float | None = None):
         try:
             path = ("users/" + quote(name, safe="") + "/events/public" if kind == "user" else
                     "repos/" + "/".join(quote(part, safe="") for part in name.split("/")) + "/releases")
+            if kind == "repo" and token:
+                response_headers = {}
+                raw = request("https://api.github.com/" + path.removesuffix("/releases"),
+                              headers=headers, timeout=20, max_bytes=feedparse.MAX_BODY,
+                              max_redirects=0, response_headers=response_headers)
+                diagnostic.update(_quota(response_headers))
+                repository = json.loads(raw.decode("utf-8"))
+                if (not isinstance(repository, dict) or repository.get("private") is not False
+                        or repository.get("visibility") not in (None, "public")):
+                    raise _NonPublicRepository()
             items, dates, seen = [], [], set()
             for page in range(1, pages + 1):
                 response_headers = {}
@@ -253,6 +287,8 @@ def fetch_partitions(cfg: dict | None = None, since: float | None = None):
             yield FetchResult(items, (replace(report, diagnostics=diagnostic),))
         except Exception as error:
             code = _common.issue_code(error)
+            if isinstance(error, _NonPublicRepository):
+                code = "permission"
             if isinstance(error, urllib.error.HTTPError):
                 quota = _quota(error.headers)
                 diagnostic.update(quota)
