@@ -160,6 +160,7 @@ class FetchCfg:
     trigger: str = "slot"
     slots: tuple[str, ...] = ()
     interval_min: float = 0.0
+    timeout_seconds: int = 90
 
     @classmethod
     def parse(cls, raw: Any, *, where: str) -> "FetchCfg":
@@ -169,11 +170,14 @@ class FetchCfg:
         trigger = _enum(raw.get("trigger"), TRIGGERS, where=f"{where}.trigger", default="slot")
         slots = _tuple_of_str(raw.get("slots"), where=f"{where}.slots")
         interval = _num(raw.get("interval_min"), where=f"{where}.interval_min", default=0.0)
+        timeout = _int(raw.get("timeout_seconds"), where=f"{where}.timeout_seconds", default=90)
+        if not 1 <= timeout <= 600:
+            raise ConfigError(f"{where}.timeout_seconds 需要 1..600 秒")
         if trigger == "slot" and not slots:
             raise ConfigError(f"{where}: trigger=slot 必须给 slots")
         if trigger == "poll" and interval < 0:
             raise ConfigError(f"{where}: interval_min 不能为负")
-        return cls(trigger=trigger, slots=slots, interval_min=interval)
+        return cls(trigger=trigger, slots=slots, interval_min=interval, timeout_seconds=timeout)
 
 
 @dataclass(frozen=True)
@@ -435,6 +439,9 @@ def describe_schema(news_dir: Path | None = None) -> dict[str, Any]:
          "choices": slots, "default": [], "help": "勾选采集时刻，可多选；时间由消息源页统一管理，共用时间的源同步生效。发送时间在通知策略中独立配置。"},
         {"path": "fetch.interval_min", "axis": "fetch", "label": "轮询间隔（分钟）", "type": "float",
          "default": 0.0, "active_for": "poll", "help": "仅间隔采集使用：两次抓取之间的最小间隔；定时或手动采集时不生效"},
+        {"path": "fetch.timeout_seconds", "axis": "fetch", "label": "采集时限（秒）", "type": "int",
+         "default": 90, "advanced": True, "min": 1, "max": 600,
+         "help": "本消息源的所有订阅共用 1..600 秒采集预算，不含 AI 加工和发送。超时保留已完成订阅，未完成部分下次重试；不是整轮任务的总时限。"},
         # ---- ② 留什么
         {"path": "filter.include_keywords", "axis": "filter", "label": "包含关键词", "type": "list",
          "default": [], "help": "命中任一即保留；留空 = 不过滤"},
@@ -505,6 +512,7 @@ def source_values(cfg: SourceConfig) -> dict[str, Any]:
         "fetch.trigger": cfg.fetch.trigger,
         "fetch.slots": list(cfg.fetch.slots),
         "fetch.interval_min": cfg.fetch.interval_min,
+        "fetch.timeout_seconds": cfg.fetch.timeout_seconds,
         "filter.include_keywords": list(cfg.filter.include_keywords),
         "filter.exclude_keywords": list(cfg.filter.exclude_keywords),
         "filter.min_items": cfg.filter.min_items,
@@ -779,7 +787,7 @@ def summarize(cfg: Config) -> list[dict[str, Any]]:
             "enabled": src.enabled,
             "adapter": src.adapter,
             "fetch": {"trigger": src.fetch.trigger, "slots": list(src.fetch.slots),
-                      "interval_min": src.fetch.interval_min},
+                      "interval_min": src.fetch.interval_min, "timeout_seconds": src.fetch.timeout_seconds},
             "filter": {"min_items": src.filter.min_items, "max_items": src.filter.max_items,
                        "rank": src.filter.rank,
                        "include": len(src.filter.include_keywords),

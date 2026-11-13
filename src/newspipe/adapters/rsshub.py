@@ -8,16 +8,27 @@ from newspipe.adapters import _common
 from newspipe.errors import ConfigError
 from newspipe.source_contract import FetchResult
 
+FETCH_RESULT_ORDER = "pub_desc"
+
 
 def fetch(cfg: dict | None = None, since: float | None = None) -> FetchResult:
+    items, reports = [], []
+    for part in fetch_partitions(cfg, since=since):
+        items.extend(part.items)
+        reports.extend(part.reports)
+    items.sort(key=lambda item: -(item.get("pub_ts") or 0))
+    return FetchResult(items, tuple(reports))
+
+
+def fetch_partitions(cfg: dict | None = None, since: float | None = None):
     cfg = cfg or {}
     try:
         feeds = _common.subscriptions(cfg)
         if not isinstance(cfg.get("feed_label", ""), str):
             raise ConfigError("来源标签需要字符串")
     except ConfigError as error:
-        return _common.configuration_failure("rsshub", error)
-    items, reports = [], []
+        yield _common.configuration_failure("rsshub", error)
+        return
     for key in feeds:
         try:
             url = rssconnect.feed_url(key, cfg.get("rsshub_base_url", ""))
@@ -37,9 +48,6 @@ def fetch(cfg: dict | None = None, since: float | None = None) -> FetchResult:
                 if len(entry.native_id) > 120:
                     item.update(identity_version="rss-full-v2", legacy_ext_id=entry.native_id[:120])
                 rows.append(item)
-            reports.append(_common.success_report(key, rows, [_common.entry_time(entry) for entry in entries]))
-            items.extend(rows)
+            yield FetchResult(rows, (_common.success_report(key, rows, [_common.entry_time(entry) for entry in entries]),))
         except Exception as error:
-            reports.append(_common.failed(key, error))
-    items.sort(key=lambda item: -(item.get("pub_ts") or 0))
-    return FetchResult(items, tuple(reports))
+            yield FetchResult([], (_common.failed(key, error),))

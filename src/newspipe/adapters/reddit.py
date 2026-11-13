@@ -18,11 +18,19 @@ def _post_id(link: str) -> str:
 
 
 def fetch(cfg: dict | None = None, since: float | None = None) -> FetchResult:
+    items, reports = [], []
+    for part in fetch_partitions(cfg, since=since):
+        items.extend(part.items)
+        reports.extend(part.reports)
+    return FetchResult(items, tuple(reports))
+
+
+def fetch_partitions(cfg: dict | None = None, since: float | None = None):
     try:
         feeds = _common.subscriptions(cfg or {}, DEFAULT_SUBS)
     except ConfigError as error:
-        return _common.configuration_failure("reddit", error)
-    items, reports = [], []
+        yield _common.configuration_failure("reddit", error)
+        return
     for sub in feeds:
         try:
             if not re.fullmatch(r"[A-Za-z0-9_]{1,100}", sub):
@@ -39,8 +47,6 @@ def fetch(cfg: dict | None = None, since: float | None = None) -> FetchResult:
                              "source": f"r/{sub} · u/{entry.author.removeprefix('/u/')}",
                              "summary": entry.source_text[:600], "category": "reddit", "score": None,
                              "content_kind": "post", **_common.entry_fields(entry, sub)})
-            reports.append(_common.success_report(sub, rows, [_common.entry_time(entry) for entry in entries]))
-            items.extend(rows)
+            yield FetchResult(rows, (_common.success_report(sub, rows, [_common.entry_time(entry) for entry in entries]),))
         except Exception as error:
-            reports.append(_common.failed(sub, error))
-    return FetchResult(items, tuple(reports))
+            yield FetchResult([], (_common.failed(sub, error),))

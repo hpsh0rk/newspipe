@@ -15,7 +15,6 @@
 """
 from __future__ import annotations
 
-import importlib
 import hashlib
 import json
 import uuid
@@ -29,7 +28,7 @@ from newspipe import events, policy, render, runtime, scheduler, state
 from newspipe.errors import ConfigError, DeliveryError
 from newspipe.state import now_iso, today
 from newspipe.source_contract import FetchResult, SubscriptionReport, SourceContractError, identity_key, item_identity_keys, normalize_fetch
-from newspipe import story_capture
+from newspipe import source_worker, story_capture
 from newspipe.story_state import StoryStorageError
 
 
@@ -134,7 +133,7 @@ def _capture_commit(store, capture, run):
 
 # ── 小工具 ────────────────────────────────────────────────────────────────────
 def _adapter(name: str) -> Any:
-    return importlib.import_module(f"newspipe.adapters.{name}")
+    return source_worker.Adapter(f"newspipe.adapters.{name}")
 
 
 def _adapter_config(cfg: Any, source: Any) -> dict:
@@ -201,8 +200,9 @@ def _watermark(since: float | None, kept: list[dict], raw: list[dict], now: date
 def _acquire(cfg: Any, scfg: Any, since: float | None, run: SourceRun) -> FetchResult | None:
     """The only adapter-result boundary. Never expose arbitrary provider exceptions."""
     try:
-        result = normalize_fetch(_adapter(scfg.adapter).fetch(_adapter_config(cfg, scfg), since=since),
-                                 source=scfg.name, adapter=scfg.adapter)
+        with source_worker.limit(scfg.fetch.timeout_seconds):
+            result = normalize_fetch(_adapter(scfg.adapter).fetch(_adapter_config(cfg, scfg), since=since),
+                                     source=scfg.name, adapter=scfg.adapter)
         if result.reported:
             run.collection = result.summary()
     except Exception as exc:
@@ -752,6 +752,11 @@ def run_source(cfg: Any, store: state.Store, name: str, *, slot: str | None = No
                 notify_source(cfg, store, name, dry=dry, slot=slot, now=now)]
     if scfg.fetch.trigger == "poll":
         return run_poll(cfg, store, dry=dry, only=name, force=force, now=now)
+    if scfg.fetch.trigger == "manual":
+        if not scfg.enabled:
+            return [SourceRun(source=scfg.name, adapter=scfg.adapter, status="disabled")]
+        return [_process(cfg, store, scfg, digest=now.date().isoformat(), slot=slot or "manual",
+                         dry=dry, now=now, mode="manual", force=force)]
     use = slot or (scfg.fetch.slots[0] if scfg.fetch.slots else "manual")
     return run_slot(cfg, store, use, dry=dry, only=name, now=now)
 
