@@ -39,7 +39,7 @@ def fetch(cfg: dict | None = None, since: float | None = None) -> FetchResult:
             dates.append(stamp)
             if stamp is not None and stamp <= cutoff:
                 continue
-            for field in ("title", "url", "story_text"):
+            for field in ("title", "url", "story_text", "author"):
                 if hit.get(field) is not None and not isinstance(hit[field], str):
                     raise ValueError("Invalid provider text.")
             score, comments = _number(hit.get("points")), _number(hit.get("num_comments"))
@@ -50,13 +50,15 @@ def fetch(cfg: dict | None = None, since: float | None = None) -> FetchResult:
             if article and article != permalink:
                 refs.insert(0, {"role": "article", "url": article})
             title = hit.get("title") or ""
+            author = (hit.get("author") or "")[:500]
             items.append({"ext_id": f"hn:{native}", "title": title[:500], "url": article or permalink,
                           "original_url": permalink, "source": f"HackerNews · {score or 0}分/{comments or 0}评论",
                           "summary": text[:300], "category": "", "score": score,
                           "pub_ts": stamp, "subscription": key, "content_kind": "post",
                           "source_text": text, "source_markup": raw, "source_text_complete": False,
                           "source_text_truncated": truncated or len(title) > 500, "referenced_urls": refs[:20],
-                          "metadata": {"native_id": native, "points": score, "comments": comments}})
+                          "facts": {"author": author} if author else {},
+                          "metadata": {"native_id": native, "author": author, "points": score, "comments": comments}})
         items.sort(key=lambda item: item.get("score") or 0, reverse=True)
         return FetchResult(items, (_common.success_report(key, items, dates),))
     except Exception as error:

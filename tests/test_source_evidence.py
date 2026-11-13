@@ -66,6 +66,14 @@ class SourceEvidenceTests(unittest.TestCase):
         self.assertEqual(request.call_count, 1, "source links are not fetched")
         self.assertFalse(observations.prepare_observation("s", "rsshub", item).copy_hash)
 
+    def test_supplied_authors_are_preserved_as_public_source_facts(self):
+        for adapter, body in ((rsshub, rss().replace(b'</item>', b'<author>Alice</author></item>')),
+                              (hn, json.dumps({"hits": [hit(author="Alice")]}).encode())):
+            with self.subTest(adapter=adapter.__name__):
+                out, _ = self.fetch(adapter, body)
+                self.assertEqual(out.items[0]["facts"]["author"], "Alice")
+                self.assertIn("Alice", observations.prepare_observation("s", "test", out.items[0]).evidence.facts_json)
+
     def test_rss_clipping_and_unknown_dates_are_explicit(self):
         out, _ = self.fetch(rsshub, rss("x" * 50000, date="not a date"))
         item, = out.items

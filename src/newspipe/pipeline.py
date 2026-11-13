@@ -157,7 +157,7 @@ def _merge(first: list[dict], second: list[dict]) -> list[dict]:
     return out
 
 
-def _queued_ids(store: state.Store, source: str) -> set[str]:
+def _queued_ids(store: state.Store, source: str, *, legacy_only=False) -> set[str]:
     path = store.root / "pending" / f"{source}.jsonl"
     if not path.is_file():
         return set()
@@ -166,7 +166,9 @@ def _queued_ids(store: state.Store, source: str) -> set[str]:
         if not line.strip():
             continue
         try:
-            out.add(identity_key(json.loads(line).get("ext_id")))
+            row = json.loads(line)
+            if not legacy_only or row.get("identity_version") != "rss-full-v2":
+                out.add(identity_key(row.get("ext_id")))
         except ValueError:
             continue
     return out
@@ -182,7 +184,9 @@ def _queue(store: state.Store, source: str, items: list[dict]) -> int:
     if not items:
         return 0
     known = _queued_ids(store, source) | store.pushed_ids(source)
-    todo = [it for it in items if not item_identity_keys(it).intersection(known)]
+    legacy = _queued_ids(store, source, legacy_only=True) | store.pushed_ids(source, legacy_only=True)
+    todo = [it for it in items if identity_key(it.get("ext_id")) not in known
+            and not (item_identity_keys(it) - {identity_key(it.get("ext_id"))}).intersection(legacy)]
     return store.append_pending(source, todo) if todo else 0
 
 
@@ -213,7 +217,10 @@ def _acquire(cfg: Any, scfg: Any, since: float | None, run: SourceRun) -> FetchR
         run.collection = FetchResult([], (SubscriptionReport(scfg.name, "failure", code=code),)).summary()
         return None
     if result.status == "failure":
-        run.status, run.note = "error", "全部订阅采集失败；检查订阅诊断及消息源设置"
+        permanent = all(report.code in {"configuration", "credentials"} for report in result.reports)
+        run.status = "config_missing" if permanent else "error"
+        run.note = ("采集配置不可用；订阅需要 1..100 项，检查地址、社区名称及凭据设置" if permanent
+                    else "全部订阅采集失败；检查订阅诊断及消息源设置")
         return None
     if result.status == "partial_failure":
         run.note = "部分订阅采集失败；已保留成功内容，未推进内容游标"

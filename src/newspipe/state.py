@@ -111,8 +111,9 @@ class Store:
         from newspipe.observations import prepare_observation
         from newspipe.source_contract import SourceContractError
         completed = self.pushed_ids(source)
+        legacy_completed = self.pushed_ids(source, legacy_only=True)
         aliases = aliases or {}
-        found = {native: {"completed": native in completed or bool(completed.intersection(aliases.get(native, ()))),
+        found = {native: {"completed": native in completed or bool(legacy_completed.intersection(aliases.get(native, ()))),
                           "availability": "missing_material", "draft": None}
                  for native in native_ids}
         if not completed.intersection(native_ids):
@@ -150,14 +151,16 @@ class Store:
         return self.news_dir.joinpath(*parts)
 
     # ── 幂等闸 ──────────────────────────────────────────────────────────────
-    def pushed_ids(self, source: str) -> set[str]:
+    def pushed_ids(self, source: str, *, legacy_only: bool = False) -> set[str]:
         p = self.root / "pushed" / f"{source}.jsonl"
         if not p.is_file():
             return set()
         ids: set[str] = set()
         for line in p.read_text(encoding="utf-8").splitlines():
             try:
-                ids.add(identity_key(json.loads(line)["ext_id"]))
+                row = json.loads(line)
+                if not legacy_only or row.get("identity_version") != "rss-full-v2":
+                    ids.add(identity_key(row["ext_id"]))
             except Exception:
                 continue
         return ids
@@ -169,8 +172,10 @@ class Store:
             for it in items:
                 if identity_key(it["ext_id"]) in known:
                     continue
-                line = json.dumps({"ext_id": it["ext_id"], "date": digest,
-                                   "title": str(it.get("title", ""))[:60]}, ensure_ascii=False)
+                receipt = {"ext_id": it["ext_id"], "date": digest, "title": str(it.get("title", ""))[:60]}
+                if it.get("identity_version") == "rss-full-v2":
+                    receipt["identity_version"] = "rss-full-v2"
+                line = json.dumps(receipt, ensure_ascii=False)
                 atomic_append_line(p, line)
                 known.add(identity_key(it["ext_id"]))
 

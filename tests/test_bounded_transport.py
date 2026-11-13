@@ -2,8 +2,11 @@
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
+import tracemalloc
 import unittest
 import urllib.error
+import urllib.request
+import gzip
 from unittest.mock import MagicMock, patch
 
 from newspipe import net
@@ -72,12 +75,13 @@ class BoundedTransportTests(unittest.TestCase):
         client = MagicMock()
         client.__enter__.return_value = client
         response = MagicMock(status_code=200, headers={})
-        response.iter_bytes.return_value = iter([b'x' * 8, b'y' * 8])
+        response.iter_raw.return_value = iter([b'x' * 8, b'y' * 8])
         client.stream.return_value.__enter__.return_value = response
         with patch("httpx.Client", return_value=client) as constructor, self.assertRaises(net.ResponseLimitError):
             net.request("https://feed.example.invalid", http2=True, max_bytes=10, max_redirects=3)
         self.assertEqual(constructor.call_count, 1)
         self.assertEqual(constructor.call_args.kwargs["max_redirects"], 3)
+        self.assertFalse(constructor.call_args.kwargs.get("trust_env", True), "source exits must not inherit unrelated proxies")
         self.assertTrue(client.stream.return_value.__exit__.called)
         client.get.assert_not_called()
 
@@ -92,12 +96,102 @@ class BoundedTransportTests(unittest.TestCase):
         error = urllib.error.HTTPError("https://feed.example.invalid", 403, "Denied", {}, rejected)
         response = MagicMock()
         response.__enter__.return_value = response
-        response.read.return_value = b'ok'
+        response.headers = {}
+        response.read.side_effect = [b'ok', b'']
         opener = MagicMock()
         opener.open.side_effect = [error, response]
         with patch("urllib.request.build_opener", return_value=opener):
             self.assertEqual(net.request("https://feed.example.invalid", max_bytes=10), b'ok')
         rejected.close.assert_called_once()
+
+    def test_redirect_handlers_close_intermediate_bodies_without_draining(self):
+        for status in (301, 302, 303, 307, 308):
+            with self.subTest(status=status):
+                handler = net._LimitedRedirect(5)
+                handler.add_parent(MagicMock())
+                request = urllib.request.Request("https://feed.example.invalid/start")
+                request.timeout = 1
+                body = MagicMock()
+                body.read.return_value = b'x' * (8 * 1024 * 1024)
+                getattr(handler, f"http_error_{status}")(request, body, status, "Redirect", {"location": "/final"})
+                body.read.assert_not_called()
+                body.close.assert_called()
+
+    def test_http2_redirect_body_is_not_read(self):
+        import httpx
+        consumed = []
+        class LargeBody(httpx.SyncByteStream):
+            def __iter__(self):
+                for _ in range(128):
+                    consumed.append(65536)
+                    yield b'x' * 65536
+        def handler(request):
+            return (httpx.Response(302, headers={"Location": "/final"}, stream=LargeBody())
+                    if request.url.path == "/start" else httpx.Response(200, stream=httpx.ByteStream(b'ok')))
+        client_type = httpx.Client
+        def client(**kw):
+            kw["proxy"] = None
+            kw["trust_env"] = False
+            return client_type(transport=httpx.MockTransport(handler), **kw)
+        with patch("httpx.Client", side_effect=client):
+            self.assertEqual(net.request("https://feed.example.invalid/start", http2=True, max_bytes=2 * 1024 * 1024, max_redirects=5), b'ok')
+        self.assertEqual(sum(consumed), 0)
+
+    def test_http2_gzip_expansion_is_bounded_before_materialization(self):
+        import httpx
+        encoded = gzip.compress(b'x' * (32 * 1024 * 1024))
+        class CompressedBody(httpx.SyncByteStream):
+            def __iter__(self):
+                yield encoded
+        client_type = httpx.Client
+        transport = httpx.MockTransport(lambda _: httpx.Response(200, headers={"Content-Encoding": "gzip"}, stream=CompressedBody()))
+        def client(**kw):
+            kw["proxy"] = None
+            kw["trust_env"] = False
+            return client_type(transport=transport, **kw)
+        with patch("httpx.Client", side_effect=client):
+            tracemalloc.start()
+            try:
+                with self.assertRaises(net.ResponseLimitError):
+                    net.request("https://feed.example.invalid", http2=True, max_bytes=2 * 1024 * 1024, max_redirects=5)
+                peak = tracemalloc.get_traced_memory()[1]
+            finally:
+                tracemalloc.stop()
+        self.assertLess(peak, 12 * 1024 * 1024)
+
+    def test_bounded_codec_handles_gzip_members_and_rejects_incomplete_or_unknown_encoding(self):
+        encoded = gzip.compress(b'one') + gzip.compress(b'two')
+        self.assertEqual(net._bounded_body([encoded[:7], encoded[7:]], "gzip", 100), b'onetwo')
+        with self.assertRaises(net.ResponseFormatError):
+            net._bounded_body([encoded[:-4]], "gzip", 100)
+        with self.assertRaises(net.ResponseFormatError):
+            net._bounded_body([b'unknown'], "br", 100)
+
+    def test_manual_redirects_do_not_forward_credentials_to_another_origin(self):
+        import httpx
+        seen = []
+        def handler(request):
+            seen.append((request.url.host, request.headers.get("authorization"), request.headers.get("x-api-key")))
+            return (httpx.Response(302, headers={"Location": "https://other.example.invalid/final"}, stream=httpx.ByteStream(b''))
+                    if request.url.host == "feed.example.invalid" else httpx.Response(200, stream=httpx.ByteStream(b'ok')))
+        client_type = httpx.Client
+        def client(**kw):
+            kw["proxy"] = None
+            kw["trust_env"] = False
+            return client_type(transport=httpx.MockTransport(handler), **kw)
+        with patch("httpx.Client", side_effect=client):
+            net.request("https://feed.example.invalid/start", http2=True, headers={"Authorization": "synthetic", "X-API-Key": "synthetic"}, max_bytes=100, max_redirects=5)
+        with self.subTest(transport="http2"):
+            self.assertEqual(seen, [("feed.example.invalid", "synthetic", "synthetic"), ("other.example.invalid", None, None)])
+        redirect = net._LimitedRedirect(5)
+        parent = MagicMock()
+        redirect.add_parent(parent)
+        request = urllib.request.Request("https://feed.example.invalid/start", headers={"Authorization": "synthetic", "X-API-Key": "synthetic"})
+        request.timeout = 1
+        redirect.http_error_302(request, MagicMock(), 302, "Redirect", {"location": "https://other.example.invalid/final"})
+        with self.subTest(transport="http1"):
+            self.assertNotIn("Authorization", parent.open.call_args.args[0].headers)
+            self.assertNotIn("X-api-key", parent.open.call_args.args[0].headers)
 
 
 if __name__ == "__main__":

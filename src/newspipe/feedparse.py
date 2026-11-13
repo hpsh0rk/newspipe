@@ -125,6 +125,20 @@ def _atom_content(node):
     return node.text or "", node.get("type", "text") == "text"
 
 
+def _xhtml_references(node, base):
+    references, stack = [], [(node, base)]
+    while stack and len(references) < 20:
+        current, parent_base = stack.pop()
+        current_base = urljoin(parent_base, current.get(XML_BASE, ""))
+        if current.tag.rsplit("}", 1)[-1] == "a":
+            link = source_link(current.get("href", ""), current_base)
+            ref = {"role": "linked", "url": link}
+            if link and ref not in references:
+                references.append(ref)
+        stack.extend((child, current_base) for child in reversed(list(current)))
+    return tuple(references)
+
+
 def parse(body: bytes, *, base_url: str = "") -> tuple[FeedEntry, ...]:
     if not isinstance(body, bytes) or len(body) > MAX_BODY:
         raise FeedError("too_large")
@@ -146,19 +160,24 @@ def parse(body: bytes, *, base_url: str = "") -> tuple[FeedEntry, ...]:
     if len(nodes) > MAX_ENTRIES:
         raise FeedError("too_large")
     base = urljoin(base_url, root.get(XML_BASE, ""))
+    if not atom:
+        base = urljoin(base, root.find("channel").get(XML_BASE, ""))
     items = []
     for node in nodes:
         entry_base = urljoin(base, node.get(XML_BASE, ""))
         if atom:
             links = [link for link in node.findall(ns + "link") if link.get("rel", "alternate") == "alternate"]
             link = next((link for link in links if link.get("type", "text/html") in {"text/html", "application/xhtml+xml"}), None)
-            permalink = source_link(link.get("href", ""), entry_base) if link is not None else ""
+            permalink = source_link(link.get("href", ""), urljoin(entry_base, link.get(XML_BASE, ""))) if link is not None else ""
             native = _content(node, "id", ns) or permalink
-            markup, plain = _atom_content(node.find(ns + "content"))
+            body_node = node.find(ns + "content")
+            markup, plain = _atom_content(body_node)
             field = "content"
             if not markup:
-                markup, plain = _atom_content(node.find(ns + "summary"))
+                body_node = node.find(ns + "summary")
+                markup, plain = _atom_content(body_node)
                 field = "summary"
+            body_base = urljoin(entry_base, body_node.get(XML_BASE, "")) if body_node is not None else entry_base
             title_markup, title_plain = _atom_content(node.find(ns + "title"))
             author = _content(node.find(ns + "author"), "name", ns) if node.find(ns + "author") is not None else ""
             published = timestamp(_content(node, "published", ns), iso=True)
@@ -169,14 +188,17 @@ def parse(body: bytes, *, base_url: str = "") -> tuple[FeedEntry, ...]:
             markup = _content(node, "{" + CONTENT_NS + "}encoded")
             field = "content:encoded" if markup else "description"
             markup = markup or _content(node, "description")
-            plain = title_plain = False
+            plain, title_plain = False, True
+            body_node, body_base = None, entry_base
             title_markup = _content(node, "title")
             author = _content(node, "author")
             published = timestamp(_content(node, "pubDate"))
             updated = None
         if not native:
             raise FeedError("invalid_feed")
-        text, raw, truncated, refs = text_evidence(markup, base_url=entry_base, plain=plain)
+        text, raw, truncated, refs = text_evidence(markup, base_url=body_base, plain=plain)
+        if body_node is not None and body_node.get("type") == "xhtml":
+            refs = _xhtml_references(body_node, entry_base)
         title = text_evidence(title_markup, plain=title_plain)[0]
         items.append(FeedEntry(native, title[:500], permalink, text, raw,
                                truncated or len(title) > 500, published, updated,

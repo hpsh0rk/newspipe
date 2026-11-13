@@ -52,6 +52,20 @@ class FeedParseTests(unittest.TestCase):
         self.assertGreater(item.updated_ts, item.published_ts)
         self.assertIn({"role": "linked", "url": "https://article.example.invalid/a"}, item.references)
 
+    def test_atom_child_and_nested_xhtml_bases_resolve_provenance(self):
+        body = b'''<feed xmlns="http://www.w3.org/2005/Atom" xml:base="https://example.invalid/feed/">
+        <entry><link xml:base="../posts/" href="one"/>
+        <content type="xhtml" xml:base="../articles/"><div xmlns="http://www.w3.org/1999/xhtml" xml:base="nested/">
+        <a xml:base="../other/" href="two">Evidence</a></div></content></entry></feed>'''
+        item, = self.parser.parse(body)
+        self.assertEqual(item.native_id, "https://example.invalid/posts/one")
+        self.assertEqual(item.permalink, "https://example.invalid/posts/one")
+        self.assertEqual(item.references, ({"role": "linked", "url": "https://example.invalid/articles/other/two"},))
+
+    def test_rss_technical_title_is_literal_character_data(self):
+        item, = self.parser.parse(rss(title="Use Vec&lt;T&gt; and Option&lt;T&gt;"))
+        self.assertEqual(item.title, "Use Vec<T> and Option<T>")
+
     def test_unknown_and_timezone_less_dates_are_not_fabricated(self):
         for value in ("", "not a date", "Tue, 10 Nov 2026 10:00:00"):
             with self.subTest(value=value):

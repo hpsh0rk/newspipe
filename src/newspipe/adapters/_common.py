@@ -46,7 +46,8 @@ def entry_fields(entry, key):
             "source_markup": entry.source_markup, "source_text_complete": False,
             "source_text_truncated": entry.text_truncated, "pub_ts": entry.published_ts,
             "updated_ts": entry.updated_ts, "referenced_urls": list(entry.references),
-            "metadata": {"body_field": entry.body_field}}
+            "facts": {"author": entry.author} if entry.author else {},
+            "metadata": {"body_field": entry.body_field, "author": entry.author}}
 
 
 def entry_time(entry):

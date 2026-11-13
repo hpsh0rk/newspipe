@@ -33,13 +33,21 @@ class RssHubRuntimeSafetyTests(unittest.TestCase):
                 news = Path(tmp)
                 (news / "sources.yaml").write_text(TEXT.replace("/sspai/matrix", json.dumps(entry)))
                 run = pipeline.collect_source(config.load(news), state.Store(news), "feed")
-                self.assertEqual(run.status, "error")
+                self.assertEqual(run.status, "config_missing")
                 self.assertEqual(run.collection["reports"][0]["code"], "credentials")
                 recorded = events.list_events(news, days=None)
                 self.assertEqual(recorded[0]["type"], "failed")
                 # Editable source_values intentionally retain the user's input;
                 # runtime status and event diagnostics must never copy its query.
                 self.assertNotIn("SECRET", json.dumps([run.as_dict(), recorded, view.build(news)["sources"]]))
+
+    def test_configuration_only_result_preserves_config_missing_without_network(self):
+        with TemporaryDirectory() as tmp, patch("newspipe.net.request", side_effect=AssertionError("network")):
+            news = Path(tmp)
+            (news / "sources.yaml").write_text(TEXT.replace("feeds: [/sspai/matrix]", "feeds: []"))
+            run = pipeline.collect_source(config.load(news), state.Store(news), "feed")
+            self.assertEqual(run.status, "config_missing")
+            self.assertEqual(run.collection["reports"][0]["code"], "configuration")
 
     def test_bad_xml_does_not_discard_healthy_siblings_and_reports_safely(self):
         for bad in (b'<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"/>', b'<html>SECRET error page</html>', b'SECRET <broken'):

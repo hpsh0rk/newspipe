@@ -30,7 +30,7 @@ def fetch(cfg: dict | None = None, since: float | None = None) -> FetchResult:
                 stamp = _common.entry_time(entry)
                 if since is not None and stamp is not None and stamp <= since:
                     continue
-                item = {"ext_id": entry.native_id, "title": entry.title, "url": entry.permalink,
+                item = {"ext_id": entry.native_id, "identity_version": "rss-full-v2", "title": entry.title, "url": entry.permalink,
                         "original_url": entry.permalink, "source": label,
                         "summary": entry.source_text[:300], "category": "", "score": None,
                         "content_kind": "unknown", **_common.entry_fields(entry, key)}

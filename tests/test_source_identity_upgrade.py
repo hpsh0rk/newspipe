@@ -56,6 +56,28 @@ class SourceIdentityUpgradeTests(unittest.TestCase):
         self.assertTrue(all(i["identity_version"] == "rss-full-v2" for i in items))
         self.assertEqual(len(dedup.fresh(items, self.store, "src")), 2)
 
+    def test_new_exact_prefix_and_long_guid_remain_distinct_in_either_order(self):
+        for ids in ((PREFIX, FIRST), (FIRST, PREFIX)):
+            with self.subTest(ids=ids):
+                items = self.fetched(ids)
+                self.assertEqual([i["ext_id"] for i in dedup.fresh(items, self.store, "src")], list(ids))
+
+    def test_new_exact_prefix_receipt_and_pending_are_not_legacy_aliases(self):
+        items = self.fetched((PREFIX, FIRST))
+        self.store.record_pushed("src", items[:1], "2026-11-13")
+        self.assertEqual([i["ext_id"] for i in dedup.fresh(items[1:], self.store, "src")], [FIRST])
+        self.store.append_pending("src", items[:1])
+        self.collect((FIRST,))
+        self.assertEqual([i["ext_id"] for i in self.store.peek_pending("src")], [PREFIX, FIRST])
+        self.assertNotIn("migration_baseline_missing_material", self.store.story_preview()["receipts"][0]["limitations"])
+
+    def test_dedup_never_copies_the_entire_history_for_each_item(self):
+        class History(set):
+            def __or__(self, other):
+                raise AssertionError("per-item history copying")
+        with patch.object(self.store, "pushed_ids", return_value=History({"old"})):
+            self.assertEqual(len(dedup.fresh([{"ext_id": "new"}], self.store, "src")), 1)
+
     def test_old_completed_prefix_suppresses_replay_but_is_an_uncertain_baseline(self):
         self.store.record_pushed("src", [{"ext_id": PREFIX}], "2026-11-12")
         before = {p: p.read_bytes() for p in (self.store.root / "pushed").rglob("*") if p.is_file()}

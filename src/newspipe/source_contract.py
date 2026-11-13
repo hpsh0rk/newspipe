@@ -30,8 +30,13 @@ def item_identity_keys(item: dict) -> set[str]:
     keys = {native} if native else set()
     if item.get("identity_version") == "rss-full-v2":
         alias = item.get("legacy_ext_id")
-        if (not isinstance(item.get("ext_id"), str) or len(native) <= 120
-                or not isinstance(alias, str) or alias != native[:120]):
+        if not isinstance(item.get("ext_id"), str):
+            raise SourceContractError("RSS v2 identity must be text.")
+        if len(native) <= 120:
+            if "legacy_ext_id" in item:
+                raise SourceContractError("Short RSS v2 identities do not have a truncated alias.")
+            return keys
+        if not isinstance(alias, str) or alias != native[:120]:
             raise SourceContractError("RSS v2 legacy identity must be its exact old 120-character prefix.")
         keys.add(alias)
     return keys
