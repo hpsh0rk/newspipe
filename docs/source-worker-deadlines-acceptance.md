@@ -7,9 +7,10 @@
 - Startup/import/fetch/parse/worker normalization share a monotonic deadline. On expiration, the process group receives termination and cleanup has one shared 2-second allowance, not two successive waits.
 - RSS/Reddit emit completed subscription results independently. Previously completed partitions survive timeout/crash/output overflow; the current incomplete partition is not accepted. A categorical failure withholds the global cursor and retains retry-idempotent queue entries.
 - RSS retains its global publication order via a declared, validated protocol ordering enum. HN/Reddit and legacy identities are not rewritten.
-- Input is at most 1 MiB, total output 16 MiB and 100 completed partition frames. Settings use stdin, not argv or persistent scratch. JSON is normalized in the child and revalidated in the parent; no pickle/eval. A terminal receipt is required for complete success.
+- Input is at most 1 MiB, total output 16 MiB and 100 completed partition frames, enforced by both result producer and decoder. Settings use stdin, not argv or persistent scratch. SafeDumper/SafeLoader preserve existing config YAML types (including integer keys, dates, datetime, binary and sets), without arbitrary object construction. Output JSON is normalized in the child and revalidated in the parent; no pickle/eval. A terminal receipt is required for complete success.
 - Child stdout/stderr are discarded at descriptor level except a dedicated bounded protocol writer. Provider/exception text is never exported as diagnostics. Workers receive adapter settings, not a Store, model/channel/service or inbound configuration.
 - Existing list/generator adapters remain supported in importable trusted modules. Process-local patches/callables are not an adapter deployment interface. This is termination isolation, not a permissions or memory sandbox.
+- Enabled manual legacy sources without a notification binding now dispatch through the same `_process` instead of silently returning an empty successful run list. Disabled/dry/delivery gates remain in force.
 
 ## Offline Verification
 
@@ -24,6 +25,14 @@ git diff --check
 ```
 
 No production activation, extra service runner/WS, paid collection, model comparison or knowledge write is part of this stage.
+
+## Independent Review
+
+One fresh read-only whole-stage review found manual legacy no-op dispatch, loss of accepted custom configuration types through JSON stdin, and missing parent-side partition-count validation. The first two were Important. The defensive frame-count gap was initially Minor but regraded Important because an independently validated protocol must also bound parent decoding/state work when a producer is malformed or version-mismatched. All three were reproduced with failing tests and fixed in one pass; no re-review or deferred minor findings.
+
+Legacy manual dispatch uses the existing process/state/delivery path, not a second write path. Typed input uses the project's existing safe YAML dependency rather than a configuration migration or an arbitrary-object codec. Genuine legacy adapters without `fetch_partitions` are tested for both lists and generators.
+
+Review set-asides stand: POSIX-only deployment, no sandbox/OS real-time guarantee, parent/AI/delivery/whole-round deadlines excluded, per-subscription cursors/conditional fetching/finite-window recovery later, and live/production/provider/model/send/knowledge operations require separate authorization. These are limits, not claims that the broader source-expansion/event-update goal is finished.
 
 ## Limits
 

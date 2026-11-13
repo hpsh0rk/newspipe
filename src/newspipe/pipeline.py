@@ -752,6 +752,11 @@ def run_source(cfg: Any, store: state.Store, name: str, *, slot: str | None = No
                 notify_source(cfg, store, name, dry=dry, slot=slot, now=now)]
     if scfg.fetch.trigger == "poll":
         return run_poll(cfg, store, dry=dry, only=name, force=force, now=now)
+    if scfg.fetch.trigger == "manual":
+        if not scfg.enabled:
+            return [SourceRun(source=scfg.name, adapter=scfg.adapter, status="disabled")]
+        return [_process(cfg, store, scfg, digest=now.date().isoformat(), slot=slot or "manual",
+                         dry=dry, now=now, mode="manual", force=force)]
     use = slot or (scfg.fetch.slots[0] if scfg.fetch.slots else "manual")
     return run_slot(cfg, store, use, dry=dry, only=name, now=now)
 

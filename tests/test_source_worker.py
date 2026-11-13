@@ -142,6 +142,40 @@ class SourceWorkerTests(unittest.TestCase):
         self.assertEqual(result.reports[-1].code, "timeout")
         self.assertLessEqual(elapsed[0], 2.25)
 
+    def test_parent_retains_first_100_frames_and_rejects_the_101st(self):
+        frames = [json.dumps({"items": [{"ext_id": str(index)}], "reports": [{"key": str(index),
+                  "status": "success", "fetched": 1}], "reported": True}).encode() + b"\n" for index in range(101)]
+        result = source_worker._decode(b"".join(frames) + b'{"done":true}\n')
+        self.assertEqual(result.status, "partial_failure")
+        self.assertEqual(len(result.items), 100)
+        self.assertEqual(result.items[-1]["ext_id"], "99")
+        self.assertEqual(result.reports[-1].code, "incomplete")
+
+    def test_accepted_yaml_settings_preserve_integer_keys_dates_binary_and_sets(self):
+        cases = (("integer_keys", "Primary"), ("yaml_date", "2026-11-13"),
+                 ("yaml_types", "Primary|2026-11-13|2026-11-13T12:00:00+08:00|6162|one"))
+        with TemporaryDirectory() as tmp:
+            news = Path(tmp)
+            for mode, expected in cases:
+                for generator in (False, True):
+                    body = ("chat: oc_test\nslots: {}\nsources:\n  src:\n    adapter: aihot\n"
+                            "    fetch: {trigger: manual}\n    mode: " + mode + "\n"
+                            "    generator: " + str(generator).lower() + "\n"
+                            "    weights: {1: Primary}\n")
+                    if mode != "integer_keys":
+                        body += "    start_date: 2026-11-13\n"
+                    if mode == "yaml_types":
+                        body += ("    stamp: 2026-11-13T12:00:00+08:00\n    blob: !!binary YWI=\n"
+                                 "    flags: !!set {one: null}\n")
+                    (news / "sources.yaml").write_text(body)
+                    settings = config.load(news).sources["src"].adapter_config()
+                    with source_worker.limit(3):
+                        result = source_worker.Adapter("source_worker_legacy_fixture").fetch(settings, since=50)
+                    with self.subTest(mode=mode, generator=generator):
+                        self.assertEqual(result.status, "success")
+                        self.assertFalse(result.reported)
+                        self.assertEqual(result.items, [{"ext_id": 123, "title": expected, "pub_ts": 50}])
+
 
 class WorkerSettingsTests(unittest.TestCase):
     def test_budget_is_validated_and_schema_values_roundtrip(self):
@@ -226,11 +260,28 @@ class WorkerPipelineTests(unittest.TestCase):
         self.assertIn(favorite, events.list_events(self.news, days=None))
 
     def test_legacy_timeout_does_not_advance_cursor(self):
-        self.cfg = replace(self.cfg, sources={"src": replace(self.source, extra={"mode": "cpu"},
-                            fetch=config.FetchCfg(trigger="poll", interval_min=1, timeout_seconds=1))})
-        run = pipeline.run_source(self.cfg, self.store, "src", now=self.now, dry=True)[0]
+        self.cfg = replace(self.cfg, sources={"src": replace(self.source, extra={"mode": "cpu"})})
+        runs = pipeline.run_source(self.cfg, self.store, "src", now=self.now, dry=True)
+        self.assertEqual(len(runs), 1, "manual legacy run must not silently report empty success")
+        run = runs[0]
         self.assertEqual(run.collection["reports"][0]["code"], "timeout")
         self.assertEqual(self.store.cursor("src"), 50)
+
+    def test_manual_legacy_dry_runs_acquisition_without_state_changes(self):
+        self.cfg = replace(self.cfg, sources={"src": replace(self.source, extra={"mode": "complete"})})
+        before = {p: p.read_bytes() for p in self.news.rglob("*") if p.is_file()}
+        runs = pipeline.run_source(self.cfg, self.store, "src", now=self.now, dry=True)
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0].fetched, 2)
+        self.assertEqual(runs[0].status, "dry")
+        self.assertEqual(before, {p: p.read_bytes() for p in self.news.rglob("*") if p.is_file()})
+
+    def test_disabled_manual_legacy_source_never_acquires_or_sends(self):
+        self.cfg = replace(self.cfg, sources={"src": replace(self.source, enabled=False)})
+        with patch.object(pipeline, "_adapter", side_effect=AssertionError("disabled acquisition")):
+            runs = pipeline.run_source(self.cfg, self.store, "src", now=self.now)
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0].status, "disabled")
 
 
 class RealFeedWorkerTests(unittest.TestCase):

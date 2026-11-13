@@ -14,6 +14,8 @@ import subprocess
 import sys
 import time
 
+import yaml
+
 from newspipe.source_contract import FetchResult, ISSUE_CODES, SourceContractError, SubscriptionReport, normalize_fetch
 
 MAX_INPUT = 1024 * 1024
@@ -59,6 +61,7 @@ def _failed(items, reports, code):
 def _decode(raw, failure=""):
     items, reports, reported, terminal = [], [], None, False
     order = ""
+    frames = 0
     code = failure
     if len(raw) > MAX_STREAM:
         raw, code = raw[:MAX_STREAM], "incomplete"
@@ -80,6 +83,9 @@ def _decode(raw, failure=""):
                 continue
             if set(frame) != {"items", "reports", "reported"}:
                 raise SourceContractError("Invalid acquisition result.")
+            if frames >= 100:
+                code = "incomplete"
+                break
             result = normalize_fetch(FetchResult(frame["items"], tuple(SubscriptionReport(**r) for r in frame["reports"]),
                                                 reported=frame["reported"]), source="worker", adapter="worker")
             if (reported is not None and reported != result.reported
@@ -88,6 +94,7 @@ def _decode(raw, failure=""):
             items.extend(result.items)
             reports.extend(result.reports)
             reported = result.reported
+            frames += 1
         except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
             code = "invalid_response"
             break
@@ -114,8 +121,12 @@ class Adapter:
     def fetch(self, cfg=None, since=None):
         started = time.monotonic()
         try:
-            request = _encode({"module": self.module, "settings": cfg or {}, "since": since}, MAX_INPUT - 1)
-        except (ValueError, TypeError, UnicodeError, RecursionError):
+            # Config's safe YAML types (dates, binary, sets, integer keys) must survive IPC.
+            request = yaml.safe_dump({"module": self.module, "settings": cfg or {}, "since": since},
+                                     allow_unicode=True).encode("utf-8")
+            if len(request) > MAX_INPUT:
+                raise _OutputLimit("Acquisition input too large.")
+        except (ValueError, TypeError, UnicodeError, RecursionError, yaml.YAMLError):
             return _failed([], [], "configuration")
         env = dict(os.environ, PYTHONPATH=os.pathsep.join(os.path.abspath(path or os.getcwd()) for path in sys.path))
         try:
@@ -174,7 +185,7 @@ def _main():
             raw = sys.stdin.buffer.read(MAX_INPUT + 1)
             if len(raw) > MAX_INPUT:
                 raise _OutputLimit("Acquisition input too large.")
-            request = json.loads(raw)
+            request = yaml.safe_load(raw)
             module = Adapter(request["module"]).module
             adapter = importlib.import_module(module)
             order = getattr(adapter, "FETCH_RESULT_ORDER", "")
