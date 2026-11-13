@@ -21,7 +21,7 @@ import json
 import re
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -51,6 +51,7 @@ class ChatResult:
     data: dict | None
     state: str  # ok | reused | degraded | failed
     note: str = ""
+    accounting: dict = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -92,11 +93,57 @@ def over_budget(budget: dict, usage: dict, now: datetime) -> str | None:
     return None
 
 
+def _accounting():
+    return {"attempts": 0, "estimated_tokens": 0, "measured_tokens": 0,
+            "unknown_tokens": 0, "cache_hit": False}
+
+
+def _legacy_tokens(budget, usage):
+    return int(usage.get("calls", 0)) * (4 * int(budget.get("max_chars_per_call", 8000)) +
+                                       int(budget.get("max_tokens_ceiling", 8192))) if "reserved_tokens" not in usage else 0
+
+
+def _spend_blocked(budget, usage, stamp, reservation, scope):
+    blocked = over_budget(budget, usage, stamp)
+    if blocked:
+        return blocked
+    # Old call ledgers have no token meter. Keep a conservative envelope, not a free balance.
+    reserved = usage.get("reserved_tokens", _legacy_tokens(budget, usage))
+    total_limit = int(budget.get("max_tokens_per_day", 1000000))
+    if reserved + reservation > total_limit:
+        return "daily_tokens"
+    if scope:
+        own = usage.get("scopes", {}).get(scope["name"], {})
+        if int(own.get("calls", 0)) >= scope["max_calls_per_day"]:
+            return "comparison_daily_calls"
+        if _hourly_calls(own, stamp) >= scope["max_calls_per_hour"]:
+            return "comparison_hourly_calls"
+        if int(own.get("reserved_tokens", 0)) + reservation > scope["max_tokens_per_day"]:
+            return "comparison_daily_tokens"
+        if (int(usage.get("calls", 0)) + 1 > int(budget.get("max_calls_per_day", 0)) - scope["reserve_calls_per_day"]
+                or _hourly_calls(usage, stamp) + 1 > int(budget.get("max_calls_per_hour", 0)) - scope["reserve_calls_per_hour"]
+                or reserved + reservation > total_limit - scope["reserve_tokens_per_day"]):
+            return "comparison_summary_headroom"
+    return None
+
+
+def _measured_tokens(raw):
+    usage = raw.get("usage") if isinstance(raw, dict) else None
+    if not isinstance(usage, dict):
+        return None
+    total, prompt, completion = (usage.get(k) for k in ("total_tokens", "prompt_tokens", "completion_tokens"))
+    if all(type(value) is int and value >= 0 for value in (prompt, completion)):
+        # OpenAI completion_tokens already includes optional reasoning tokens.
+        return max(prompt + completion, total if type(total) is int and total >= 0 else 0)
+    return total if type(total) is int and total >= 0 else None
+
+
 def chat_json(capability: str, *, system: str, user: str, prompt_version: str,
               store: Any, models_cfg: dict, budget: dict, date: str | None = None,
               now: datetime | None = None, max_tokens: int | None = None,
               timeout: float | None = None,
-              now_fn: Callable[[], datetime] | None = None) -> ChatResult:
+              now_fn: Callable[[], datetime] | None = None, spend_scope: dict | None = None,
+              retry_empty: bool = True, response_limit: int | None = None) -> ChatResult:
     """一次模型调用（带回执与预算）。任何失败都返回结果对象，不抛异常。
 
     调用方（enrich）据此降级：`data is None` → 用原文标题继续发卡。
@@ -111,33 +158,38 @@ def chat_json(capability: str, *, system: str, user: str, prompt_version: str,
         ref = resolve_model(capability, models_cfg)
     except ConfigError as exc:
         store.add_usage(date or stamp.date().isoformat(), degraded=1, reason="config", now=stamp)
-        return ChatResult(None, "degraded", str(exc)[:200])
+        return ChatResult(None, "degraded", "模型配置不可用；运行 probe-model 检查配置", _accounting())
 
     payload = f"{system}\x00{user}"
-    key = store.receipt_key(prompt_version, ref.model, payload)
+    identity = json.dumps([ref.provider, ref.base_url, ref.model], separators=(",", ":"))
+    key = store.receipt_key(prompt_version, identity, payload)
     with store.receipt_transaction(key):
         cached = store.receipt(key)
         if cached and isinstance(cached.get("data"), dict):
-            return ChatResult(cached["data"], "reused", "")
+            return ChatResult(cached["data"], "reused", "", {**_accounting(), "cache_hit": True})
         return _chat_json_locked(capability, ref=ref, key=key, system=system, user=user,
                                  prompt_version=prompt_version, store=store, budget=budget,
-                                 date=date, clock=clock, max_tokens=max_tokens, timeout=timeout)
+                                 date=date, clock=clock, max_tokens=max_tokens, timeout=timeout,
+                                 spend_scope=spend_scope, retry_empty=retry_empty, response_limit=response_limit)
 
 
 def _chat_json_locked(capability: str, *, ref: ModelRef, key: str, system: str, user: str,
                       prompt_version: str, store: Any, budget: dict, date: str | None,
                       clock: Callable[[], datetime], max_tokens: int | None,
-                      timeout: float | None) -> ChatResult:
+                      timeout: float | None, spend_scope: dict | None,
+                      retry_empty: bool, response_limit: int | None) -> ChatResult:
+    accounting = _accounting()
     chars = len(system) + len(user)
     input_limit = int(budget.get("max_chars_per_call", 8000))
     if chars > input_limit:
         stamp = clock()
         store.add_usage(date or stamp.date().isoformat(), degraded=1, reason="max_chars_per_call", now=stamp)
-        return ChatResult(None, "degraded", f"输入超过 max_chars_per_call（{chars}/{input_limit}），保留原文")
+        return ChatResult(None, "degraded", f"输入超过 max_chars_per_call（{chars}/{input_limit}），保留原文", accounting)
 
     tmo = float(timeout or budget.get("timeout_seconds") or 90)
     limit = int(max_tokens or budget.get("max_tokens") or 1200)
     ceiling = int(budget.get("max_tokens_ceiling") or 8192)
+    limit = min(limit, ceiling)
     note = ""
     content = ""
     finish = ""
@@ -155,27 +207,42 @@ def _chat_json_locked(capability: str, *, ref: ModelRef, key: str, system: str, 
                      "Authorization": f"Bearer {ref.api_key}"})
         stamp = clock()
         day = date or stamp.date().isoformat()
+        reservation = len(system.encode("utf-8")) + len(user.encode("utf-8")) + limit + 256
+        metrics = {"scope": spend_scope["name"] if spend_scope else "",
+                   "reserved_tokens": reservation, "estimated_tokens": reservation, "unknown_tokens": reservation}
         # Reserve before transport; a timeout or interrupted process may still have spent money.
         with store.usage_transaction():
-            blocked = over_budget(budget, store.usage_for_budget(day, stamp), stamp)
+            usage = store.usage_for_budget(day, stamp)
+            blocked = _spend_blocked(budget, usage, stamp, reservation, spend_scope)
             if blocked:
                 store.add_usage(day, degraded=1, reason=blocked, now=stamp)
-                return ChatResult(None, "degraded", f"预算熔断（{blocked}）")
-            store.add_usage(day, calls=1, chars=chars, now=stamp)
+                return ChatResult(None, "degraded", f"预算熔断（{blocked}）", accounting)
+            store.add_usage(day, calls=1, chars=chars, now=stamp,
+                            model_metrics={**metrics, "legacy_tokens": _legacy_tokens(budget, usage)})
+        accounting["attempts"] += 1
+        accounting["estimated_tokens"] += reservation
+        accounting["unknown_tokens"] += reservation
         try:
             with urllib.request.urlopen(req, timeout=tmo) as resp:
-                raw = json.loads(resp.read().decode("utf-8"))
+                payload = resp.read(response_limit + 1) if response_limit is not None else resp.read()
+                if response_limit is not None and len(payload) > response_limit:
+                    raise ValueError("response_limit")
+                raw = json.loads(payload.decode("utf-8"))
+                if not isinstance(raw, dict):
+                    raise ValueError("response_shape")
         except urllib.error.HTTPError as exc:
-            detail = ""
-            try:
-                detail = exc.read().decode("utf-8", "replace")[:200]
-            except Exception:
-                pass
             store.add_usage(day, degraded=1, reason=f"http_{exc.code}", now=stamp)
-            return ChatResult(None, "failed", f"HTTP {exc.code} {detail}")
+            return ChatResult(None, "failed", f"HTTP {exc.code}", accounting)
         except Exception as exc:
             store.add_usage(day, degraded=1, reason=type(exc).__name__, now=stamp)
-            return ChatResult(None, "failed", f"{type(exc).__name__}: {exc}"[:200])
+            return ChatResult(None, "failed", type(exc).__name__, accounting)
+
+        measured = _measured_tokens(raw)
+        if measured is not None:
+            store.add_usage(day, now=stamp, model_metrics={"scope": metrics["scope"], "unknown_tokens": -reservation,
+                            "measured_tokens": measured, "reserved_tokens": max(0, measured - reservation)})
+            accounting["unknown_tokens"] -= reservation
+            accounting["measured_tokens"] += measured
 
         choices = raw.get("choices") or []
         choice = choices[0] if choices else {}
@@ -183,7 +250,7 @@ def _chat_json_locked(capability: str, *, ref: ModelRef, key: str, system: str, 
         content = str(((choice.get("message") or {}).get("content")) or "")
         if content.strip():
             break
-        if finish == "length" and limit < ceiling:
+        if retry_empty and finish == "length" and limit < ceiling:
             # 思考把预算吃光了：翻倍重试一次（思考 + 答案要一起装得下），仍不行就降级
             limit = min(limit * 2, ceiling)
             note = "length_empty"
@@ -196,11 +263,11 @@ def _chat_json_locked(capability: str, *, ref: ModelRef, key: str, system: str, 
         store.add_usage(day, degraded=1, reason=note or "not_json", now=stamp)
         return ChatResult(None, "failed",
                           f"空响应（finish_reason={finish!r}，思考吃满 {limit} tokens）"
-                          if not content.strip() else f"响应不是 JSON：{content[:120]!r}")
+                          if not content.strip() else "响应不是 JSON；保留原文", accounting)
     store.save_receipt(key, {"prompt_version": prompt_version, "model": ref.model,
                              "capability": capability, "data": data,
                              "ts": clock().isoformat(timespec="seconds")})
-    return ChatResult(data, "ok", "")
+    return ChatResult(data, "ok", "", accounting)
 
 
 def probe(capability: str, models_cfg: dict) -> dict[str, str]:

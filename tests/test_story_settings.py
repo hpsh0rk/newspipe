@@ -19,7 +19,10 @@ class StorySettingsTests(unittest.TestCase):
 
     def test_defaults_schema_and_values_have_one_meaning(self):
         cfg = config.load(self.news)
-        self.assertEqual(cfg.stories.values(), {"mode": "off", "window_days": 14, "candidate_limit": 5, "scan_limit": 500})
+        self.assertEqual(cfg.stories.mode, "off")
+        self.assertEqual(cfg.stories.comparison, "off")
+        self.assertEqual(cfg.stories.comparison_calls_per_day, 10)
+        self.assertEqual(cfg.stories.comparison_tokens_per_day, 50000)
         for field in config.describe_schema()["story_fields"]:
             self.assertEqual(cfg.stories.values()[field["path"]], field["default"])
 
@@ -77,3 +80,11 @@ class StorySettingsTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         cli.run_subcommand(["stories", "set", "--from-json", '{"mode":"observe"}'], self.news)
         self.assertEqual(config.load(self.news).story_revision, second)
+
+    def test_comparison_schema_rejects_automatic_mode_and_bad_budgets(self):
+        for body in ({"comparison": "automatic"}, {"comparison_calls_per_day": True},
+                     {"comparison_calls_per_hour": 0}, {"comparison_tokens_per_day": 999}):
+            with self.subTest(body=body), self.assertRaises(ConfigError):
+                config.StorySettings.parse(body)
+        settings = config.StorySettings.parse({"comparison": "manual", "comparison_tokens_per_day": 1000})
+        self.assertEqual(settings.comparison, "manual")

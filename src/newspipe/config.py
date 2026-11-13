@@ -90,6 +90,7 @@ TIERS = ("T1", "T2")
 MODEL_DEFAULT_BUDGET: dict[str, Any] = {
     "max_calls_per_day": 400,
     "max_calls_per_hour": 80,
+    "max_tokens_per_day": 1000000,
     "max_chars_per_call": 8000,
     "on_exceeded": "degrade",
     "timeout_seconds": 90,
@@ -595,6 +596,12 @@ STORY_FIELDS = [
     {"path": "window_days", "label": "候选回看天数", "type": "int", "default": 14, "min": 1, "max": 90, "advanced": True},
     {"path": "candidate_limit", "label": "每条候选上限", "type": "int", "default": 5, "min": 1, "max": 20, "advanced": True},
     {"path": "scan_limit", "label": "单次扫描上限", "type": "int", "default": 500, "min": 50, "max": 2000, "advanced": True},
+    {"path": "comparison", "label": "AI 关联比较", "type": "enum", "choices": ["off", "manual"], "default": "off",
+     "labels": {"off": "关闭", "manual": "允许显式任务"},
+     "help": "不会自动调用。仅 stories evaluate --allow-model 显式执行，可能产生模型费用；不改变通知。"},
+    {"path": "comparison_calls_per_day", "label": "比较每日调用上限", "type": "int", "default": 10, "min": 1, "max": 100, "advanced": True},
+    {"path": "comparison_calls_per_hour", "label": "比较每小时调用上限", "type": "int", "default": 3, "min": 1, "max": 20, "advanced": True},
+    {"path": "comparison_tokens_per_day", "label": "比较每日预留 token 上限", "type": "int", "default": 50000, "min": 1000, "max": 500000, "advanced": True},
 ]
 
 
@@ -604,6 +611,10 @@ class StorySettings:
     window_days: int = 14
     candidate_limit: int = 5
     scan_limit: int = 500
+    comparison: str = "off"
+    comparison_calls_per_day: int = 10
+    comparison_calls_per_hour: int = 3
+    comparison_tokens_per_day: int = 50000
 
     def values(self):
         return {f["path"]: getattr(self, f["path"]) for f in STORY_FIELDS}
@@ -622,7 +633,7 @@ class StorySettings:
             value = raw.get(f["path"], f["default"])
             if f["type"] == "enum":
                 if not isinstance(value, str) or value not in f["choices"]:
-                    raise ConfigError("stories.mode 只支持 off / observe；自动合并与通知去重尚未开放")
+                    raise ConfigError(f'stories.{f["path"]} 只支持 {" / ".join(f["choices"])}；自动合并与通知去重尚未开放')
             elif type(value) is not int or not f["min"] <= value <= f["max"]:
                 raise ConfigError(f'stories.{f["path"]} 必须是 {f["min"]}..{f["max"]} 的整数')
             values[f["path"]] = value

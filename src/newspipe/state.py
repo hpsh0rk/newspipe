@@ -586,20 +586,26 @@ class Store:
         usage = dict(self.usage(date))
         dates = {date, now.date().isoformat(), (now - timedelta(hours=1)).date().isoformat()}
         recent = []
+        scopes = {name: dict(value) for name, value in usage.get("scopes", {}).items()}
+        for value in scopes.values():
+            value["recent"] = []
         for day in dates:
             # Old counters lack timestamps: conservatively count at their last update.
             recent.extend(_usage_recent(self.usage(day)))
+            for name, value in self.usage(day).get("scopes", {}).items():
+                scopes.setdefault(name, {"recent": []})["recent"].extend(_usage_recent(value))
         usage["recent"] = recent
+        usage["scopes"] = scopes
         return usage
 
     def add_usage(self, date: str, *, calls: int = 0, chars: int = 0, degraded: int = 0,
-                  reason: str = "", now: datetime | None = None) -> dict:
+                  reason: str = "", now: datetime | None = None, model_metrics: dict | None = None) -> dict:
         with self.usage_transaction():
             return self._add_usage(date, calls=calls, chars=chars, degraded=degraded, reason=reason,
-                                   now=now or datetime.now(TZ))
+                                   now=now or datetime.now(TZ), model_metrics=model_metrics)
 
     def _add_usage(self, date: str, *, calls: int, chars: int, degraded: int,
-                   reason: str, now: datetime) -> dict:
+                   reason: str, now: datetime, model_metrics: dict | None = None) -> dict:
         """累计当日用量。`reason` 是失败原因的短码（length_empty / http_429 / not_json …）。
 
         必须记原因：加工层降级是"静默回退原文"，只有 degraded 计数时没人知道是模型、
@@ -612,6 +618,20 @@ class Store:
         state["calls"] = int(state.get("calls") or 0) + calls
         state["chars"] = int(state.get("chars") or 0) + chars
         state["degraded"] = int(state.get("degraded") or 0) + degraded
+        if model_metrics:
+            if "reserved_tokens" not in state and model_metrics.get("legacy_tokens"):
+                for key in ("reserved_tokens", "estimated_tokens", "unknown_tokens"):
+                    state[key] = model_metrics["legacy_tokens"]
+            targets = [state]
+            if model_metrics.get("scope"):
+                scope = state.setdefault("scopes", {}).setdefault(model_metrics["scope"], {})
+                scope["calls"] = int(scope.get("calls", 0)) + calls
+                scope["recent"] = [ts for ts in scope.get("recent", []) if ts > now.timestamp() - 3600]
+                scope["recent"].extend([now.timestamp()] * calls)
+                targets.append(scope)
+            for target in targets:
+                for key in ("reserved_tokens", "estimated_tokens", "measured_tokens", "unknown_tokens"):
+                    target[key] = max(0, int(target.get(key, 0)) + model_metrics.get(key, 0))
         if reason:
             reasons = state.setdefault("reasons", {})
             key = reason[:60]
