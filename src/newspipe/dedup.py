@@ -6,16 +6,18 @@
 from __future__ import annotations
 
 from typing import Iterable
-from newspipe.source_contract import identity_key
+from newspipe.source_contract import identity_key, item_identity_keys
 
 
 def fresh(items: Iterable[dict], store, source: str) -> list[dict]:
     seen = store.pushed_ids(source)
+    legacy_seen = store.pushed_ids(source, legacy_only=True)
     out: list[dict] = []
     batch_seen: set[str] = set()
     for it in items:
         ext_id = identity_key(it.get("ext_id"))
-        if not ext_id or ext_id in seen or ext_id in batch_seen:
+        aliases = item_identity_keys(it) - {ext_id}
+        if not ext_id or ext_id in seen or ext_id in batch_seen or aliases.intersection(legacy_seen):
             continue
         batch_seen.add(ext_id)
         out.append(it)

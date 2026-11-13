@@ -96,7 +96,7 @@ class RssHubSettingsTests(unittest.TestCase):
             return RSS
         with patch("newspipe.net.request", side_effect=request):
             with patch.dict(os.environ, {"RSSHub_BASE": "https://first.example.invalid"}):
-                self.assertEqual(len(rsshub.fetch({"feeds": ["/sspai/matrix"]})), 1)
+                self.assertEqual(len(rsshub.fetch({"feeds": ["/sspai/matrix"]}).items), 1)
             self.assertTrue(self.command("set", "--base-url", "https://second.example.invalid/prefix")["ok"])
             cfg = config.load(self.news)
             run = pipeline.collect_source(cfg, state.Store(self.news), "feed", dry=True)

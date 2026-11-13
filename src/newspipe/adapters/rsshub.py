@@ -1,94 +1,45 @@
-"""通用 RSS 适配器：本地自建 RSSHub（127.0.0.1:1200）或任意 feed URL 均可承载。
-
-定位："没有公开 API 的网页信源"的统一出口。feeds = RSSHub 路由路径
-（如 /twitter/user/thsottiaux，鉴权路由需 RSSHub 容器 env 注 cookie）或完整 URL
-（如 https://www.trumpstruth.org/feed 这类直接出 RSS 的镜像站，免凭据）。
-支持 since（epoch 秒）：poll 回路靠它做增量；slot 源忽略。
-"""
+"""RSS/Atom from explicit feed URLs or configured local/remote RSSHub routes."""
 from __future__ import annotations
 
-import email.utils
-import logging
-import re
-import time
 from urllib.parse import urlsplit
 
-from newspipe import net, rssconnect
+from newspipe import feedparse, net, rssconnect
+from newspipe.adapters import _common
 from newspipe.errors import ConfigError
-
-_TAG = re.compile(r"<[^>]+>")
-
-
-def _clean(html: str, limit: int = 200) -> str:
-    txt = _TAG.sub(" ", html or "")
-    return re.sub(r"\s+", " ", txt).strip()[:limit]
+from newspipe.source_contract import FetchResult
 
 
-def fetch(cfg: dict | None = None, since: float | None = None) -> list[dict]:
+def fetch(cfg: dict | None = None, since: float | None = None) -> FetchResult:
     cfg = cfg or {}
-    h2 = bool(cfg.get("http2"))  # CF Bot Management 只放行 h2 的站点（如 linux.do）须声明
-    items: list[dict] = []
-    failed: list[str] = []
-    ok_feeds = 0
-    for entry in cfg.get("feeds") or []:
-        url = rssconnect.feed_url(entry, cfg.get("rsshub_base_url", ""))
-        parts = urlsplit(entry)
-        label = cfg.get("feed_label") or (parts.hostname if parts.scheme else parts.path.strip("/").split("/")[0]) or "RSS"
-        root = None
-        parse_error = ""
-        last_err: Exception | None = None
-        for _ in range(3):  # RSSHub 冷路由首发常见 503（内部重试后），退避再试
-            try:
-                root = rssconnect.parse_rss(net.request(url, timeout=40, http2=h2))
-                break
-            except rssconnect.ProbeError as exc:
-                parse_error = rssconnect.MESSAGES[exc.reason][0]
-                break
-            except Exception as exc:
-                last_err = exc
-                time.sleep(3)
-        if root is None:
-            if parse_error:
-                failed.append(f"{label}: {parse_error}")
-                continue
-            import urllib.error
-            code = last_err.code if isinstance(last_err, urllib.error.HTTPError) else None
-            msg = f"HTTP {code}" if code else "连接失败；请在后台测试订阅以检查地址和网络"
-            if code in (401, 403):
-                raise ConfigError(f"{label}: RSSHub 路由缺凭据") from None
-            failed.append(f"{label}: {msg}")
-            continue
-        ok_feeds += 1
-        for node in root.iter("item"):
-            def get(t: str, _node=node) -> str:
-                return (_node.findtext(t) or "").strip()
-
-            ext_id = get("guid") or get("link")
-            if not ext_id:
-                continue
-            pub = get("pubDate")
-            try:
-                ts = email.utils.parsedate_to_datetime(pub).timestamp() if pub else 0
-            except Exception:
-                ts = 0
-            if since and ts and ts <= since:
-                continue
-            items.append({
-                "ext_id": ext_id[:120],
-                "title": _clean(get("title"), 160),
-                "url": get("link"),
-                "original_url": get("link"),
-                "source": f"{label}",
-                "summary": _clean(get("description"), 300),
-                "category": "",
-                "score": None,
-                "pub_ts": ts,
-            })
-    items.sort(key=lambda i: -(i.get("pub_ts") or 0))
-    # 全 feed 失败 ≠ 没有新内容。静默返回 [] 会让"死了"和"今天很安静"在心跳里长得一模一样
-    # （fetched:0/status:quiet），单 feed 信源被上游持续拒绝后永远无声。
-    if failed and not ok_feeds:
-        raise RuntimeError("; ".join(failed)[:300])
-    if failed:
-        logging.getLogger(__name__).warning("RSS 订阅部分失败：%s", "; ".join(failed)[:300])
-    return items
+    try:
+        feeds = _common.subscriptions(cfg)
+        if not isinstance(cfg.get("feed_label", ""), str):
+            raise ConfigError("来源标签需要字符串")
+    except ConfigError as error:
+        return _common.configuration_failure("rsshub", error)
+    items, reports = [], []
+    for key in feeds:
+        try:
+            url = rssconnect.feed_url(key, cfg.get("rsshub_base_url", ""))
+            parts = urlsplit(key)
+            label = cfg.get("feed_label") or (parts.hostname if parts.scheme else parts.path.strip("/").split("/")[0]) or "RSS"
+            entries = feedparse.parse(net.request(url, timeout=40, http2=bool(cfg.get("http2")),
+                                                 max_bytes=feedparse.MAX_BODY, max_redirects=5), base_url=url)
+            rows = []
+            for entry in entries:
+                stamp = _common.entry_time(entry)
+                if since is not None and stamp is not None and stamp <= since:
+                    continue
+                item = {"ext_id": entry.native_id, "identity_version": "rss-full-v2", "title": entry.title, "url": entry.permalink,
+                        "original_url": entry.permalink, "source": label,
+                        "summary": entry.source_text[:300], "category": "", "score": None,
+                        "content_kind": "unknown", **_common.entry_fields(entry, key)}
+                if len(entry.native_id) > 120:
+                    item.update(identity_version="rss-full-v2", legacy_ext_id=entry.native_id[:120])
+                rows.append(item)
+            reports.append(_common.success_report(key, rows, [_common.entry_time(entry) for entry in entries]))
+            items.extend(rows)
+        except Exception as error:
+            reports.append(_common.failed(key, error))
+    items.sort(key=lambda item: -(item.get("pub_ts") or 0))
+    return FetchResult(items, tuple(reports))

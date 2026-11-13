@@ -24,6 +24,24 @@ def identity_key(value) -> str:
     return "" if value is None else str(value)
 
 
+def item_identity_keys(item: dict) -> set[str]:
+    """RSS aliases recognize old exact receipts, never become new completion keys."""
+    native = identity_key(item.get("ext_id"))
+    keys = {native} if native else set()
+    if item.get("identity_version") == "rss-full-v2":
+        alias = item.get("legacy_ext_id")
+        if not isinstance(item.get("ext_id"), str):
+            raise SourceContractError("RSS v2 identity must be text.")
+        if len(native) <= 120:
+            if "legacy_ext_id" in item:
+                raise SourceContractError("Short RSS v2 identities do not have a truncated alias.")
+            return keys
+        if not isinstance(alias, str) or alias != native[:120]:
+            raise SourceContractError("RSS v2 legacy identity must be its exact old 120-character prefix.")
+        keys.add(alias)
+    return keys
+
+
 def _finite_number(value) -> bool:
     try:
         return type(value) in (int, float) and math.isfinite(value)
@@ -155,6 +173,7 @@ def normalize_fetch(value, *, source: str, adapter: str) -> FetchResult:
             raise SourceContractError("Known source fields need text, and score needs a finite number or null.")
         try:
             json.dumps(item, allow_nan=False, ensure_ascii=False).encode("utf-8")
+            item_identity_keys(item)
             items.append(deepcopy(item))
         except (TypeError, ValueError, OverflowError, RecursionError, UnicodeError):
             raise SourceContractError("Source items must contain JSON-safe values for durable queuing.") from None

@@ -8,7 +8,7 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 import xml.etree.ElementTree as ET
 
 from newspipe.errors import ConfigError
-from newspipe import result
+from newspipe import feedparse, result
 
 DEFAULT_BASE = "http://127.0.0.1:1200"
 
@@ -111,7 +111,7 @@ MESSAGES = {
     "not_found": ("端点或 RSSHub 路由不存在", "检查基础地址、反向代理路径前缀和订阅路由"),
     "http_error": ("上游拒绝请求或暂时不可用", "检查上游状态或稍后手动测试；不会自动重试"),
     "invalid_feed": ("返回内容不是有效的 RSS 订阅", "检查是否返回了登录页、HTML 错误页或不完整 XML"),
-    "unsupported_feed": ("当前适配器暂不支持该订阅格式", "目前支持 RSS 2.0；请使用 RSS 格式地址，而非 Atom/RDF"),
+    "unsupported_feed": ("当前适配器暂不支持该订阅格式", "目前支持 RSS 2.0 / Atom；请使用对应格式地址，而非 RDF"),
     "too_large": ("检测响应超过 1 MiB 限制", "使用条目较少的订阅进行检测；这不等于采集失败"),
 }
 
@@ -150,16 +150,16 @@ def probe(configured: str = "", feed: str | None = None) -> result.Result:
         if not 200 <= http_status < 300:
             raise ProbeError("authentication" if http_status in (401, 403) else "not_found" if http_status == 404 else "http_error")
         if feed:
-            root = parse_rss(body)
+            entries = feedparse.parse(body, base_url=url)
             return result.ok(command, {"status": "feed_valid", "checked_url": safe_url(url), "http_status": http_status,
-                "items": sum(1 for _ in root.iter("item")), "message": "RSS 订阅有效；仅检测，没有采集入队或发送通知"})
+                "items": len(entries), "message": "RSS / Atom 订阅有效；仅检测，没有采集入队或发送通知"})
         return result.ok(command, {"status": "reachable", "checked_url": safe_url(url), "http_status": http_status,
             "message": "端点可达；未验证 RSSHub 身份或具体订阅路由，没有修改配置"})
     except urllib.error.HTTPError as exc:
         http_status = exc.code
         exc.close()
         reason = "authentication" if exc.code in (401, 403) else "not_found" if exc.code == 404 else "http_error"
-    except ProbeError as exc:
+    except (ProbeError, feedparse.FeedError) as exc:
         reason = exc.reason
     except Exception:
         reason = "network"
