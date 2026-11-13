@@ -147,6 +147,14 @@ CONTRACT: list[dict[str, Any]] = [
      "usage": "newspipe stories set --from-json JSON [--dry-run] [--base-hash HASH] [--json]",
      "args": ["--from-json", "--dry-run", "--base-hash"], "writes": True,
      "examples": ['newspipe stories set --from-json \'{"mode":"observe"}\' --dry-run --json']},
+    {"name": "stories evaluate", "summary": "显式评价已保存候选；--allow-model 可能产生费用，不合并或减少通知",
+     "usage": "newspipe stories evaluate --observation ID [--limit 1..5] [--allow-model] [--json]",
+     "args": ["--observation", "--limit", "--allow-model"], "writes": True,
+     "examples": ["newspipe stories evaluate --observation ob_ID --limit 1 --json"]},
+    {"name": "stories comparisons", "summary": "只读已保存的比较、差异证据与用量，不调模型",
+     "usage": "newspipe stories comparisons --observation ID [--after N] [--limit N] [--json]",
+     "args": ["--observation", "--after", "--limit"], "writes": False,
+     "examples": ["newspipe stories comparisons --observation ob_ID --json"]},
     {"name": "migrate", "summary": "把 v1 状态迁到 v2 布局（幂等）",
      "usage": "newspipe migrate [--json]", "args": [], "writes": True,
      "examples": ["newspipe migrate --json"]},
@@ -745,13 +753,34 @@ def _sub_observations(args, news_dir):
 
 
 def _sub_stories(args, news_dir):
+    from newspipe.story_state import StoryStorageError
     if args.action == "set":
         return _write_result("stories.set", edit.set_story_settings(news_dir, _json_object(args),
                              base_hash=args.base_hash, dry_run=args.dry_run), news_dir,
                              next_ok=["newspipe stories settings --json"])
     store = state.Store(news_dir)
+    if args.action == "evaluate":
+        if args.dry_run:
+            return result.fail("stories.evaluate", "E_VALIDATION", "比较任务不是 dry-run；没有调用模型或写入",
+                               hint="读取用 stories comparisons；执行本地任务去掉 --dry-run，付费比较必须显式 --allow-model")
+        from newspipe.story_compare import evaluate
+        try:
+            data = evaluate(store, config.load(news_dir), args.observation or "", allow_model=args.allow_model,
+                            limit=5 if args.limit is None else args.limit)
+        except ValueError as exc:
+            return result.fail("stories.evaluate", "E_VALIDATION", str(exc), hint="先用 stories settings / observations list 检查激活状态与 ID；每次最多 5 对")
+        except StoryStorageError as exc:
+            return result.fail("stories.evaluate", "E_RUNTIME", str(exc), hint="检查历史存储；模型预留费用不会因写入失败退款")
+        return result.ok("stories.evaluate", data, changed=True,
+                         warnings=["仅保存关联提案，不改变通知、队列或收藏；用量估计不等于实测账单"],
+                         next=[f"newspipe stories comparisons --observation {args.observation} --json"])
+    if args.action == "comparisons":
+        if not args.observation:
+            return result.fail("stories.comparisons", "E_USAGE", "需要 --observation ID", hint="从 observations list 获取原始版本 ID")
+        return _story_read("stories.comparisons", lambda: store.comparisons(args.observation, after=args.after,
+                                                                           limit=20 if args.limit is None else args.limit))
     if args.action == "preview":
-        return _story_read("stories.preview", lambda: store.story_preview(observation_id=args.observation or "", after=args.after, limit=args.limit))
+        return _story_read("stories.preview", lambda: store.story_preview(observation_id=args.observation or "", after=args.after, limit=20 if args.limit is None else args.limit))
     from newspipe.story_capture import observation_status
     data = (news_dir / "sources.yaml").read_bytes()
     settings, revision = config.story_settings_snapshot(news_dir, sources_text=data.decode("utf-8"))
@@ -1026,13 +1055,14 @@ def _build_sub_parser() -> argparse.ArgumentParser:
     hub.add_argument("--base-hash")
 
     stories = add("stories")
-    stories.add_argument("action", choices=["settings", "set", "preview"])
+    stories.add_argument("action", choices=["settings", "set", "preview", "evaluate", "comparisons"])
     stories.add_argument("--from-json")
     stories.add_argument("--dry-run", action="store_true")
     stories.add_argument("--base-hash")
     stories.add_argument("--observation")
     stories.add_argument("--after", type=int, default=0)
-    stories.add_argument("--limit", type=int, default=20)
+    stories.add_argument("--limit", type=int)
+    stories.add_argument("--allow-model", action="store_true")
 
     observations = add("observations")
     observations.add_argument("action", choices=["list", "show"])

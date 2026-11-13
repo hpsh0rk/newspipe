@@ -97,6 +97,23 @@ class Store:
     def story_preview(self, *, observation_id="", after=0, limit=20):
         return self._story_ledger().preview(observation_id=observation_id, after=after, limit=limit)
 
+    def comparison_candidates(self, observation_id, *, limit=5):
+        return self._story_ledger().comparison_candidates(observation_id, limit=limit)
+
+    def record_comparison(self, receipt):
+        from newspipe.config import story_settings_snapshot
+        with self.transaction():
+            _, revision = story_settings_snapshot(self.news_dir)
+            return self._story_ledger().record_comparison(receipt, current_revision=revision)
+
+    def comparisons(self, observation_id, *, after=0, limit=20):
+        from newspipe.config import story_settings_snapshot
+        try:
+            _, revision = story_settings_snapshot(self.news_dir)
+        except ConfigError:
+            revision = None
+        return self._story_ledger().comparisons(observation_id, after=after, limit=limit, current_revision=revision)
+
     def observation_capture_snapshot(self, drafts, *, at, window_days, candidate_limit, scan_limit):
         return self._story_ledger().snapshot(drafts, at=at, window_days=window_days,
                                              candidate_limit=candidate_limit, scan_limit=scan_limit)

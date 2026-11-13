@@ -22,6 +22,10 @@ class StoryStorageError(RuntimeError):
         super().__init__("Original-version history " + code + "; retry collection or inspect a backup. No history was repaired.")
 
 
+class ComparisonInputError(ValueError):
+    """A rejected selection is not evidence of damaged storage."""
+
+
 @dataclass(frozen=True)
 class CaptureSnapshot:
     activation_id: str | None
@@ -130,10 +134,12 @@ class Ledger:
                 conn.executescript(SCHEMA)
             if not write:
                 conn.execute("BEGIN")
-            if conn.execute("PRAGMA user_version").fetchone()[0] != 1:
+            if conn.execute("PRAGMA user_version").fetchone()[0] not in {1, 2}:
                 raise StoryStorageError("version")
             yield conn
         except StoryStorageError:
+            raise
+        except ComparisonInputError:
             raise
         except sqlite3.Error as error:
             code = getattr(error, "sqlite_errorcode", 0) & 255
@@ -318,5 +324,67 @@ class Ledger:
                                  "limitations": limitations, "observations": [dict(i) for i in items[:100]],
                                  "proposals": [{**{k: p[k] for k in ("current_id", "previous_id", "relation", "score", "reason", "matcher_version")},
                                                 "evidence_fields": json.loads(p["fields_json"])} for p in proposals[:200]]})
+            return {"contract_version": 1, "availability": "available" if conn else "not_initialized", "receipts": receipts,
+                    "has_more": len(rows) > limit, "next_after": rows[limit - 1]["sequence"] if len(rows) > limit else None}
+
+    def comparison_candidates(self, observation_id, *, limit=5):
+        if type(limit) is not int or not 1 <= limit <= 5:
+            raise ValueError("Comparison jobs require a limit of 1..5.")
+        with self._connection() as conn:
+            m = self._metadata(conn)
+            capture = conn.execute("SELECT c.* FROM captures c JOIN capture_items i ON i.capture_sequence=c.sequence "
+                                   "WHERE i.observation_id=? AND c.status='recorded' AND c.mode='observe' "
+                                   "AND c.activation=? AND c.sequence>=? ORDER BY c.sequence DESC LIMIT 1",
+                                   (observation_id, m["activation"], m["frontier"])).fetchone() if conn and m["mode"] == "observe" else None
+            if not capture:
+                raise ComparisonInputError("No active saved capture for this observation; collect with observe settings first.")
+            current = conn.execute(self._select() + "WHERE o.observation_id=? AND o.origin='source'", (observation_id,)).fetchone()
+            if not current:
+                raise ComparisonInputError("Legacy baseline material is not an independently evaluable observation.")
+            proposals = conn.execute("SELECT p.* FROM proposals p JOIN observations o ON o.observation_id=p.previous_id "
+                                     "WHERE p.capture_sequence=? AND p.current_id=? AND p.previous_id!=p.current_id AND o.origin='source' "
+                                     "ORDER BY CASE p.relation WHEN 'unclassified_change' THEN 0 WHEN 'exact_copy' THEN 1 ELSE 2 END,p.score DESC,p.previous_id LIMIT ?",
+                                     (capture["sequence"], observation_id, limit + 1)).fetchall()
+            pairs = []
+            for row in proposals[:limit]:
+                previous = conn.execute(self._select() + "WHERE o.observation_id=?", (row["previous_id"],)).fetchone()
+                proposal = {k: row[k] for k in ("current_id", "previous_id", "relation", "score", "reason", "matcher_version")}
+                proposal["evidence_fields"] = json.loads(row["fields_json"])
+                pairs.append({"current": self._public(current), "previous": self._public(previous), "proposal": proposal})
+            return {"capture_sequence": capture["sequence"], "activation_id": m["activation"], "revision": capture["revision"],
+                    "pairs": pairs, "has_more_candidates": len(proposals) > limit, "bounds": json.loads(capture["bounds_json"]),
+                    "limitations": json.loads(capture["limitations_json"])}
+
+    @staticmethod
+    def _insert_comparison(conn, receipt):
+        return conn.execute("INSERT INTO comparisons(job_id,observation_id,at,receipt_json) VALUES (?,?,?,?)",
+                            (receipt["job_id"], receipt["observation_id"], receipt["at"], json.dumps(receipt, ensure_ascii=False, allow_nan=False)))
+
+    def record_comparison(self, receipt, *, current_revision):
+        with self._connection(write=True) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("PRAGMA user_version").fetchone()[0] == 1:
+                conn.execute("CREATE TABLE comparisons(sequence INTEGER PRIMARY KEY AUTOINCREMENT,job_id TEXT NOT NULL UNIQUE,observation_id TEXT NOT NULL,at REAL NOT NULL,receipt_json TEXT NOT NULL)")
+                conn.execute("CREATE INDEX comparison_observation ON comparisons(observation_id,sequence)")
+                conn.execute("PRAGMA user_version=2")
+            m = self._metadata(conn)
+            saved = {**receipt, "status": "recorded" if receipt["revision"] == current_revision == m["revision"]
+                     and receipt["activation_id"] == m["activation"] and m["mode"] == "observe" else "stale_settings"}
+            self._insert_comparison(conn, saved)
+            conn.commit()
+            return saved
+
+    def comparisons(self, observation_id, *, after=0, limit=20, current_revision=None):
+        _pagination(after, limit)
+        with self._connection() as conn:
+            m = self._metadata(conn)
+            rows = conn.execute("SELECT sequence,receipt_json FROM comparisons WHERE observation_id=? AND sequence>? ORDER BY sequence LIMIT ?",
+                                (observation_id, after, limit + 1)).fetchall() if conn and conn.execute("PRAGMA user_version").fetchone()[0] == 2 else []
+            receipts = []
+            for row in rows[:limit]:
+                receipt = json.loads(row["receipt_json"])
+                receipts.append({**receipt, "sequence": row["sequence"], "active": receipt["status"] == "recorded"
+                                 and receipt["revision"] == current_revision == m["revision"]
+                                 and receipt["activation_id"] == m["activation"] and m["mode"] == "observe"})
             return {"contract_version": 1, "availability": "available" if conn else "not_initialized", "receipts": receipts,
                     "has_more": len(rows) > limit, "next_after": rows[limit - 1]["sequence"] if len(rows) > limit else None}

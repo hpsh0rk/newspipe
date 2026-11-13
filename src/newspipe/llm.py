@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import urllib.error
 import urllib.request
@@ -166,11 +167,15 @@ def chat_json(capability: str, *, system: str, user: str, prompt_version: str,
     with store.receipt_transaction(key):
         cached = store.receipt(key)
         if cached and isinstance(cached.get("data"), dict):
-            return ChatResult(cached["data"], "reused", "", {**_accounting(), "cache_hit": True})
-        return _chat_json_locked(capability, ref=ref, key=key, system=system, user=user,
+            result = ChatResult(cached["data"], "reused", "", {**_accounting(), "cache_hit": True})
+        else:
+            result = _chat_json_locked(capability, ref=ref, key=key, system=system, user=user,
                                  prompt_version=prompt_version, store=store, budget=budget,
                                  date=date, clock=clock, max_tokens=max_tokens, timeout=timeout,
                                  spend_scope=spend_scope, retry_empty=retry_empty, response_limit=response_limit)
+        result.accounting.update({"model": ref.model, "provider": ref.provider,
+                                  "model_fingerprint": hashlib.sha256(identity.encode()).hexdigest()})
+        return result
 
 
 def _chat_json_locked(capability: str, *, ref: ModelRef, key: str, system: str, user: str,
