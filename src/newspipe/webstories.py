@@ -18,6 +18,18 @@ FIELDS = {"title": "标题", "text": "正文", "facts_json": "结构化事实", 
 STATUSES = {"recorded": "已记录", "stale_settings": "设置已变更：仅保留原文，不生成提案",
             "stale_history": "历史已更新：仅保留原文，不生成提案"}
 UI_LIMIT = 5
+COMPARISONS = {"duplicate": "重复报道（提案）", "progress": "后续进展（提案）", "viewpoint": "不同观点（提案）",
+               "unrelated": "未发现事件关联", "uncertain": "不确定"}
+DIFFERENCES = {"new_fact": "新增事实（来源声称）", "changed_claim": "主张对照", "viewpoint": "不同观点", "unclassified": "原文变化（未分类）"}
+REASONS = {"invalid_model_evidence": "模型结构或引用不合格", "missing_citations": "缺少原文引用",
+           "incomplete_duplicate_evidence": "正文不完整或比较材料已截断，不能确认重复",
+           "chronology_unverified": "发布时间未知或倒序，不能确认后续进展",
+           "missing_viewpoint_citations": "缺少不同观点的双侧引用", "local_candidate_only": "仅本地候选，未作语义判断",
+           "local_change_unclassified": "只展示原文片段差异，尚未判断进展或观点",
+           "model_budget_fallback": "比较预算不足，保留为不确定", "model_unavailable": "模型不可用，保留为不确定",
+           "model_uncertain": "模型认为证据不足", "model_unrelated": "未发现关联，不代表一定无关",
+           "model_cited_proposal": "引用已核对；语义判断仍需自行检查，不代表事实验证",
+           "complete_evidence_hash_equal": "完整原文证据指纹一致，仅提出副本关系"}
 
 
 def _url(**query):
@@ -45,6 +57,7 @@ def load(store, query):
         page["after"], page["limit"] = after, limit
         if page["detail_id"]:
             page["detail"] = store.observation(page["detail_id"])
+            page["comparisons"] = store.comparisons(page["detail_id"], after=int(first("comparison_after", "0")), limit=UI_LIMIT)
         page["preview"] = store.story_preview(observation_id=page["detail_id"], after=after, limit=limit)
         labels = {}
         for receipt in page["preview"]["receipts"]:
@@ -55,6 +68,12 @@ def load(store, query):
                     row = store.observation(ident)
                     if row:
                         labels[ident] = row["source"] + " · " + row["evidence"]["title"]
+        for receipt in page.get("comparisons", {}).get("receipts", []):
+            for pair in receipt["pairs"][:UI_LIMIT]:
+                for side in ("current", "previous"):
+                    row = pair["result"]["evidence"][side]
+                    title = next((r["text"] for r in row["excerpts"] if r["field"] == "title"), "原始版本")
+                    labels.setdefault(row["observation_id"], str(row["source"]) + " · " + title)
         page["labels"] = labels
     except StoryStorageError as error:
         page["error"] = "历史暂不可用（" + error.code + "）。检查存储与备份；读取不会修复历史。仍可关闭关联预览。"
@@ -74,7 +93,7 @@ def entry(status, *, token=""):
     if status.get("awaiting_collection"):
         message += " · 上次激活：" + MODES.get(status.get("activated_mode"), "尚未激活") + " · 新设置等待真实采集激活"
     return ('<section class="rsshub-panel summary-strip story-entry"><div><h2>关联预览 '
-            + help_tip("仅比较已保存原文，不调 AI，不自动合并、不改变通知或收藏。检索范围只影响候选召回，历史不会自动删除。", "story-help", "关联预览说明")
+            + help_tip("页面只读取已保存结果，不调 AI。显式比较任务可提出重复、进展与观点关系，不自动合并、不改变通知或收藏。", "story-help", "关联预览说明")
             + f'</h2><p class="hint" data-story-status>已保存：{E(saved)} · {E(message)}</p></div><div class="row-actions">'
             + '<a class="btn" href="/items?story_preview=1">查看关联预览</a>'
             + (editor_link("/items?story_settings=1", "预览设置") if token else "") + '</div></section>')
@@ -139,6 +158,52 @@ def _source_link(reference):
     return '<span class="hint">' + E(reference.get("url") or "来源链接不可用") + (' · 已脱敏，不提供原文跳转' if reference.get("redacted") else '') + '</span>'
 
 
+def _comparisons(data, labels, observation):
+    body = '<section class="story-comparisons"><h3>关联与差异</h3><p class="hint">只读已保存的比较。提案不等于事实验证，不合并条目、不减少通知。</p>'
+    for receipt in data.get("receipts", []):
+        body += '<article class="story-receipt"><header><h3>比较 #' + E(receipt["sequence"]) + '</h3><span class="hint">' + E(_time(receipt["at"])) + '</span></header>'
+        if not receipt.get("active"):
+            body += '<p class="notice">仅历史记录：设置或激活范围已变化，不作为当前关联提案。</p>'
+        for pair in receipt["pairs"][:UI_LIMIT]:
+            result = pair["result"]
+            body += '<p><strong>' + E(COMPARISONS.get(result["relation"], "不确定")) + '</strong> · ' + _version_link(pair["previous_id"], labels, fallback="对照版本") + '</p>'
+            body += '<p class="hint">' + E(REASONS.get(result["reason"], "证据不足")) + '</p>'
+            if result["differences"]:
+                body += '<details><summary>查看原文差异</summary>'
+                for diff in result["differences"]:
+                    body += '<h4>' + E(DIFFERENCES.get(diff["kind"], "未分类对照")) + '</h4><div class="field-grid story-difference">'
+                    for side, label in (("previous", "对照原文"), ("current", "当前原文")):
+                        citation = diff[side]
+                        body += '<div><p class="hint">' + E(label) + ' · ' + _version_link(citation["observation_id"], labels) + '</p><blockquote class="story-text">' + E(citation["text"]) + '</blockquote></div>'
+                    body += '</div>'
+                body += '</details>'
+        if not receipt["pairs"]:
+            body += '<p class="hint">没有可评价的已保存候选；不代表没有相关内容。</p>'
+        if receipt.get("has_more_candidates"):
+            body += '<p class="hint">本次只评价前几个候选，其他候选未评价。</p>'
+        usage = receipt["accounting"]
+        body += '<details><summary>模型用量与比较依据</summary><dl class="receipt">'
+        for key, label in (("attempts", "请求次数"), ("estimated_tokens", "预留估计 token"),
+                           ("measured_tokens", "供应商实测 token"), ("unknown_tokens", "未知消耗预留 token"),
+                           ("cache_hits", "缓存命中"), ("budget_fallbacks", "预算回退")):
+            body += '<dt>' + E(label) + '</dt><dd>' + E(usage.get(key, 0)) + '</dd>'
+        body += '<dt>耗时</dt><dd>' + E(receipt["latency_ms"]) + ' ms</dd><dt>采集基线</dt><dd>#' + E(receipt["capture_sequence"]) + '</dd>'
+        body += '<dt>比较版本</dt><dd>' + E(receipt["prompt_version"]) + '</dd></dl><p class="hint">预留是保守估计，不是账单；未返回用量的请求仍按未知消耗保留预算。缓存命中不产生新请求。</p>'
+        for pair in receipt["pairs"]:
+            model = pair.get("accounting", {})
+            if model.get("model"):
+                body += '<p class="hint">模型：' + E(model["model"]) + ' · ' + E(model.get("provider", "")) + '</p>'
+        for limitation in receipt.get("limitations", []):
+            body += '<p class="hint">' + E(LIMITS.get(limitation, "设置变化，任务提前停止" if limitation == "settings_changed_job_stopped" else limitation)) + '</p>'
+        body += '</details></article>'
+    if not data.get("receipts"):
+        body += '<p class="empty">尚未执行这个版本的比较任务。</p>'
+    if data.get("has_more"):
+        body += '<a class="btn" href="' + E(_url(observation=observation, comparison_after=data["next_after"])) + '">下一页比较</a>'
+    body += '<details><summary>如何执行比较</summary><p class="hint">先开启观察并真实采集，再用 CLI 显式执行。以下命令只作本地评价；追加 --allow-model 会请求模型，可能收费，并要求 AI 比较设置已启用。</p><code>newspipe stories evaluate --observation ' + E(observation) + ' --limit 1 --json</code></details></section>'
+    return body
+
+
 def drilldown(page):
     if not (page.get("preview_open") or page.get("detail_id")):
         return ""
@@ -168,7 +233,7 @@ def drilldown(page):
             body += '<p>' + E(ref["role"]) + ' · ' + _source_link(ref) + '</p>'
         if evidence["facts_truncated"] or evidence["references_truncated"]:
             body += '<p class="hint">部分事实或引用展示已截断，原始记录仍保留。</p>'
-        body += '</details></article><h3>这个版本的已保存提案</h3>'
+        body += '</details></article>' + _comparisons(page.get("comparisons") or {}, page.get("labels") or {}, page["detail_id"]) + '<h3>这个版本的已保存候选</h3>'
     return body + _receipts(page.get("preview") or {}, page.get("labels") or {},
                             observation=page.get("detail_id", ""), after=page.get("after", 0))
 
@@ -186,7 +251,7 @@ def settings_editor(settings, fields, *, token, base_hash):
             advanced += control
         else:
             form += control
-    form += '<details><summary>检索范围</summary><div class="field-grid">' + advanced + '</div><p class="hint">仅影响候选召回，不代表去重或事实判断。跨源候选仅使用本地词面相似，不消耗比较 token。</p></details>'
+    form += '<details><summary>检索范围与比较预算</summary><div class="field-grid">' + advanced + '</div><p class="hint">本地检索不消耗比较 token。显式 AI 任务另受比较与整体模型预算限制；保留 20 次每日、5 次每小时请求及 100,000 预留 token 给摘要等其他工作。模型整体额度过小时可能完全无法比较。</p></details>'
     form += _buttons(preview=False) + '</form>'
     return editor_panel("story-settings", "关联预览设置", form, "/items", "story-settings")
 

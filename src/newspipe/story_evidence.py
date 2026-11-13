@@ -75,7 +75,10 @@ def local_comparison(proposal: dict, evidence: dict) -> dict:
         return _result(evidence, "duplicate", "complete_evidence_hash_equal", confidence="exact_evidence")
     differences = []
     if proposal["relation"] == "unclassified_change":
-        for field in proposal.get("evidence_fields", []):
+        fields = proposal.get("evidence_fields", [])
+        if "source_material" in fields:
+            fields = ["title", "text", "facts_text"]
+        for field in fields:
             field = "facts_text" if field == "facts_json" else field
             a = [r for r in evidence["current"]["excerpts"] if r["field"] == field]
             b = [r for r in evidence["previous"]["excerpts"] if r["field"] == field]

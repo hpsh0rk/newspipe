@@ -10,7 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from newspipe import config, edit, inbound, state, view
+from newspipe import cli, config, edit, inbound, llm, state, view
 from newspipe.observations import prepare_observation
 from test_actions import NoRedirect
 from test_observations import article
@@ -178,6 +178,42 @@ class StoryWebTests(unittest.TestCase):
         self.assertIn('&lt;script&gt;', page)
         self.assertIn("已脱敏", page)
         self.assertNotIn(str(self.store.root), page)
+
+    def test_comparison_detail_shows_original_difference_uncertainty_and_cost_without_model(self):
+        cli.run_subcommand(["stories", "set", "--from-json", '{"mode":"observe"}'], self.news)
+        drafts = seed(self.store)
+        out = cli.run_subcommand(["stories", "evaluate", "--observation", drafts[2].observation_id, "--limit", "1"], self.news)
+        self.assertTrue(out.ok, out.as_dict())
+        base = self.serve()
+        before = self.files()
+        with patch.object(llm, "chat_json", side_effect=AssertionError("render model")):
+            page = self.get(base, "/items?observation=" + drafts[2].observation_id)
+        self.assertIn("关联与差异", page)
+        self.assertIn("不确定", page)
+        self.assertIn("原文变化（未分类）", page)
+        self.assertIn("对照原文", page)
+        self.assertIn("当前原文", page)
+        self.assertIn("模型用量", page)
+        self.assertIn("预留估计", page)
+        self.assertIn("供应商实测", page)
+        self.assertIn("未知消耗", page)
+        self.assertIn("缓存命中", page)
+        self.assertNotIn('action="/api/actions/story-evaluate"', page)
+        self.assertEqual(before, self.files())
+
+    def test_comparison_evidence_is_escaped_and_stale_status_is_explicit(self):
+        from newspipe.story_compare import evaluate
+        cli.run_subcommand(["stories", "set", "--from-json", '{"mode":"observe"}'], self.news)
+        drafts = seed(self.store)
+        receipt = evaluate(self.store, config.load(self.news), drafts[2].observation_id, limit=1)
+        receipt["job_id"] = "cmp_escaped_fixture"
+        receipt["pairs"][0]["result"]["differences"][0]["current"]["text"] = '<script>alert("fixture")</script>'
+        self.store.record_comparison(receipt)
+        cli.run_subcommand(["stories", "set", "--from-json", '{"mode":"off"}'], self.news)
+        page = self.get(self.serve(), "/items?observation=" + drafts[2].observation_id)
+        self.assertIn("仅历史记录", page)
+        self.assertIn("&lt;script&gt;", page)
+        self.assertNotIn('<script>alert("fixture")', page)
 
 
 class InputValues(HTMLParser):

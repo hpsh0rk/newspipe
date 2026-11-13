@@ -421,6 +421,8 @@ input[type=time]{min-height:38px}
 .story-relations p{margin:6px 0}
 .story-receipt details,.story-version details{margin-top:12px;border-top:1px solid var(--divider);padding-top:12px}
 .story-text{white-space:pre-wrap;overflow-wrap:anywhere;max-height:60dvh;overflow:auto;font:13px/1.7 var(--font);padding:16px;background:var(--surface-2);border-radius:var(--radius-sm)}
+.story-difference>div{min-width:0}
+.story-difference blockquote{margin:0}
 @media(max-width:900px){.workbench-grid,#editor-dialog .workbench-grid{grid-template-columns:1fr}.rule-aside{position:static}}
 @media(max-width:640px){
  .btn{min-height:44px}

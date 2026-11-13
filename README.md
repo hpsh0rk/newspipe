@@ -189,6 +189,34 @@ newspipe stories preview --limit 5 --json
 已冻结的旧投递独立恢复。关闭观察后旧历史不可用只警告，不阻断采集与通知。
 验收范围与已知限制见 [`docs/story-observations-preview-acceptance.md`](docs/story-observations-preview-acceptance.md)。
 
+### 显式关联与差异比较（M1）
+
+原始版本详情页新增「关联与差异」：默认只显示结论，展开查看双侧原文片段、版本链接与成本。
+重复报道、后续进展、不同观点均为**提案**，不合并条目，不改变通知、队列或收藏。
+页面和 `stories comparisons` 只读，普通 `run --dry` 不比较；未发现候选也不代表一定无关。
+
+```sh
+newspipe stories evaluate --observation ob_ID --limit 1 --json  # 显式本地任务，不调模型
+newspipe stories comparisons --observation ob_ID --json       # 已保存结果
+```
+
+AI 比较默认关闭。在关联预览设置中将「AI 关联比较」设为「允许显式任务」，真实采集激活后，
+才可追加 `--allow-model` 执行可能收费的任务。任务仅处理该版本已有的有效候选，每次最多 5 对，
+不遍历所有条目。模型使用现有后端的 `capabilities.story_compare` 或 default，不需要另一套密钥。
+`evaluate --dry-run` 明确拒绝，不把付费行为伪装成预览。
+
+比较默认每日 10 次、每小时 3 次、每日 50,000 预留 token，受整体模型预算共同限制。
+为摘要等其他加工留出每日 20 次、每小时 5 次及 100,000 token 的额度；整体预算过小时比较会被阻止。
+整体 `models.yaml: budget.max_tokens_per_day` 默认 1,000,000。输入 UTF-8 字节数、输出上限和协议余量
+构成保守预留，不是精确分词或货币报价；供应商返回用量后另记实测，未返回/超时仍保留未知消耗。
+推理 token 包含在 completion 用量中，比较不自动重试。缓存按提供方端点、模型、原始版本、提取与提示版本隔离。
+旧的模型回执缺少端点身份，因此不会跨版本冒险复用；旧用量账按保守额度计入。
+
+每侧最多 12 个、每个 240 字符的原文片段；差异只能引用这些片段，不接受模型生成的引文或链接。
+截断/不完整正文不能确认语义副本；发布时间缺失或倒序不能确认进展。模型结论不是事实核验。
+纯跨语言翻译可能无法进入本地词面候选，这一阶段仍会漏关联；未加入远端 embedding 或全量模型扫描。
+验收记录见 [`docs/semantic-observe-acceptance.md`](docs/semantic-observe-acceptance.md)。
+
 ### 不做什么
 
 - **不直接写知识库。** 「⭐ 收藏」只是记一条入库意图（`favorite` 事件），真正写进知识库的

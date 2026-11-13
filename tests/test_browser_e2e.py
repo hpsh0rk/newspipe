@@ -315,7 +315,7 @@ class WorkbenchBrowserTests(unittest.TestCase):
                     before_config = (fixture.news_dir / "sources.yaml").read_bytes()
                     before_history = fixture.store.story_status()
                     self.expect(form.locator('[name="s.scan_limit"]')).not_to_be_visible()
-                    form.get_by_text("检索范围", exact=True).click()
+                    form.get_by_text("检索范围与比较预算", exact=True).click()
                     form.locator('[name="s.window_days"]').fill("0")
                     form.locator('[data-save-button]').click()
                     self.expect(form.locator('[name="s.window_days"]')).to_be_focused()
@@ -340,13 +340,31 @@ class WorkbenchBrowserTests(unittest.TestCase):
                     self.expect(page.locator('#editor-dialog')).not_to_be_visible()
                     self.expect(opener).to_be_focused()
 
+    def test_comparison_quotes_are_responsive_keyboard_readable_without_billing(self):
+        for engine in self.browsers:
+            for width, javascript in ((360, False), (1440, True)):
+                with self.subTest(engine=engine, width=width), self.scenario(engine, width=width, javascript=javascript, story_history=True) as (fixture, page):
+                    before = {p: p.read_bytes() for p in fixture.news_dir.rglob("*") if p.is_file()}
+                    page.goto(fixture.url + "/items?observation=" + fixture.story_ids["change"])
+                    section = page.locator('.story-comparisons')
+                    self.expect(section.get_by_text("不确定", exact=True)).to_be_visible()
+                    summary = section.get_by_text("查看原文差异", exact=True)
+                    summary.focus()
+                    page.keyboard.press("Enter")
+                    self.expect(section.locator('.story-difference')).to_be_visible()
+                    self.expect(section.locator('.story-difference')).to_contain_text("Later correction")
+                    self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), width + 1)
+                    section.get_by_text("模型用量与比较依据", exact=True).click()
+                    self.expect(section.get_by_text("供应商实测 token", exact=True)).to_be_visible()
+                    self.assertEqual(before, {p: p.read_bytes() for p in fixture.news_dir.rglob("*") if p.is_file()})
+
     def test_story_settings_and_preview_are_usable_without_javascript(self):
         for engine in self.browsers:
             with self.subTest(engine=engine), self.scenario(engine, width=360, javascript=False, story_history=True) as (fixture, page):
                 page.goto(fixture.url + "/items")
                 page.get_by_role("link", name="预览设置", exact=True).click()
                 form = page.locator('form[action="/api/actions/story-settings"]')
-                form.get_by_text("检索范围", exact=True).click()
+                form.get_by_text("检索范围与比较预算", exact=True).click()
                 form.locator('[name="s.window_days"]').fill("0")
                 form.locator('[data-save-button]').click()
                 self.expect(form.locator('[name="s.window_days"]')).to_have_value("0")

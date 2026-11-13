@@ -99,6 +99,10 @@ def offline_workbench(*, view_actions=True, story_history=False):
                            "slot": "sample", "form": "state_only", "title": "Offline reading",
                            "items": [item], "view": "list", "archived": [], "overflow": 0})
         story_ids = _story_history(store) if story_history else {}
+        if story_history:
+            from newspipe.story_compare import evaluate
+            for key in ("change", "copy"):
+                evaluate(store, config.load(news), story_ids[key], limit=1)
         blocked = []
         def deny(effect):
             def fail(*args, **kwargs):

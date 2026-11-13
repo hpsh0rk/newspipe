@@ -250,6 +250,10 @@ def _chat_json_locked(capability: str, *, ref: ModelRef, key: str, system: str, 
             accounting["measured_tokens"] += measured
 
         choices = raw.get("choices") or []
+        if (not isinstance(choices, list) or (choices and (not isinstance(choices[0], dict)
+                or not isinstance(choices[0].get("message", {}), dict)))):
+            store.add_usage(day, degraded=1, reason="response_shape", now=stamp)
+            return ChatResult(None, "failed", "response_shape", accounting)
         choice = choices[0] if choices else {}
         finish = str(choice.get("finish_reason") or "")
         content = str(((choice.get("message") or {}).get("content")) or "")

@@ -247,6 +247,16 @@ class ModelBudgetTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertNotIn("PRIVATE", result.note)
 
+    def test_malformed_provider_choices_fail_safely_after_reservation(self):
+        self.budget["max_calls_per_hour"] = 10
+        for raw in ({"choices": [None]}, {"choices": {"PRIVATE": "bad"}},
+                    {"choices": [{"message": "PRIVATE"}]}):
+            with self.subTest(raw=raw), patch.object(llm.urllib.request, "urlopen", return_value=Response(raw)):
+                result = self.call(str(raw), retry_empty=False)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.accounting["attempts"], 1)
+                self.assertNotIn("PRIVATE", result.note)
+
     def test_scoped_concurrency_and_midnight_share_reservations(self):
         self.budget["max_calls_per_hour"] = 10
         before = NOW.replace(hour=23, minute=55)

@@ -83,3 +83,9 @@ class EvidenceTests(unittest.TestCase):
         before = deepcopy(pair)
         evidence.validate_comparison(answer(), pair)
         self.assertEqual(pair, before)
+
+    def test_material_only_proposal_can_show_actual_excerpt_difference_without_classifying_it(self):
+        pair = self.pair(observation(text="New decision."), observation("two", text="Earlier proposal."))
+        result = evidence.local_comparison({"relation": "unclassified_change", "evidence_fields": ["source_material"]}, pair)
+        self.assertEqual(result["relation"], "uncertain")
+        self.assertEqual(result["differences"][0]["current"]["text"], "New decision.")
