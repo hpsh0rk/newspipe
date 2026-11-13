@@ -29,6 +29,7 @@ def upstream():
                 "/rss": (200, RSS),
                 "/empty": (200, b'<rss version="2.0"><channel/></rss>'),
                 "/atom": (200, b'<feed xmlns="http://www.w3.org/2005/Atom"/>'),
+                "/rdf": (200, b'<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"/>'),
                 "/broken": (200, b'SECRET <broken'),
                 "/auth": (401, b'SECRET login cookie'),
                 "/missing": (404, b'SECRET missing'),
@@ -72,20 +73,20 @@ class RssHubProbeTests(unittest.TestCase):
     def test_reachability_and_valid_empty_or_nonempty_feed_are_read_only(self):
         before = self.files()
         with upstream() as (base, requests):
-            for feed, status, count in ((None, "reachable", None), ("/empty", "feed_valid", 0), ("/rss", "feed_valid", 1)):
+            for feed, status, count in ((None, "reachable", None), ("/empty", "feed_valid", 0), ("/rss", "feed_valid", 1), ("/atom", "feed_valid", 0)):
                 out = self.probe(base, feed)
                 self.assertTrue(out["ok"], out)
                 self.assertEqual(out["data"]["status"], status)
                 self.assertEqual(out["data"].get("items"), count)
                 self.assertFalse(out["changed"])
                 self.assertNotIn("SECRET", json.dumps(out))
-            self.assertEqual(requests, ["/", "/empty", "/rss"])
+            self.assertEqual(requests, ["/", "/empty", "/rss", "/atom"])
         self.assertEqual(self.files(), before)
 
     def test_probe_classifies_failures_without_echoing_bodies_or_retrying(self):
         with upstream() as (base, requests):
             for path, reason in (("/auth", "authentication"), ("/missing", "not_found"), ("/bad", "http_error"),
-                                 ("/broken", "invalid_feed"), ("/atom", "unsupported_feed"), ("/huge", "too_large")):
+                                 ("/broken", "invalid_feed"), ("/rdf", "unsupported_feed"), ("/huge", "too_large")):
                 before = len(requests)
                 out = self.probe(base, path)
                 self.assertFalse(out["ok"], out)

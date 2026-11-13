@@ -27,25 +27,68 @@ def proxy_url() -> str:
 _UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 
 
-def _request_h2(url: str, proxy: str | None, headers: dict, timeout: float) -> bytes:
+class ResponseLimitError(ValueError):
+    """A source response exceeded an opt-in byte/redirect budget."""
+
+
+class _LimitedRedirect(urllib.request.HTTPRedirectHandler):
+    def __init__(self, limit):
+        self.limit = limit
+        self.count = 0
+        self.max_repeats = self.max_redirections = limit + 1
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if self.count >= self.limit:
+            fp.close()
+            raise ResponseLimitError("Source redirect limit exceeded.")
+        self.count += 1
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _request_h2(url: str, proxy: str | None, headers: dict, timeout: float,
+                *, max_bytes=None, max_redirects=None) -> bytes:
     """httpx + h2（ALPN 协商 HTTP/2）。异常统一转成 urllib 风格，调用方按同一套处理。"""
     import httpx
 
     try:
+        options = {"max_redirects": max_redirects} if max_redirects is not None else {}
         with httpx.Client(proxy=proxy, http2=True, headers=headers,
-                          timeout=timeout, follow_redirects=True) as client:
-            resp = client.get(url)
+                          timeout=timeout, follow_redirects=True, **options) as client:
+            if max_bytes is None:
+                resp = client.get(url)
+                body = resp.content
+            else:
+                with client.stream("GET", url) as resp:
+                    if resp.status_code >= 400:
+                        raise urllib.error.HTTPError(url, resp.status_code, f"HTTP {resp.status_code}", Message(), None)
+                    parts, size = [], 0
+                    for chunk in resp.iter_bytes():
+                        size += len(chunk)
+                        if size > max_bytes:
+                            raise ResponseLimitError("Source response byte limit exceeded.")
+                        parts.append(chunk)
+                    body = b"".join(parts)
+    except (ResponseLimitError, urllib.error.HTTPError):
+        raise
+    except httpx.TooManyRedirects:
+        if max_redirects is not None:
+            raise ResponseLimitError("Source redirect limit exceeded.") from None
+        raise urllib.error.URLError("Too many redirects.") from None
     except Exception as exc:  # 连接层失败（timeout/reset/DNS/TLS）
         raise urllib.error.URLError(str(exc)) from exc
     if resp.status_code >= 400:
         raise urllib.error.HTTPError(url, resp.status_code, f"HTTP {resp.status_code}",
                                      Message(), None)
-    return resp.content
+    return body
 
 
 def request(url: str, method: str = "GET", data: bytes | None = None,
             headers: dict | None = None, timeout: float = 30,
-            http2: bool = False) -> bytes:
+            http2: bool = False, *, max_bytes: int | None = None,
+            max_redirects: int | None = None) -> bytes:
+    if (max_bytes is not None and (type(max_bytes) is not int or max_bytes < 1)
+            or max_redirects is not None and (type(max_redirects) is not int or max_redirects < 0)):
+        raise ValueError("Source limits must be positive bytes and nonnegative redirect counts.")
     hdr = {"User-Agent": _UA}
     if headers:
         hdr.update(headers)
@@ -55,7 +98,9 @@ def request(url: str, method: str = "GET", data: bytes | None = None,
     for proxy, tmo in ((None, min(timeout, 8.0)), (proxy_url(), timeout)):
         if http2:
             try:
-                return _request_h2(url, proxy, hdr, tmo)
+                return _request_h2(url, proxy, hdr, tmo, max_bytes=max_bytes, max_redirects=max_redirects)
+            except ResponseLimitError:
+                raise
             except urllib.error.HTTPError as exc:
                 last = exc
                 if proxy is None and exc.code in (401, 403, 429, 503):
@@ -66,11 +111,18 @@ def request(url: str, method: str = "GET", data: bytes | None = None,
                 continue
         handlers = [urllib.request.ProxyHandler(
             {"http": proxy, "https": proxy} if proxy else {})]
+        if max_redirects is not None:
+            handlers.append(_LimitedRedirect(max_redirects))
         try:
-            resp = urllib.request.build_opener(*handlers).open(
+            with urllib.request.build_opener(*handlers).open(
                 urllib.request.Request(url, data=data, headers=hdr, method=method),
-                timeout=tmo)
-            return resp.read()
+                timeout=tmo) as resp:
+                body = resp.read(max_bytes + 1) if max_bytes is not None else resp.read()
+                if max_bytes is not None and len(body) > max_bytes:
+                    raise ResponseLimitError("Source response byte limit exceeded.")
+                return body
+        except ResponseLimitError:
+            raise
         except urllib.error.HTTPError as exc:
             last = exc
             if proxy is None and exc.code in (401, 403, 429, 503):
