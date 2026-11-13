@@ -237,6 +237,17 @@ RSS 长 ID 保留完整值，旧截断前缀只识别已有完成/队列并建�
 跳转响应不读取正文，gzip/deflate 解压输出也受限，未知/截断编码显式失败。
 不能无迁移地回退到旧截断适配器。见 `docs/source-evidence-quality-acceptance.md`。
 
+正式采集由 `source_worker` 子进程执行，`fetch.timeout_seconds` 默认 90、整数范围 1..600 秒；
+同源全部订阅共用预算，涵盖启动/导入/抓取/解析/worker 校验，终止清理另限 2 秒。
+不限制整轮多源任务、AI 或发送，不声称实时调度；RSSHub 探测仍使用其独立只读边界。
+stdin 输入限 1 MiB、stdout 结果限 16 MiB/100 个完成分区；配置不进 argv 或临时磁盘。
+RSS/Reddit 已完成订阅在超时/崩溃/超限后保留，失败不推进游标，正常重试仍队列幂等。
+状态与投递只在父进程；worker 不持 Store/状态锁，不启动模型、通道、宿主或入站连接。
+父进程只接收完整校验的 JSON 帧和分类诊断，适配器 stdout/stderr/原始异常不得暴露。
+自定义适配器是可导入的可信模块（不是权限沙箱），旧列表/生成器支持；不可依赖父进程猴子补丁。
+直接库调用 `adapters.*.fetch` 不带此执行边界；需通过正式 CLI/管线或自行设置预算。
+见 `docs/source-worker-deadlines-acceptance.md`。
+
 ### 2.3 策略与安全重试
 
 单用户/单目标，不加账户或任意规则引擎。`sources.yaml` 的 `policies` 保存策略，信源用

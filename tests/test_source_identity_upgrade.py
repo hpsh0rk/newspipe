@@ -44,6 +44,7 @@ class SourceIdentityUpgradeTests(unittest.TestCase):
 
     def collect(self, ids=(FIRST, SECOND), **kw):
         with patch("newspipe.net.request", return_value=feed(ids, **kw)), \
+                patch.object(pipeline, "_adapter", return_value=rsshub), \
                 patch.object(runtime, "activate", side_effect=lambda *_: nullcontext()), \
                 patch("newspipe.channel.send_card", side_effect=AssertionError("live send")), \
                 patch.object(pipeline, "_enrich_new", side_effect=AssertionError("model access")):
@@ -120,7 +121,7 @@ class SourceIdentityUpgradeTests(unittest.TestCase):
             if url.endswith("/bad"):
                 raise urllib.error.HTTPError("SECRET", 403, "SECRET", {}, None)
             return rss("Original " * 80, guid="good", date="Thu, 01 Jan 1970 00:01:40 +0000")
-        with patch("newspipe.net.request", side_effect=request), patch.object(runtime, "activate", side_effect=lambda *_: nullcontext()):
+        with patch("newspipe.net.request", side_effect=request), patch.object(pipeline, "_adapter", return_value=rsshub), patch.object(runtime, "activate", side_effect=lambda *_: nullcontext()):
             run = pipeline.collect_source(self.cfg, self.store, "src", now=NOW)
         self.assertEqual(run.status, "partial_failure")
         self.assertEqual(self.store.cursor("src"), 50)
@@ -130,7 +131,7 @@ class SourceIdentityUpgradeTests(unittest.TestCase):
         def recovered(url, **_):
             native, date = ("bad", "Thu, 01 Jan 1970 00:01:50 +0000") if url.endswith("/bad") else ("good", "Thu, 01 Jan 1970 00:01:40 +0000")
             return rss("Original " * 80, guid=native, date=date)
-        with patch("newspipe.net.request", side_effect=recovered), patch.object(runtime, "activate", side_effect=lambda *_: nullcontext()):
+        with patch("newspipe.net.request", side_effect=recovered), patch.object(pipeline, "_adapter", return_value=rsshub), patch.object(runtime, "activate", side_effect=lambda *_: nullcontext()):
             run = pipeline.collect_source(self.cfg, self.store, "src", now=NOW)
         self.assertEqual(run.status, "collected")
         self.assertEqual(self.store.cursor("src"), 100)

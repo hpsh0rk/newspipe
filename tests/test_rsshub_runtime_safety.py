@@ -13,6 +13,9 @@ from test_rsshub_settings import RSS, TEXT
 
 class RssHubRuntimeSafetyTests(unittest.TestCase):
     def setUp(self):
+        adapter = patch.object(pipeline, "_adapter", return_value=rsshub)
+        adapter.start()
+        self.addCleanup(adapter.stop)
         inherited = patch.dict("os.environ", {"RSSHub_BASE": ""})
         inherited.start()
         self.addCleanup(inherited.stop)

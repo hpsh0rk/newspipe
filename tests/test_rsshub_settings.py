@@ -94,7 +94,7 @@ class RssHubSettingsTests(unittest.TestCase):
         def request(url, **kwargs):
             targets.append(url)
             return RSS
-        with patch("newspipe.net.request", side_effect=request):
+        with patch("newspipe.net.request", side_effect=request), patch.object(pipeline, "_adapter", return_value=rsshub):
             with patch.dict(os.environ, {"RSSHub_BASE": "https://first.example.invalid"}):
                 self.assertEqual(len(rsshub.fetch({"feeds": ["/sspai/matrix"]}).items), 1)
             self.assertTrue(self.command("set", "--base-url", "https://second.example.invalid/prefix")["ok"])

@@ -58,6 +58,7 @@ def _failed(items, reports, code):
 
 def _decode(raw, failure=""):
     items, reports, reported, terminal = [], [], None, False
+    order = ""
     code = failure
     if len(raw) > MAX_STREAM:
         raw, code = raw[:MAX_STREAM], "incomplete"
@@ -68,6 +69,9 @@ def _decode(raw, failure=""):
             frame = json.loads(line)
             if not isinstance(frame, dict):
                 raise SourceContractError("Invalid acquisition frame.")
+            if set(frame) == {"order"} and frame["order"] == "pub_desc" and reported is None and not order:
+                order = frame["order"]
+                continue
             if set(frame) == {"done"} and frame["done"] is True:
                 terminal = True
                 continue
@@ -87,6 +91,8 @@ def _decode(raw, failure=""):
         except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
             code = "invalid_response"
             break
+    if order == "pub_desc":
+        items.sort(key=lambda item: -(item.get("pub_ts") or 0))
     if code or not terminal or not reports:
         return _failed(items, reports, code or "network")
     return FetchResult(items, tuple(reports), reported=reported)
@@ -118,7 +124,7 @@ class Adapter:
                                        start_new_session=True)
         except OSError:
             return _failed([], [], "network")
-        output, failure = b"", ""
+        output, failure, cleanup_until, terminated = b"", "", None, False
         try:
             remaining = _budget.get() - (time.monotonic() - started)
             output, _ = process.communicate(request, timeout=max(0, remaining))
@@ -126,17 +132,22 @@ class Adapter:
                 failure = "network"
         except subprocess.TimeoutExpired as error:
             output, failure = error.output or b"", "timeout"
+            cleanup_until = time.monotonic() + CLEANUP_SECONDS
+            terminated = True
             _kill_group(process)
             try:
                 output, _ = process.communicate(timeout=CLEANUP_SECONDS)
             except subprocess.TimeoutExpired as cleanup:
                 output = cleanup.output or output
         finally:
-            _kill_group(process)
+            if cleanup_until is None:
+                cleanup_until = time.monotonic() + CLEANUP_SECONDS
+            if not terminated:
+                _kill_group(process)
             for pipe in (process.stdin, process.stdout):
                 pipe.close()
             try:
-                process.wait(timeout=CLEANUP_SECONDS)
+                process.wait(timeout=max(0, cleanup_until - time.monotonic()))
             except subprocess.TimeoutExpired:
                 # Kernel scheduling is outside the deadline contract; never wait forever.
                 pass
@@ -166,6 +177,11 @@ def _main():
             request = json.loads(raw)
             module = Adapter(request["module"]).module
             adapter = importlib.import_module(module)
+            order = getattr(adapter, "FETCH_RESULT_ORDER", "")
+            if order:
+                if order != "pub_desc":
+                    raise SourceContractError("Unsupported acquisition ordering.")
+                emit({"order": order})
             parts = getattr(adapter, "fetch_partitions", None)
             results = (parts(request["settings"], since=request["since"]) if callable(parts)
                        else [adapter.fetch(request["settings"], since=request["since"])])

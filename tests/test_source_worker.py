@@ -1,10 +1,22 @@
 import json
+import io
 import os
+import subprocess
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
+from dataclasses import replace
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import threading
+from unittest.mock import patch
 
-from newspipe import source_worker
+from newspipe import actions, config, edit, events, pipeline, runtime, source_worker, state
+from newspipe.errors import ConfigError
+from test_news_pipeline import _src
 
 
 class SourceWorkerTests(unittest.TestCase):
@@ -106,6 +118,182 @@ class SourceWorkerTests(unittest.TestCase):
         self.assertEqual(result.status, "partial_failure")
         self.assertEqual([item["ext_id"] for item in result.items], ["first"])
         self.assertEqual(result.reports[-1].code, "invalid_response")
+
+    def test_cleanup_uses_one_shared_allowance_not_two_sequential_waits(self):
+        elapsed = [0]
+
+        class StalledProcess:
+            stdin = io.BytesIO()
+            stdout = io.BytesIO()
+
+            def communicate(self, input=None, timeout=None):
+                elapsed[0] += timeout
+                raise subprocess.TimeoutExpired("fixture", timeout, output=b"")
+
+            def wait(self, timeout=None):
+                elapsed[0] += timeout
+                raise subprocess.TimeoutExpired("fixture", timeout)
+
+        with patch.object(source_worker.subprocess, "Popen", return_value=StalledProcess()), \
+                patch.object(source_worker, "_kill_group"), patch.object(source_worker.time, "monotonic", side_effect=lambda: elapsed[0]), \
+                source_worker.limit(.25):
+            result = source_worker.Adapter("source_worker_fixture").fetch()
+        self.assertEqual(result.status, "failure")
+        self.assertEqual(result.reports[-1].code, "timeout")
+        self.assertLessEqual(elapsed[0], 2.25)
+
+
+class WorkerSettingsTests(unittest.TestCase):
+    def test_budget_is_validated_and_schema_values_roundtrip(self):
+        self.assertEqual(config.FetchCfg.parse({"trigger": "manual"}, where="fetch").timeout_seconds, 90)
+        for bad in (0, -1, 601, True, 1.5, float("inf"), "90"):
+            with self.subTest(bad=bad), self.assertRaises(ConfigError):
+                config.FetchCfg.parse({"trigger": "manual", "timeout_seconds": bad}, where="fetch")
+        for seconds in (1, 135, 600):
+            source = replace(_src(trigger="manual"), fetch=config.FetchCfg(trigger="manual", timeout_seconds=seconds))
+            values = config.source_values(source)
+            self.assertEqual(values["fetch.timeout_seconds"], seconds)
+            fields = config.describe_schema()["fields"]
+            form = {"f." + field["path"]: [json.dumps(values[field["path"]]) if field["type"] == "bool"
+                                    else "\n".join(values[field["path"]]) if field["type"] in {"list", "slots"}
+                                    else str(values[field["path"]])] for field in fields}
+            body = actions.build_source_body(form, {"fields": fields})
+            self.assertEqual(body["fetch"]["timeout_seconds"], seconds)
+
+    def test_cli_create_edit_dry_and_copy_preserve_budget(self):
+        with TemporaryDirectory() as tmp:
+            news = Path(tmp)
+            (news / "sources.yaml").write_text("chat: oc_test\nslots: {}\nsources: {}\n")
+            body = {"adapter": "aihot", "fetch": {"trigger": "manual", "timeout_seconds": 135}}
+            self.assertTrue(edit.set_source(news, "first", body, create_only=True)["ok"])
+            before = (news / "sources.yaml").read_bytes()
+            changed = {**body, "fetch": {"trigger": "manual", "timeout_seconds": 200}}
+            self.assertTrue(edit.set_source(news, "first", changed, dry_run=True)["ok"])
+            self.assertEqual((news / "sources.yaml").read_bytes(), before)
+            self.assertTrue(edit.set_source(news, "first", changed)["ok"])
+            self.assertTrue(edit.set_source(news, "copy", changed, create_only=True)["ok"])
+            self.assertEqual([s.fetch.timeout_seconds for s in config.load(news).sources.values()], [200, 200])
+
+
+class WorkerPipelineTests(unittest.TestCase):
+    def setUp(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.news = Path(tmp.name)
+        self.store = state.Store(self.news)
+        self.now = datetime(2026, 11, 13, 10)
+        self.store.set_cursor("src", 50, at=self.now)
+        self.source = replace(_src(trigger="manual", form="state_only"),
+                              fetch=config.FetchCfg(trigger="manual", timeout_seconds=1), extra={"mode": "slow"})
+        self.cfg = config.Config(chat="oc_test", slots={}, sources={"src": self.source})
+        self.addCleanup(patch.stopall)
+        patch.object(runtime, "activate", side_effect=lambda *_: nullcontext()).start()
+        patch.object(pipeline, "_adapter", side_effect=lambda _: source_worker.Adapter("source_worker_fixture")).start()
+        patch("newspipe.channel.send_card", side_effect=AssertionError("live send")).start()
+        patch.object(pipeline, "_enrich_new", side_effect=AssertionError("model access")).start()
+
+    def collect(self, **kw):
+        return pipeline.collect_source(self.cfg, self.store, "src", now=self.now, **kw)
+
+    def test_timeout_is_partial_preserves_cursor_and_retry_is_idempotent(self):
+        first = self.collect()
+        self.assertEqual(first.status, "partial_failure")
+        self.assertEqual(first.collection["reports"][-1]["code"], "timeout")
+        self.assertEqual(self.store.cursor("src"), 50)
+        self.assertEqual([i["ext_id"] for i in self.store.peek_pending("src")], ["first"])
+        self.store = state.Store(self.news)
+        self.collect()
+        self.assertEqual(self.store.pending_count("src"), 1)
+        self.source = replace(self.source, extra={"mode": "complete"})
+        self.cfg = replace(self.cfg, sources={"src": self.source})
+        self.collect()
+        self.assertEqual(self.store.pending_count("src"), 2)
+        self.assertEqual(self.store.cursor("src"), 100)
+
+    def test_cpu_timeout_becomes_error_with_no_cursor_or_content_loss(self):
+        self.cfg = replace(self.cfg, sources={"src": replace(self.source, extra={"mode": "cpu"})})
+        run = self.collect()
+        self.assertEqual(run.status, "error")
+        self.assertEqual(run.collection["reports"][0]["code"], "timeout")
+        self.assertEqual(self.store.cursor("src"), 50)
+        self.assertEqual(self.store.pending_count("src"), 0)
+
+    def test_dry_timeout_does_not_write_state_or_consume_favorite(self):
+        favorite = events.append(self.news, "favorite", payload={"ext_id": "old"}, source="src")
+        before = {p: p.read_bytes() for p in self.news.rglob("*") if p.is_file()}
+        self.assertEqual(self.collect(dry=True).status, "dry")
+        self.assertEqual(before, {p: p.read_bytes() for p in self.news.rglob("*") if p.is_file()})
+        self.assertIn(favorite, events.list_events(self.news, days=None))
+
+    def test_legacy_timeout_does_not_advance_cursor(self):
+        self.cfg = replace(self.cfg, sources={"src": replace(self.source, extra={"mode": "cpu"},
+                            fetch=config.FetchCfg(trigger="poll", interval_min=1, timeout_seconds=1))})
+        run = pipeline.run_source(self.cfg, self.store, "src", now=self.now, dry=True)[0]
+        self.assertEqual(run.collection["reports"][0]["code"], "timeout")
+        self.assertEqual(self.store.cursor("src"), 50)
+
+
+class RealFeedWorkerTests(unittest.TestCase):
+    def test_rss_results_keep_global_publication_order_across_partitions(self):
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                native, date = ("old", "00:01:40") if self.path == "/old" else ("new", "00:03:20")
+                body = f'<rss version="2.0"><channel><item><guid>{native}</guid><title>{native}</title><pubDate>Thu, 01 Jan 1970 {date} +0000</pubDate></item></channel></rss>'.encode()
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base = f"http://127.0.0.1:{server.server_port}"
+            with source_worker.limit(3):
+                result = pipeline._adapter("rsshub").fetch({"feeds": [base + "/old", base + "/new"]})
+            self.assertEqual(result.status, "success")
+            self.assertEqual([item["ext_id"] for item in result.items], ["new", "old"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_rss_worker_streams_before_second_feed_stalls(self):
+        release = threading.Event()
+        body = b'<rss version="2.0"><channel><item><guid>first</guid><title>Original</title><description>Evidence</description><pubDate>Thu, 01 Jan 1970 00:01:40 +0000</pubDate></item></channel></rss>'
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/slow":
+                    release.wait(3)
+                self.send_response(200)
+                self.end_headers()
+                try:
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base = f"http://127.0.0.1:{server.server_port}"
+            with source_worker.limit(1):
+                result = pipeline._adapter("rsshub").fetch({"feeds": [base + "/fast", base + "/slow"]}, since=50)
+            self.assertEqual(result.status, "partial_failure")
+            self.assertEqual([item["ext_id"] for item in result.items], ["first"])
+            self.assertEqual(result.items[0]["source_text"], "Evidence")
+            self.assertEqual(result.reports[-1].code, "timeout")
+        finally:
+            release.set()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
 
 if __name__ == "__main__":
