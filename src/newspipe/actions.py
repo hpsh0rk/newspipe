@@ -129,6 +129,12 @@ def _coerce(field: dict[str, Any], raw: list[str]) -> Any:
         # 复选框配一个隐藏的 0：没勾 ⇒ ["0"]，勾了 ⇒ ["0", "1"]
         return any(str(v).strip().lower() in ("1", "true", "on", "yes") for v in values)
     first = str(values[0]) if values else ""
+    if field.get("credential"):
+        from newspipe import source_registry
+        try:
+            source_registry.validate_value(first.strip(), field)
+        except ValueError:
+            raise ActionInputError(f"{field['path']} 只接受环境变量名，不能填写密钥本身") from None
     if kind in ("list", "slots"):
         if kind == "slots":
             return [v for v in values if v.strip()]
@@ -158,7 +164,8 @@ def build_source_body(form: dict[str, list[str]],
 
     schema = schema or config_mod.describe_schema()
     body: dict[str, Any] = {}
-    for field in schema.get("fields") or []:
+    adapter = (form.get("f.adapter") or [""])[0]
+    for field in config_mod.source_fields(adapter, schema):
         path = str(field.get("path") or "")
         raw = form.get(f"{FORM_PREFIX}{path}")
         if raw is None:

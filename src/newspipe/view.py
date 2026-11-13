@@ -671,8 +671,23 @@ def _drawer_body(src: dict[str, Any], hist: list[dict[str, Any]]) -> str:
     collection = src.get("collection")
     collection_line = ""
     if collection:
-        reports = " · ".join(f"订阅 {r['index']}：{r['status']}"
-                             + (f" / {r['code']}" if r["code"] else "") for r in collection["reports"])
+        def report_label(report):
+            text = f"订阅 {report['index']}：{report['status']}"
+            if report["code"]:
+                text += " / " + report["code"]
+            diagnostic = report.get("diagnostics", {})
+            if diagnostic.get("credential_mode"):
+                text += " · " + ("匿名 API" if diagnostic["credential_mode"] == "anonymous" else "Token API")
+            if "rate_remaining" in diagnostic:
+                text += f" · 额度剩余 {diagnostic['rate_remaining']}"
+                if "rate_limit" in diagnostic:
+                    text += f" / {diagnostic['rate_limit']}"
+            if "rate_reset_ts" in diagnostic:
+                text += f" · 重置时间（Unix 秒）{diagnostic['rate_reset_ts']}"
+            if diagnostic.get("window_limited"):
+                text += " · 已达分页上限，未推进游标，不保证历史补齐"
+            return text
+        reports = " · ".join(report_label(r) for r in collection["reports"])
         omitted = collection.get("omitted_reports", 0)
         collection_line = ('<p class="note">最近采集：'
                            + f"成功 {collection['successful']} / 失败 {collection['failed']} 个订阅"

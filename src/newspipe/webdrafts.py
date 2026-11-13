@@ -5,6 +5,7 @@ URLs contain only random handles, never edits or tokens. Nothing is persisted.
 from __future__ import annotations
 
 import html
+import re
 import secrets
 import threading
 import time
@@ -50,6 +51,11 @@ def edit_controls(action, form):
     if not intent:
         return False
     from newspipe.actions import ActionInputError
+    if action in {"source-save", "source-patch"} and intent == "select-adapter":
+        from newspipe import config
+        if (form.get("f.adapter") or [""])[0] not in config.adapter_names():
+            raise ActionInputError("请选择可用的适配器")
+        return True
     if action == "chat-list" and intent in {"manual-chat", "select-chat", "filter-chat"}:
         if intent != "filter-chat":
             form["chat_mode"] = ["manual" if intent == "manual-chat" else "select"]
@@ -81,8 +87,23 @@ def edit_controls(action, form):
     raise ActionInputError("编辑操作不可用，请重新打开编辑器")
 
 
+def safe_values(values):
+    """Mistakenly pasted secrets must not return in feedback or retained drafts."""
+    from newspipe import config
+    out = dict(values)
+    for descriptor in config.describe_schema()["adapter_descriptors"].values():
+        for field in descriptor.get("fields", []):
+            if not field.get("credential"):
+                continue
+            name = "f." + field["path"]
+            if name in out and any(v and not re.fullmatch(r"[A-Z_][A-Z0-9_]*", v.strip()) for v in out[name]):
+                out[name] = [""]
+    return out
+
+
 def restore(page, action, values, *, reveal=False, feedback=""):
     """Restore only form controls in the code-rendered target; escape raw edits."""
+    values = safe_values(values)
     class Controls(HTMLParser):
         def __init__(self):
             super().__init__(convert_charrefs=False)

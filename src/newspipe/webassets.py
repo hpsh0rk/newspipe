@@ -101,6 +101,18 @@ JAVASCRIPT = r"""'use strict';
   const sourceFetch = form => {
     const trigger = form.querySelector('[name="f.fetch.trigger"]');
     if (!trigger) return;
+    const adapter = form.querySelector('[name="f.adapter"]');
+    if (adapter) {
+      form.querySelectorAll('[data-adapter-for]').forEach(group => {
+        group.hidden = group.dataset.adapterFor !== adapter.value;
+        group.disabled = group.hidden;
+      });
+      form.querySelectorAll('[data-adapter-exclude]').forEach(field => {
+        field.hidden = field.dataset.adapterExclude.split(',').includes(adapter.value);
+        field.querySelectorAll('input, select').forEach(control => { control.disabled = field.hidden; });
+      });
+      form.querySelectorAll('[data-adapter-refresh]').forEach(button => { button.hidden = true; });
+    }
     form.querySelectorAll('[data-fetch-for]').forEach(field => {
       field.hidden = field.dataset.fetchFor !== trigger.value;
       field.querySelectorAll('input, select').forEach(control => { control.disabled = field.hidden; });

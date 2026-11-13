@@ -46,7 +46,7 @@
 
 ### Task 2: Schema-Driven Adapter Dialogs
 
-**Files:** Modify `config.py`, `actions.py`, `workbench.py`, `webassets.py`, `webdrafts.py`, `inbound.py`; create `tests/test_adapter_settings_web.py`; extend `tests/test_browser_e2e.py`; document `docs/github-source-acceptance.md` and README.
+**Files:** Modify `config.py`, `source_registry.py`, `actions.py`, `workbench.py`, `webassets.py`, `webdrafts.py`, `inbound.py`, `view.py`; create `tests/test_adapter_settings_web.py`; extend `tests/test_browser_e2e.py`; document `docs/github-source-acceptance.md` and README.
 
 **Interfaces:** Consumes descriptor fields from Task 1. Produces `config.source_fields(adapter, schema=None)` used by both form rendering and form translation. Adapter-specific controls are grouped/disabled when not selected; a draft-only refresh supports no-JS.
 

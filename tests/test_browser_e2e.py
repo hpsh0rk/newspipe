@@ -99,6 +99,71 @@ class WorkbenchBrowserTests(unittest.TestCase):
     def source_label(self, fixture):
         return config.source_values(config.load(fixture.news_dir).sources["research"])["feed_label"]
 
+    def test_github_adapter_settings_switch_validate_save_and_reopen(self):
+        for engine in self.browsers:
+            for width in (360, 1440):
+                with self.subTest(engine=engine, width=width), self.scenario(engine, width=width) as (fixture, page):
+                    form = self.editor(fixture, page)
+                    form.locator('[name="f.adapter"]').select_option("github")
+                    self.expect(form.locator('[name="f.feeds"]')).not_to_be_visible()
+                    form.locator('[name="f.settings.users"]').fill("Alice")
+                    form.locator('[name="f.settings.repositories"]').fill("Owner/Repo")
+                    form.locator('[data-adapter-for="github"] summary').click()
+                    form.locator('[name="f.settings.max_pages"]').fill("4")
+                    before = (fixture.news_dir / "sources.yaml").read_bytes()
+                    form.locator('[data-save-button]').click()
+                    self.assertTrue(form.locator('[name="f.settings.max_pages"]').evaluate("input => input.validity.rangeOverflow"))
+                    self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
+                    form.locator('[name="f.settings.max_pages"]').fill("2")
+                    form.locator('[name="f.settings.repositories"]').fill("Owner/..")
+                    self.assertFalse(self.submit(page, form)["ok"])
+                    self.expect(form.locator('[name="f.settings.repositories"]')).to_have_value("Owner/..")
+                    self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
+                    form.locator('[name="f.settings.repositories"]').fill("Owner/Repo")
+                    self.assertTrue(self.submit(page, form)["ok"])
+                    self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
+                    form.locator('[name="dry"]').uncheck()
+                    self.assertTrue(self.submit(page, form)["ok"])
+                    source = config.load(fixture.news_dir).sources["research"]
+                    self.assertEqual(source.adapter, "github")
+                    self.assertEqual(source.extra["settings"]["repositories"], ["Owner/Repo"])
+                    form = self.editor(fixture, page)
+                    self.expect(form.locator('[name="f.settings.users"]')).to_have_value("Alice")
+                    self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), width + 1)
+                    form.locator('[name="f.adapter"]').select_option("rsshub")
+                    self.expect(form.locator('[name="f.settings.repositories"]')).not_to_be_visible()
+                    data = form.evaluate("form => Object.fromEntries(new FormData(form))")
+                    self.assertNotIn("f.settings.repositories", data)
+                    self.expect(form.locator('[name="f.feeds"]')).to_have_value("https://example.invalid/research.xml")
+
+    def test_no_js_github_adapter_refresh_and_create_remain_local(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine, width=360, javascript=False) as (fixture, page):
+                page.goto(fixture.url + "/config?new=1")
+                form = page.locator('form[action="/api/actions/source-save"]')
+                form.locator('[name="name"]').fill("github-news")
+                form.locator('[name="f.adapter"]').select_option("github")
+                form.locator('[name="f.fetch.trigger"]').select_option("manual")
+                with page.expect_navigation():
+                    form.get_by_role("button", name="更新订阅参数", exact=True).click()
+                self.assertNotIn("github-news", config.load(fixture.news_dir).sources)
+                form = page.locator('form[action="/api/actions/source-save"]')
+                self.expect(form.locator('[name="name"]')).to_have_value("github-news")
+                form.locator('[name="f.settings.repositories"]').fill("Owner/Repo")
+                form.locator('[name="notify_policy"]').select_option("archive")
+                with page.expect_navigation():
+                    form.locator('[data-save-button]').click()
+                self.assertNotIn("github-news", config.load(fixture.news_dir).sources)
+                form = page.locator('form[action="/api/actions/source-save"]')
+                self.expect(form.locator('[name="f.settings.repositories"]')).to_have_value("Owner/Repo")
+                form.locator('[name="dry"]').uncheck()
+                with page.expect_navigation():
+                    form.locator('[data-save-button]').click()
+                source = config.load(fixture.news_dir).sources["github-news"]
+                self.assertFalse(source.enabled)
+                self.assertEqual(source.extra["settings"]["repositories"], ["Owner/Repo"])
+                self.assertEqual(source.notify.policy, "archive")
+
     def test_story_preview_detail_pagination_and_responsive_read_only_navigation(self):
         for engine in self.browsers:
             for width in (360, 1440):

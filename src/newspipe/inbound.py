@@ -382,6 +382,10 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                 page["catalog"] = rss_mod.search("")    # 空查询 = 目录浏览
             elif page["q"]:
                 page["catalog"] = rss_mod.search(page["q"])
+            if draft and draft.get("form") and draft.get("action") in {"source-save", "source-patch"}:
+                selected = (draft["form"].get("f.adapter") or [""])[0]
+                if selected in schema["adapters"]:
+                    page["values"] = {**page.get("values", page.get("prefill", {})), "adapter": selected}
             return view_mod.config_html(payload, schema=schema, actions=act, flash=flash, page=page)
 
         def do_GET(self) -> None:                          # noqa: N802（stdlib 命名）
@@ -581,7 +585,7 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
             elif action == "story-settings":
                 query = {"story_settings": ["1"]}
             key = drafts.put({"action": action, "query": query if retain else {}, "flash": _flash_of(envelope),
-                              "form": {k: v for k, v in form.items() if k != "token"} if retain else None,
+                              "form": webdrafts.safe_values({k: v for k, v in form.items() if k != "token"}) if retain else None,
                               "probe": envelope if name == "rsshub-probe" else None,
                               "chat_result": envelope if name == "chat-list" else None,
                               "directory": envelope.get("directory"),
