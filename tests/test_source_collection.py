@@ -69,6 +69,18 @@ class SourceCollectionTests(unittest.TestCase):
         self.assertEqual(self.store.pending_count("src"), 1)
         self.assertEqual(self.store.cursor("src"), OLD.timestamp())
 
+    def test_acquisition_notes_distinguish_search_windows_from_pagination(self):
+        for kind, expected in (("search_window", "搜索窗口"), ("result_cap", "保留条数上限"),
+                               ("page_cap", "分页上限"), (None, "分页上限")):
+            with self.subTest(kind=kind):
+                diagnostic = {"window_limited": True, **({"window_kind": kind} if kind else {})}
+                self.adapter.fetch.return_value = FetchResult([], (SubscriptionReport("search", "empty", diagnostics=diagnostic),))
+                run = self.collect()
+                self.assertIn(expected, run.note)
+                if kind in {"search_window", "result_cap"}:
+                    self.assertNotIn("分页上限", run.note)
+                self.assertEqual(self.store.cursor("src"), OLD.timestamp())
+
     def test_native_google_searches_preserve_cursor_and_pending_native_identity_across_retries(self):
         import importlib
         from test_google_news_source import search_feed, search_entry, STAMP

@@ -71,14 +71,16 @@ def fetch_partitions(cfg: dict | None = None, since: float | None = None):
                     raise ValueError("Search item needs a title and source permalink.")
                 if entry.published_ts is not None and entry.published_ts < cutoff:
                     continue
-                fields = _common.entry_fields(entry, key)
+                # Discovery queries are provenance, not the article's identity partition.
+                fields = _common.entry_fields(entry, "google_news")
                 if entry.publisher_name:
                     fields["facts"]["publisher"] = entry.publisher_name
                 references = ([{"role": "publisher", "url": entry.publisher_url}] if entry.publisher_url else [])
                 references.extend(ref for ref in entry.references if ref not in references)
                 fields["referenced_urls"] = references[:20]
                 fields["metadata"].update(native_id=entry.native_id, aggregator="google_news",
-                                         publisher=entry.publisher_name, publisher_url=entry.publisher_url)
+                                         publisher=entry.publisher_name, publisher_url=entry.publisher_url,
+                                         query_partition=key)
                 items.append({"ext_id": native_identity("google_news", entry.native_id),
                     "identity_version": "google-news-native-v1", "title": entry.title, "url": entry.permalink,
                     "original_url": entry.permalink, "source": cfg.get("feed_label") or "Google News",

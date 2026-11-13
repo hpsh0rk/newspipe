@@ -225,7 +225,11 @@ def _acquire(cfg: Any, scfg: Any, since: float | None, run: SourceRun) -> FetchR
     if result.status == "partial_failure":
         run.note = "部分订阅采集失败；已保留成功内容，未推进内容游标"
     elif any(report.diagnostics.get("window_limited") for report in result.reports):
-        run.note = "采集达到分页上限；已保留窗口内内容，未推进内容游标，不保证历史补齐"
+        kinds = {report.diagnostics.get("window_kind", "page_cap") for report in result.reports
+                 if report.diagnostics.get("window_limited")}
+        limits = [label for kind, label in (("search_window", "搜索窗口有限"),
+                  ("result_cap", "达到保留条数上限"), ("page_cap", "达到分页上限")) if kind in kinds]
+        run.note = "采集" + " / ".join(limits) + "；已保留窗口内内容，未推进内容游标，不保证历史补齐"
     return result
 
 

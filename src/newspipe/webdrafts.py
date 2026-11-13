@@ -116,8 +116,10 @@ def adapter_drafts(form):
             raw = previous.get(path) if raw is None else raw
             if raw is None:
                 continue
+            # A multiline list is one control containing many bounded entries.
+            raw_limit = 32768 if field.get("separator") == "lines" else 16384
             if (not isinstance(raw, list) or len(raw) > 100
-                    or any(not isinstance(v, str) or len(v.encode("utf-8")) > 16384 for v in raw)):
+                    or any(not isinstance(v, str) or len(v.encode("utf-8")) > raw_limit for v in raw)):
                 raise ActionInputError("适配器草稿字段超出范围")
             if field.get("credential") and any(v and not re.fullmatch(r"[A-Z_][A-Z0-9_]*", v.strip()) for v in raw):
                 raw = [""]

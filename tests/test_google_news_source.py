@@ -103,6 +103,8 @@ class GoogleNewsSourceTests(unittest.TestCase):
         self.assertEqual(len(result.reports), 2)
         self.assertNotEqual(result.reports[0].key, result.reports[1].key)
         self.assertEqual(result.items[0]["ext_id"], result.items[1]["ext_id"])
+        self.assertEqual(result.items[0]["subscription"], result.items[1]["subscription"])
+        self.assertNotEqual(result.items[0]["metadata"]["query_partition"], result.items[1]["metadata"]["query_partition"])
 
     def test_apostrophes_do_not_hide_conflicting_search_window_operators(self):
         for query in ("O'Reilly when:2d tech'news", "'when:2d' model"):

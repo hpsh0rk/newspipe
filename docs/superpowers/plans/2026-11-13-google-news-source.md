@@ -65,8 +65,8 @@
 
 - [x] Run full unittest discovery with mandatory JavaScript/browser gates, secret scan and `git diff --check`, once at a time in the isolated worktree. Record counts and any intermittent automation failures honestly.
 - [x] Run synthetic doctor/card-budget checks without real credentials, provider/model requests, runner/WS or sends. Verify frozen payloads, original callbacks, queue IDs and favorite receipts are unchanged.
-- [ ] Obtain one fresh whole-branch read-only review using the existing native execution approach; fix Important/Critical findings after reproduced RED/GREEN and document any deferred minor finding. Do not request another reviewer merely to replace an unfavorable result.
-- [ ] Record measured offline acceptance and final commit. Leave the new stage committed but unmerged/unpushed until separately instructed.
+- [x] Obtain one fresh whole-branch read-only review using the existing native execution approach; fix Important/Critical findings after reproduced RED/GREEN and document any deferred minor finding. Do not request another reviewer merely to replace an unfavorable result.
+- [x] Record measured offline acceptance and final commit. Leave the new stage committed but unmerged/unpushed until separately instructed.
 
 ## Approval Boundary
 

@@ -1,5 +1,6 @@
 """Adapter metadata reaches the real CLI writers and no-JS source dialog."""
 import json
+import http.client
 import unittest
 import urllib.error
 from urllib.parse import urlencode, urlsplit, parse_qs
@@ -162,6 +163,71 @@ class GoogleNewsSettingsWebTests(unittest.TestCase):
                 "f.settings.language": ["en-US"], "f.settings.region": ["US"],
                 "f.settings.edition": [""], "f.settings.lookback_days": ["7"], "f.settings.max_results": ["50"],
                 "notify_policy": ["archive"], **kw}
+
+    def http_form(self, fixture, **kw):
+        from test_rsshub_web import RssForm
+        with urllib.request.urlopen(fixture.url + "/config?new=1") as response:
+            page = response.read().decode()
+        parsed = RssForm()
+        parsed.feed(page.replace('/api/actions/source-save', '/api/actions/rsshub-save'))
+        return self.form(token=[parsed.values["token"]], adapter_rendered=["google_news"],
+                         adapter_draft=["{}"], return_to=["/config"], **kw)
+
+    def test_maximum_ascii_queries_validate_and_save_through_real_http(self):
+        queries = ["x" * 1019 + f"{i:05d}" for i in range(25)]
+        with offline_workbench() as fixture:
+            form = self.http_form(fixture, **{"f.settings.queries": ["\n".join(queries)], "dry": ["1"]})
+            before = (fixture.news_dir / "sources.yaml").read_bytes()
+            for dry in ("1", "0"):
+                form["dry"] = [dry]
+                body = urlencode(form, doseq=True).encode()
+                self.assertLess(len(body), 65536)
+                request = urllib.request.Request(fixture.url + "/api/actions/source-save", data=body,
+                    headers={"Origin": fixture.url, "Accept": "application/json"})
+                with urllib.request.urlopen(request) as response:
+                    result = json.load(response)
+                self.assertTrue(result["ok"], result)
+                if dry == "1":
+                    self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
+            source = config.load(fixture.news_dir).sources["google-news"]
+            self.assertEqual(source.extra["settings"]["queries"], queries)
+            self.assertFalse(source.enabled)
+
+    def test_no_js_long_and_oversized_query_errors_remain_editable(self):
+        from html.parser import HTMLParser
+        class QueryText(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.active, self.text = False, ""
+            def handle_starttag(self, tag, attrs):
+                if tag == "textarea":
+                    self.active = dict(attrs).get("name") == "f.settings.queries"
+            def handle_endtag(self, tag):
+                if tag == "textarea":
+                    self.active = False
+            def handle_data(self, value):
+                if self.active:
+                    self.text += value
+        for raw, message in (("\n".join("x" * 1019 + f"{i:05d}" for i in range(16)), "settings.max_results"),
+                             ("x" * 32769, "草稿")):
+            with self.subTest(size=len(raw)), offline_workbench() as fixture:
+                form = self.http_form(fixture, **{"f.settings.queries": [raw], "f.settings.max_results": ["0"]})
+                before = (fixture.news_dir / "sources.yaml").read_bytes()
+                request = urllib.request.Request(fixture.url + "/api/actions/source-save",
+                    data=urlencode(form, doseq=True).encode(), headers={"Origin": fixture.url})
+                try:
+                    with urllib.request.urlopen(request) as response:
+                        self.assertEqual(response.status, 200)
+                        page = response.read().decode()
+                        self.assertEqual(set(parse_qs(urlsplit(response.url).query)), {"draft"})
+                except (urllib.error.HTTPError, http.client.RemoteDisconnected) as error:
+                    self.fail(f"Failed draft did not return an editable page: {error}")
+                self.assertIn(message, page)
+                parsed = QueryText(); parsed.feed(page)
+                # The browser strips the reserved first textarea newline.
+                self.assertEqual(parsed.text, "\n" + raw)
+                self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
+
 
     def test_query_lines_keep_commas_and_phrases_as_one_query(self):
         body = actions.build_source_body(self.form(**{"f.feeds": ["https://foreign.invalid/feed"], "f.http2": ["1"]}))
