@@ -76,7 +76,9 @@ def _field(field, value, *, prefix, scope, slots):
                         + f'<button class="btn" type="submit" name="editor_intent" value="remove-time:{index}" formnovalidate data-remove-time aria-label="移除发送时间">移除</button></div>')
         control += '</div><button class="btn" type="submit" name="editor_intent" value="add-time" formnovalidate data-add-time>添加发送时间</button><p class="note">24 小时制，可填写多个发送时间。</p></div>'
     else:
-        shown = ", ".join(str(v) for v in (value or [])) if kind == "list" else "" if value is None else str(value)
+        multiline = kind == "list" and field.get("separator") == "lines"
+        separator = "\n" if multiline else ", "
+        shown = separator.join(str(v) for v in (value or [])) if kind == "list" else "" if value is None else str(value)
         numeric = kind in ("int", "float")
         extra = (' min="1"' if path.endswith("max_items") else ' min="0"') if numeric else ""
         if numeric and "min" in field:
@@ -85,9 +87,15 @@ def _field(field, value, *, prefix, scope, slots):
             extra += f' max="{E(field["max"])}"'
         if kind == "float":
             extra += ' step="any"'
+        if kind == "str" and field.get("pattern"):
+            extra += f' pattern="{E(field["pattern"])}"'
+        if kind == "str" and "max_length" in field:
+            extra += f' maxlength="{E(field["max_length"])}"'
         if path == "quiet_hours" or path.endswith(".quiet_hours"):
             extra += ' placeholder="23:00-07:30 或留空" pattern="([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]"'
-        control = f'<input type="{"number" if numeric else "text"}" {attr} value="{E(shown)}"{extra}>'
+        # HTML strips one initial newline in textarea; reserve it for the parser.
+        control = (f'<textarea {attr} rows="4">\n{E(shown)}</textarea>' if multiline else
+                   f'<input type="{"number" if numeric else "text"}" {attr} value="{E(shown)}"{extra}>')
     label = f'<label for="{E(ident)}">{E(field["label"])}</label>' if kind not in {"times", "slots"} else f'<span id="{E(ident)}-label">{E(field["label"])}</span>'
     help_node = help_tip(help_text, ident + "-help", field["label"] + "说明") if help_text else f'<small id="{E(ident)}-help"></small>'
     if kind == "bool":

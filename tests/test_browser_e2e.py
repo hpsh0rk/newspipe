@@ -99,6 +99,98 @@ class WorkbenchBrowserTests(unittest.TestCase):
     def source_label(self, fixture):
         return config.source_values(config.load(fixture.news_dir).sources["research"])["feed_label"]
 
+    def test_google_search_queries_validate_save_reopen_and_copy_without_foreign_fields(self):
+        queries = '"ACME, Inc." OR model\n\u4eba\u5de5\u667a\u80fd\u3001\u6280\u672f'
+        for engine in self.browsers:
+            for width in (360, 1440):
+                with self.subTest(engine=engine, width=width), self.scenario(engine, width=width) as (fixture, page):
+                    page.goto(fixture.url + "/config?new=1")
+                    form = page.locator('form[action="/api/actions/source-save"]')
+                    form.locator('[name="name"]').fill("google-search")
+                    form.locator('[name="f.adapter"]').select_option("google_news")
+                    form.locator('[name="f.fetch.trigger"]').select_option("manual")
+                    query = form.locator('textarea[name="f.settings.queries"]')
+                    query.fill(queries)
+                    self.expect(form.locator('[name="f.feeds"]')).not_to_be_visible()
+                    form.locator('[name="f.settings.language"]').fill("en-US")
+                    form.locator('[name="f.settings.region"]').fill("US")
+                    form.locator('[name="notify_policy"]').select_option("archive")
+                    form.locator('[data-adapter-for="google_news"] summary').click()
+                    form.locator('[name="f.settings.edition"]').fill("CN:zh-Hans")
+                    before = (fixture.news_dir / "sources.yaml").read_bytes()
+                    rejected = self.submit(page, form)
+                    self.assertFalse(rejected["ok"])
+                    self.assertIn("settings.edition", rejected["error"]["message"])
+                    self.expect(query).to_have_value(queries)
+                    self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
+                    form.locator('[name="f.settings.edition"]').fill("")
+                    query.fill("AI when:2d")
+                    rejected = self.submit(page, form)
+                    self.assertFalse(rejected["ok"])
+                    self.assertIn("settings.queries", rejected["error"]["message"])
+                    self.expect(query).to_be_focused()
+                    query.fill(queries)
+                    self.assertTrue(self.submit(page, form)["ok"])
+                    self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
+                    form.locator('[name="dry"]').uncheck()
+                    self.assertTrue(self.submit(page, form)["ok"])
+                    source = config.load(fixture.news_dir).sources["google-search"]
+                    self.assertFalse(source.enabled)
+                    self.assertEqual(source.extra["settings"]["queries"], queries.split("\n"))
+                    self.assertEqual(source.notify.policy, "archive")
+                    page.goto(fixture.url + "/config?edit=google-search")
+                    form = page.locator('form[action="/api/actions/source-patch"]')
+                    self.expect(form.locator('textarea[name="f.settings.queries"]')).to_have_value(queries)
+                    self.expect(form.locator('[name="f.settings.language"]')).to_have_value("en-US")
+                    self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), width + 1)
+                    page.goto(fixture.url + "/config?copy=google-search")
+                    copy = page.locator('form[action="/api/actions/source-copy"]')
+                    copy.locator('[name="new_name"]').fill("google-copy")
+                    copy.locator('[name="dry"]').uncheck()
+                    self.assertTrue(self.submit(page, copy)["ok"])
+                    self.assertEqual(config.load(fixture.news_dir).sources["google-copy"].extra, source.extra)
+
+    def test_no_js_google_search_inactive_and_failed_multiline_drafts_survive(self):
+        raw = '\n"ACME, Inc." OR model\n\u4eba\u5de5\u667a\u80fd\u3001\u6280\u672f'
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine, width=360, javascript=False) as (fixture, page):
+                page.goto(fixture.url + "/config?new=1")
+                form = page.locator('form[action="/api/actions/source-save"]')
+                form.locator('[name="name"]').fill("google-search")
+                form.locator('[name="f.adapter"]').select_option("google_news")
+                form.locator('[name="f.fetch.trigger"]').select_option("manual")
+                with page.expect_navigation():
+                    form.get_by_role("button", name="更新订阅参数", exact=True).click()
+                form = page.locator('form[action="/api/actions/source-save"]')
+                form.locator('textarea[name="f.settings.queries"]').fill(raw)
+                form.locator('[name="f.settings.language"]').fill("en-US")
+                form.locator('[name="f.settings.region"]').fill("US")
+                form.locator('[name="notify_policy"]').select_option("archive")
+                form.locator('[data-adapter-for="google_news"] summary').click()
+                form.locator('[name="f.settings.edition"]').fill("CN:zh-Hans")
+                before = (fixture.news_dir / "sources.yaml").read_bytes()
+                with page.expect_navigation():
+                    form.locator('[data-save-button]').click()
+                self.assertEqual(set(parse_qs(urlsplit(page.url).query)), {"draft"})
+                self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
+                form = page.locator('form[action="/api/actions/source-save"]')
+                self.expect(form.locator('textarea[name="f.settings.queries"]')).to_have_value(raw)
+                form.locator('[name="f.settings.edition"]').fill("")
+                for adapter in ("rsshub", "google_news"):
+                    form.locator('[name="f.adapter"]').select_option(adapter)
+                    with page.expect_navigation():
+                        form.get_by_role("button", name="更新订阅参数", exact=True).click()
+                    form = page.locator('form[action="/api/actions/source-save"]')
+                self.expect(form.locator('textarea[name="f.settings.queries"]')).to_have_value(raw)
+                self.expect(form.locator('[name="f.settings.region"]')).to_have_value("US")
+                self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
+                form.locator('[name="dry"]').uncheck()
+                with page.expect_navigation():
+                    form.locator('[data-save-button]').click()
+                source = config.load(fixture.news_dir).sources["google-search"]
+                self.assertEqual(source.extra["settings"]["queries"], raw.strip().split("\n"))
+                self.assertFalse(source.enabled)
+
     def test_github_adapter_settings_switch_validate_save_and_reopen(self):
         for engine in self.browsers:
             for width in (360, 1440):

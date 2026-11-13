@@ -138,6 +138,8 @@ def _coerce(field: dict[str, Any], raw: list[str]) -> Any:
     if kind in ("list", "slots"):
         if kind == "slots":
             return [v for v in values if v.strip()]
+        if field.get("separator") == "lines":
+            return [line.strip() for line in first.splitlines() if line.strip()]
         return [part.strip() for part in re.split(r"[,\n、]", first) if part.strip()]
     if kind == "int":
         try:

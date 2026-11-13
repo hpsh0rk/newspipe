@@ -152,11 +152,21 @@ def safe_values(values):
 def restore(page, action, values, *, reveal=False, feedback=""):
     """Restore only form controls in the code-rendered target; escape raw edits."""
     values = safe_values(values)
+    if action in {"source-save", "source-patch"}:
+        from newspipe.actions import ActionInputError
+        try:
+            snapshot = adapter_drafts(values)
+        except ActionInputError:
+            snapshot = {}
+        selected = (values.get("f.adapter") or [""])[0]
+        # The posted controls may belong to the previous adapter, not this one.
+        values = {**values, **{"f." + path: raw for path, raw in snapshot.get(selected, {}).items()}}
     class Controls(HTMLParser):
         def __init__(self):
             super().__init__(convert_charrefs=False)
             self.out, self.active, self.select = [], False, None
             self.positions = {}
+            self.textarea = False
 
         def handle_starttag(self, tag, attrs):
             attrs = dict(attrs)
@@ -182,6 +192,14 @@ def restore(page, action, values, *, reveal=False, feedback=""):
                         self.positions[name] = index + 1
                         attrs["value"] = values[name][index] if index < len(values[name]) else ""
             self.out.append("<" + tag + "".join(" " + k + ("" if v is None else '="' + html.escape(v, quote=True) + '"') for k, v in attrs.items()) + ">")
+            if self.active and tag == "textarea":
+                name = attrs.get("name")
+                if name in values and name not in {"token", "adapter_rendered", "adapter_draft"}:
+                    index = self.positions.get(name, 0)
+                    self.positions[name] = index + 1
+                    raw = values[name][index] if index < len(values[name]) else ""
+                    self.out.append("\n" + html.escape(raw, quote=False))
+                    self.textarea = True
 
         def handle_endtag(self, tag):
             if tag == "form":
@@ -190,16 +208,21 @@ def restore(page, action, values, *, reveal=False, feedback=""):
                 self.active = False
             if tag == "select":
                 self.select = None
+            if tag == "textarea":
+                self.textarea = False
             self.out.append(f"</{tag}>")
 
         def handle_data(self, data):
-            self.out.append(data)
+            if not self.textarea:
+                self.out.append(data)
 
         def handle_entityref(self, name):
-            self.out.append(f"&{name};")
+            if not self.textarea:
+                self.out.append(f"&{name};")
 
         def handle_charref(self, name):
-            self.out.append(f"&#{name};")
+            if not self.textarea:
+                self.out.append(f"&#{name};")
 
         def handle_decl(self, decl):
             self.out.append(f"<!{decl}>")

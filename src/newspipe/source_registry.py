@@ -26,7 +26,7 @@ def validate_value(value, field: dict) -> None:
     if kind == "list" and field.get("disallowed_operators"):
         operators = "|".join(re.escape(v) for v in field["disallowed_operators"])
         for query in value:
-            unquoted = re.sub(r'"(?:\\.|[^"\\])*"' + r"|'(?:\\.|[^'\\])*'", " ", query)
+            unquoted = re.sub(r'"(?:\\.|[^"\\])*"', " ", query)
             if re.search(r"(?<![\w:])(?:" + operators + r")\s*:", unquoted, re.IGNORECASE):
                 raise ValueError("Query time operators conflict with the configured search window.")
     if field.get("credential") and value and not re.fullmatch(r"[A-Z_][A-Z0-9_]*", value):
@@ -44,7 +44,7 @@ def validate_relations(values: dict, fields) -> None:
         if field.get("prefix_from"):
             value = get(field["path"])
             if value and value.split(":", 1)[0] != get(field["prefix_from"]):
-                raise ValueError("Adapter edition must match the selected region.")
+                raise ValueError(field["path"] + " must match " + field["prefix_from"])
 
 
 @dataclass(frozen=True)
@@ -92,7 +92,7 @@ class AdapterDescriptor:
 
 REGISTRY = {
     "google_news": AdapterDescriptor("google_news", "Google News", ("rss_search", "original_evidence", "subscription_results", "bounded_search_window"), fields=(
-        {"path": "settings.queries", "type": "list", "default": [], "label": "新闻查询词", "max_items": 25,
+        {"path": "settings.queries", "type": "list", "default": [], "label": "新闻查询词", "max_items": 25, "separator": "lines",
          "item_pattern": r"[^\x00-\x1f\x7f-\x9f\ud800-\udfff]{1,1024}", "disallowed_operators": ("when", "after", "before"),
          "help": "每行一条查询，支持关键词、引号短语及 Google 搜索语法。时间范围由下方回看天数管理，不要同时填写 when:/after:/before: 时间条件。只读取搜索 RSS，不抓取文章全文。"},
         {"path": "settings.language", "type": "str", "default": "zh-CN", "label": "搜索界面语言",

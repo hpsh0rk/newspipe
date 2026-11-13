@@ -104,6 +104,13 @@ class GoogleNewsSourceTests(unittest.TestCase):
         self.assertNotEqual(result.reports[0].key, result.reports[1].key)
         self.assertEqual(result.items[0]["ext_id"], result.items[1]["ext_id"])
 
+    def test_apostrophes_do_not_hide_conflicting_search_window_operators(self):
+        for query in ("O'Reilly when:2d tech'news", "'when:2d' model"):
+            with self.subTest(query=query):
+                result, call = self.collect(cfg={"settings": {"queries": [query]}})
+                self.assertEqual(result.reports[0].code, "configuration")
+                call.assert_not_called()
+
     def test_native_identity_does_not_truncate_or_use_headline_or_shared_url(self):
         result, _ = self.collect(search_feed(search_entry("n" * 200 + "a"), search_entry("n" * 200 + "b")))
         ids = [item["ext_id"] for item in result.items]

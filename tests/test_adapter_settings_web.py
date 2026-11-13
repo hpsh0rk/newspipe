@@ -154,5 +154,109 @@ class AdapterSettingsWebTests(unittest.TestCase):
             self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
 
 
+class GoogleNewsSettingsWebTests(unittest.TestCase):
+    def form(self, **kw):
+        return {"name": ["google-news"], "create_only": ["1"], "f.adapter": ["google_news"],
+                "f.enabled": ["0"], "f.fetch.trigger": ["manual"], "f.enrich.summary": ["off"],
+                "f.settings.queries": ['"ACME, Inc." OR model\n\u4eba\u5de5\u667a\u80fd\u3001\u6280\u672f'],
+                "f.settings.language": ["en-US"], "f.settings.region": ["US"],
+                "f.settings.edition": [""], "f.settings.lookback_days": ["7"], "f.settings.max_results": ["50"],
+                "notify_policy": ["archive"], **kw}
+
+    def test_query_lines_keep_commas_and_phrases_as_one_query(self):
+        body = actions.build_source_body(self.form(**{"f.feeds": ["https://foreign.invalid/feed"], "f.http2": ["1"]}))
+        self.assertEqual(body["settings"]["queries"], ['"ACME, Inc." OR model', '\u4eba\u5de5\u667a\u80fd\u3001\u6280\u672f'])
+        self.assertNotIn("feeds", body)
+        self.assertNotIn("http2", body)
+
+    def test_region_edition_mismatch_is_rejected_by_cli_writer_before_writing(self):
+        with offline_workbench() as fixture:
+            before = (fixture.news_dir / "sources.yaml").read_bytes()
+            result = actions.dispatch("source-save", self.form(**{"f.settings.edition": ["CN:zh-Hans"]}), fixture.news_dir)
+            self.assertFalse(result["ok"], result)
+            self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
+            self.assertIn("settings.edition", result["error"]["message"])
+
+    def test_queries_render_as_multiline_and_existing_values_round_trip(self):
+        with offline_workbench() as fixture:
+            result = actions.dispatch("source-save", self.form(), fixture.news_dir)
+            self.assertTrue(result["ok"], result)
+            payload = view.build(fixture.news_dir)
+            page = view.config_html(payload, schema=config.describe_schema(), actions={"token": "test"},
+                                    page={"edit": "google-news"})
+            from html.parser import HTMLParser
+            class Controls(HTMLParser):
+                query_tag = ""
+                def handle_starttag(self, tag, attrs):
+                    if dict(attrs).get("name") == "f.settings.queries":
+                        self.query_tag = tag
+            controls = Controls(); controls.feed(page)
+            self.assertEqual(controls.query_tag, "textarea")
+            self.assertIn("每行", page)
+
+    def test_dry_preview_patch_copy_and_conflict_preserve_queries_and_unknown_extras(self):
+        from newspipe import cli
+        with offline_workbench() as fixture:
+            before = (fixture.news_dir / "sources.yaml").read_bytes()
+            form = self.form(base_hash=[edit.file_hash(fixture.news_dir / "sources.yaml")])
+            dry = actions.dispatch("source-save", {**form, "dry": ["1"]}, fixture.news_dir)
+            self.assertTrue(dry["ok"], dry)
+            self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
+            result = actions.dispatch("source-save", form, fixture.news_dir)
+            self.assertTrue(result["ok"], result)
+            source = config.load(fixture.news_dir).sources["google-news"]
+            self.assertEqual(source.extra["settings"]["queries"], ['"ACME, Inc." OR model', '\u4eba\u5de5\u667a\u80fd\u3001\u6280\u672f'])
+            added = cli.run_subcommand(["source", "patch", "google-news", "--from-json",
+                                       '{"unknown":{"keep":false}}', "--json"], fixture.news_dir)
+            self.assertTrue(added.ok, added.as_dict())
+            payload = view.build(fixture.news_dir)
+            patch_form = {"name": ["google-news"], "f.adapter": ["google_news"],
+                          "base_hash": [payload["sources_hash"]], "source_revision": [payload["source_revisions"]["google-news"]],
+                          "f.settings.queries": ['"B, Co"'], "f.settings.max_results": [""]}
+            original = (fixture.news_dir / "sources.yaml").read_bytes()
+            preview = actions.dispatch("notification-preview", {**patch_form, "preview_kind": ["source"]}, fixture.news_dir)
+            self.assertTrue(preview["ok"], preview)
+            self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), original)
+            self.assertTrue(actions.dispatch("source-patch", patch_form, fixture.news_dir)["ok"])
+            conflict = actions.dispatch("source-patch", patch_form, fixture.news_dir)
+            self.assertFalse(conflict["ok"])
+            self.assertEqual(conflict["error"]["code"], "E_CONFLICT")
+            source = config.load(fixture.news_dir).sources["google-news"]
+            self.assertEqual(source.extra["settings"]["queries"], ['"B, Co"'])
+            self.assertEqual(source.extra["settings"]["max_results"], 50)
+            self.assertFalse(source.extra["unknown"]["keep"])
+            copy = actions.dispatch("source-copy", {"name": ["google-news"], "new_name": ["google-copy"],
+                "base_hash": [edit.file_hash(fixture.news_dir / "sources.yaml")]}, fixture.news_dir)
+            self.assertTrue(copy["ok"], copy)
+            copied = config.load(fixture.news_dir).sources["google-copy"]
+            self.assertEqual(copied.extra, source.extra)
+            self.assertFalse(copied.enabled)
+            self.assertEqual(source.notify.overrides, {})
+
+    def test_invalid_limits_and_queries_never_write(self):
+        with offline_workbench() as fixture:
+            before = (fixture.news_dir / "sources.yaml").read_bytes()
+            for key, value in (("max_results", "0"), ("lookback_days", "91"), ("language", "../locale"),
+                               ("queries", "AI when:2d")):
+                result = actions.dispatch("source-save", self.form(**{"f.settings." + key: [value]}), fixture.news_dir)
+                self.assertFalse(result["ok"], result)
+                self.assertEqual((fixture.news_dir / "sources.yaml").read_bytes(), before)
+
+    def test_search_and_result_windows_are_not_presented_as_pagination(self):
+        from newspipe.source_contract import FetchResult, SubscriptionReport
+        from datetime import datetime
+        with offline_workbench() as fixture:
+            for kind, text in (("search_window", "搜索窗口"), ("result_cap", "保留条数上限"), ("page_cap", "分页上限")):
+                for status in ("empty", "failure"):
+                    report = SubscriptionReport("private-query", status, code="network" if status == "failure" else "",
+                                                diagnostics={"window_limited": True, "window_kind": kind})
+                    fixture.store.record_collection_report("research", FetchResult([], (report,)).summary(), at=datetime.now())
+                    page = view.cockpit_html(view.build(fixture.news_dir))
+                    self.assertIn(text, page)
+                    self.assertNotIn("private-query", page)
+                    if kind != "page_cap":
+                        self.assertNotIn("已达分页上限", page)
+
+
 if __name__ == "__main__":
     unittest.main()

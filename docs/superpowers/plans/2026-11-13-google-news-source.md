@@ -54,17 +54,17 @@
 
 **Interfaces:** Consume Task 1 descriptor through existing `config.source_fields`, form translation and inactive-draft snapshots. Google News hides irrelevant `feeds` / `http2`; query and localization controls render through the same schema as CLI validation. Existing old GitHub diagnostics without `window_kind` retain their pagination wording.
 
-- [ ] Write/observe RED tests for Google News create/dry/patch/copy/preview/reopen with queries and locales, invalid/blank numeric values, source revision conflicts, unknown legacy extras and non-writing no-JS refresh.
-- [ ] Add a read-only acquisition diagnostic test distinguishing bounded search history from GitHub pagination, including empty and failed searches. No runtime source lookup or re-collection during rendering.
-- [ ] Add Chromium/WebKit scenarios at 360/1440 px: choose Google News, enter queries, validation preserves edits, dry-run does not write, confirmed save creates a disabled collect-only source, reopen/edit/copy retain values. Add no-JS Google News -> RSS -> Google News round-trip coverage.
-- [ ] Keep primary fields concise, with edition/limits in advanced controls and existing hover/focus help. Do not add another permanent settings tab or source-level notification overrides.
-- [ ] Run web/action/draft/view/JavaScript suites and the new browser scenarios. Document examples, finite-window/no-cursor behavior, publisher versus aggregator links, no full-body fetch and the separate live-acceptance requirement.
-- [ ] Commit `feat: expose Google News searches and window diagnostics`.
+- [x] Write/observe RED tests for Google News create/dry/patch/copy/preview/reopen with queries and locales, invalid/blank numeric values, source revision conflicts, unknown legacy extras and non-writing no-JS refresh.
+- [x] Add a read-only acquisition diagnostic test distinguishing bounded search history from GitHub pagination, including empty and failed searches. No runtime source lookup or re-collection during rendering.
+- [x] Add Chromium/WebKit scenarios at 360/1440 px: choose Google News, enter queries, validation preserves edits, dry-run does not write, confirmed save creates a disabled collect-only source, reopen/edit/copy retain values. Add no-JS Google News -> RSS -> Google News round-trip coverage.
+- [x] Keep primary fields concise, with edition/limits in advanced controls and existing hover/focus help. Do not add another permanent settings tab or source-level notification overrides.
+- [x] Run web/action/draft/view/JavaScript suites and the new browser scenarios. Document examples, finite-window/no-cursor behavior, publisher versus aggregator links, no full-body fetch and the separate live-acceptance requirement.
+- [x] Commit `feat: expose Google News searches and window diagnostics`.
 
 ### Final Acceptance
 
-- [ ] Run full unittest discovery with mandatory JavaScript/browser gates, secret scan and `git diff --check`, once at a time in the isolated worktree. Record counts and any intermittent automation failures honestly.
-- [ ] Run synthetic doctor/card-budget checks without real credentials, provider/model requests, runner/WS or sends. Verify frozen payloads, original callbacks, queue IDs and favorite receipts are unchanged.
+- [x] Run full unittest discovery with mandatory JavaScript/browser gates, secret scan and `git diff --check`, once at a time in the isolated worktree. Record counts and any intermittent automation failures honestly.
+- [x] Run synthetic doctor/card-budget checks without real credentials, provider/model requests, runner/WS or sends. Verify frozen payloads, original callbacks, queue IDs and favorite receipts are unchanged.
 - [ ] Obtain one fresh whole-branch read-only review using the existing native execution approach; fix Important/Critical findings after reproduced RED/GREEN and document any deferred minor finding. Do not request another reviewer merely to replace an unfavorable result.
 - [ ] Record measured offline acceptance and final commit. Leave the new stage committed but unmerged/unpushed until separately instructed.
 
