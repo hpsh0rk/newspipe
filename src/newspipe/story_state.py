@@ -83,28 +83,41 @@ def _text(text, limit=20000):
     return re.sub(r"(?im)\b(authorization|cookie|api[-_]key)[\"']?\s*:\s*[^\n]+", r"\1: [redacted]", text)
 
 
-def _facts_text(text, *, truncated=False):
+def _facts_projection(text, *, truncated=False):
     # Never parse a clipped JSON prefix or expose unredacted keys from it.
     if truncated:
-        return "[structured facts display omitted: stored original exceeds 20,000 characters]"
+        return "[structured facts display omitted: stored original exceeds 20,000 characters]", False
     sensitive = {"authorization", "cookie", "setcookie", "apikey", "accesskey", "accesstoken",
                  "refreshtoken", "token", "password", "secret", "clientsecret", "appsecret"}
 
+    complete = True
     def redact(value, depth=0):
+        nonlocal complete
         if depth > 16:
+            complete = False
             return "[nested facts omitted]"
         if isinstance(value, dict):
+            if any(re.sub(r"[-_\s]", "", key).casefold() in sensitive for key in value):
+                complete = False
             return {_text(key): "[redacted]" if re.sub(r"[-_\s]", "", key).casefold() in sensitive
                     else redact(item, depth + 1) for key, item in value.items()}
         if isinstance(value, list):
             return [redact(item, depth + 1) for item in value]
-        return _text(value) if isinstance(value, str) else value
+        if isinstance(value, str):
+            shown = _text(value)
+            complete = complete and shown == value
+            return shown
+        return value
 
     try:
         shown = json.dumps(redact(json.loads(text)), ensure_ascii=False, separators=(",", ":"))
-        return shown if len(shown) <= 20000 else "[structured facts display omitted: safe projection exceeds 20,000 characters]"
+        return (shown, complete) if len(shown) <= 20000 else ("[structured facts display omitted: safe projection exceeds 20,000 characters]", False)
     except (ValueError, RecursionError):
-        return "[structured facts cannot be safely displayed; original is retained]"
+        return "[structured facts cannot be safely displayed; original is retained]", False
+
+
+def _facts_text(text, *, truncated=False):
+    return _facts_projection(text, truncated=truncated)[0]
 
 
 class Ledger:
@@ -183,13 +196,14 @@ class Ledger:
 
     @staticmethod
     def _public(row):
+        facts, facts_complete = _facts_projection(row["facts_json"], truncated=row["facts_length"] > 20000)
         return {"sequence": row["sequence"], "observation_id": row["observation_id"],
                 "identity_hash": row["identity_hash"], "version_hash": row["version_hash"],
                 "source": row["source"], "adapter": row["adapter"], "kind": row["kind"],
                 "extractor_version": row["extractor_version"], "pub_ts": row["pub_ts"],
                 "observed_ts": row["observed_ts"], "first_seen": row["first_seen"], "origin": row["origin"],
                 "evidence": {"title": _text(row["title"], 500), "text": _text(row["body"]),
-                             "facts_text": _facts_text(row["facts_json"], truncated=row["facts_length"] > 20000),
+                             "facts_text": facts, "facts_projection_complete": facts_complete,
                              "text_complete": bool(row["complete"]),
                              "text_truncated": row["body_length"] > 20000,
                              "facts_truncated": row["facts_length"] > 20000,

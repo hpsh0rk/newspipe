@@ -1,7 +1,7 @@
 """Pure bounded evidence and citation validation. Labels are proposals, not truth."""
 from __future__ import annotations
 
-VERSION = "evidence-pairs-v1"
+VERSION = "evidence-pairs-v2"
 RELATIONS = frozenset({"duplicate", "progress", "viewpoint", "unrelated", "uncertain"})
 DIFFERENCES = frozenset({"new_fact", "changed_claim", "viewpoint"})
 
@@ -9,7 +9,7 @@ DIFFERENCES = frozenset({"new_fact", "changed_claim", "viewpoint"})
 def _side(row, prefix):
     evidence = row["evidence"]
     excerpts = []
-    represented = not (evidence.get("text_truncated") or evidence.get("facts_truncated"))
+    represented = not (evidence.get("text_truncated") or evidence.get("facts_truncated")) and evidence.get("facts_projection_complete", True)
     for field, count in (("title", 1), ("text", 10), ("facts_text", 1)):
         text = evidence.get(field, "")
         if field == "facts_text" and text == "{}":
@@ -20,7 +20,7 @@ def _side(row, prefix):
                              "offset": offset, "text": text[offset:offset + 240]})
     return {key: row.get(key) for key in ("observation_id", "version_hash", "extractor_version", "source", "kind", "pub_ts")} | {
         "text_complete": bool(evidence.get("text_complete")), "fully_represented": bool(represented),
-        "text_length": len(evidence.get("text", "")), "excerpts": excerpts}
+        "text_length": len(evidence.get("text", "").strip()), "excerpts": excerpts}
 
 
 def comparison_input(current: dict, previous: dict) -> dict:
@@ -58,6 +58,12 @@ def validate_comparison(data: dict, evidence: dict) -> dict:
         return _result(evidence, relation, "model_" + relation) if not differences else _result(evidence)
     if not differences:
         return _result(evidence, reason="missing_citations")
+    material = lambda citation: citation["field"] in {"text", "facts_text"} and citation["text"].strip() not in {"", "{}"}
+    if not any(material(row["current"]) and material(row["previous"]) for row in differences):
+        return _result(evidence, reason="insufficient_cited_material")
+    if ((relation == "duplicate" and any(row["kind"] != "changed_claim" for row in differences))
+            or (relation == "progress" and not any(row["kind"] in {"new_fact", "changed_claim"} for row in differences))):
+        return _result(evidence, reason="incompatible_difference_category")
     if relation == "duplicate" and any(side["kind"] != "article" or not side["text_complete"]
                                        or not side["fully_represented"] or side["text_length"] < 160
                                        for side in (current, previous)):

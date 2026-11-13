@@ -48,11 +48,11 @@ def report():
                                          current_revision=cfg.story_revision, expected_activation_id=snapshot.activation_id,
                                          snapshot=snapshot, proposals=rank_candidates(draft, list(snapshot.candidates), limit=5), baselines={})
             answer = {"relation": model_relation, "differences": [] if model_relation in {"unrelated", "uncertain"}
-                      else [{"kind": "viewpoint" if model_relation == "viewpoint" else "new_fact", "current": "c1", "previous": "p1"}]}
+                      else [{"kind": "viewpoint" if model_relation == "viewpoint" else "changed_claim" if model_relation == "duplicate" else "new_fact", "current": "c1", "previous": "p1"}]}
             response = Response({"choices": [{"message": {"content": json.dumps(answer)}}],
                                  "usage": {"prompt_tokens": 200, "completion_tokens": 100, "total_tokens": 300}})
             ref = llm.ModelRef("fixture", "offline", "https://model.invalid/v1", "fixture-key", "test")
-            with patch.object(llm, "resolve_model", return_value=ref), patch.object(llm.urllib.request, "urlopen", return_value=response):
+            with patch.object(llm, "resolve_model", return_value=ref), patch.object(llm, "_open_model", return_value=response):
                 result = story_compare.evaluate(store, cfg, draft.observation_id, allow_model=True, limit=1, now=at)
             relation = result["pairs"][0]["result"]["relation"] if result["pairs"] else "no_candidate"
             rows.append({"case": name, "expected": expected, "result": relation, "latency_ms": result["latency_ms"]})

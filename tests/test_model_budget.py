@@ -52,7 +52,7 @@ class ModelBudgetTests(unittest.TestCase):
                              **kwargs)
 
     def test_real_usage_enforces_the_hourly_limit(self):
-        with patch.object(llm.urllib.request, "urlopen", return_value=Response()) as send:
+        with patch.object(llm, "_open_model", return_value=Response()) as send:
             self.assertTrue(self.call().ok)
             blocked = self.call("different", now=NOW + timedelta(minutes=1))
         self.assertEqual(send.call_count, 1)
@@ -61,14 +61,14 @@ class ModelBudgetTests(unittest.TestCase):
 
     def test_cached_result_is_free_at_the_budget_limit(self):
         self.budget["max_calls_per_day"] = 1
-        with patch.object(llm.urllib.request, "urlopen", return_value=Response()) as send:
+        with patch.object(llm, "_open_model", return_value=Response()) as send:
             self.assertTrue(self.call().ok)
             again = self.call()
         self.assertEqual(again.state, "reused")
         self.assertEqual(send.call_count, 1)
 
     def test_reasoning_retry_must_reserve_another_attempt(self):
-        with patch.object(llm.urllib.request, "urlopen", return_value=Response(EMPTY)) as send:
+        with patch.object(llm, "_open_model", return_value=Response(EMPTY)) as send:
             result = self.call()
         self.assertEqual(send.call_count, 1)
         self.assertIn("hourly_calls", result.note)
@@ -77,13 +77,13 @@ class ModelBudgetTests(unittest.TestCase):
     def test_interruption_after_transport_starts_is_still_charged(self):
         class Interrupted(BaseException):
             pass
-        with patch.object(llm.urllib.request, "urlopen", side_effect=Interrupted):
+        with patch.object(llm, "_open_model", side_effect=Interrupted):
             with self.assertRaises(Interrupted):
                 self.call()
         self.assertEqual(self.store.usage(NOW.date().isoformat())["calls"], 1)
 
     def test_oversized_input_degrades_without_transport_or_truncation(self):
-        with patch.object(llm.urllib.request, "urlopen", return_value=Response()) as send:
+        with patch.object(llm, "_open_model", return_value=Response()) as send:
             result = self.call("x" * 100)
         self.assertFalse(result.ok)
         send.assert_not_called()
@@ -92,7 +92,7 @@ class ModelBudgetTests(unittest.TestCase):
         self.assertEqual(usage["reasons"], {"max_chars_per_call": 1})
 
     def test_default_usage_date_and_receipt_timestamp_use_injected_clock(self):
-        with patch.object(llm.urllib.request, "urlopen", return_value=Response()):
+        with patch.object(llm, "_open_model", return_value=Response()):
             self.assertTrue(self.call(now=NOW - timedelta(days=20)).ok)
         stamp = NOW - timedelta(days=20)
         self.assertEqual(self.store.usage(stamp.date().isoformat())["calls"], 1)
@@ -103,7 +103,7 @@ class ModelBudgetTests(unittest.TestCase):
     def test_rolling_hour_budget_survives_midnight(self):
         before = NOW.replace(hour=23, minute=55)
         after = (NOW + timedelta(days=1)).replace(hour=0, minute=5)
-        with patch.object(llm.urllib.request, "urlopen", return_value=Response()) as send:
+        with patch.object(llm, "_open_model", return_value=Response()) as send:
             self.assertTrue(self.call(now=before).ok)
             result = self.call("different", now=after)
         self.assertEqual(send.call_count, 1)
@@ -114,7 +114,7 @@ class ModelBudgetTests(unittest.TestCase):
         def call(user):
             start.wait(timeout=3)
             return self.call(user)
-        with patch.object(llm.urllib.request, "urlopen", return_value=Response()) as send:
+        with patch.object(llm, "_open_model", return_value=Response()) as send:
             with ThreadPoolExecutor(max_workers=2) as pool:
                 results = list(pool.map(call, ("first", "second")))
         self.assertEqual(send.call_count, 1)
@@ -122,7 +122,7 @@ class ModelBudgetTests(unittest.TestCase):
 
     def test_each_attempt_accounts_the_entire_input(self):
         self.budget["max_calls_per_hour"] = 10
-        with patch.object(llm.urllib.request, "urlopen", side_effect=[Response(EMPTY), Response()]):
+        with patch.object(llm, "_open_model", side_effect=[Response(EMPTY), Response()]):
             self.assertTrue(self.call().ok)
         usage = self.store.usage(NOW.date().isoformat())
         self.assertEqual(usage["calls"], 2)
@@ -133,7 +133,7 @@ class ModelBudgetTests(unittest.TestCase):
         def call(_):
             start.wait(timeout=3)
             return self.call()
-        with patch.object(llm.urllib.request, "urlopen", return_value=Response()) as send:
+        with patch.object(llm, "_open_model", return_value=Response()) as send:
             with ThreadPoolExecutor(max_workers=2) as pool:
                 results = list(pool.map(call, range(2)))
         self.assertEqual(send.call_count, 1)
@@ -143,7 +143,7 @@ class ModelBudgetTests(unittest.TestCase):
         stamp = NOW.isoformat(timespec="seconds")
         state.write_json_atomic(self.store.llm_root / "usage" / f"{NOW.date()}.json",
                                 {"calls": 1, "updated": stamp})
-        with patch.object(llm.urllib.request, "urlopen", return_value=Response()) as send:
+        with patch.object(llm, "_open_model", return_value=Response()) as send:
             result = self.call()
         send.assert_not_called()
         self.assertIn("hourly_calls", result.note)
@@ -153,7 +153,7 @@ class ModelBudgetTests(unittest.TestCase):
         after = (NOW + timedelta(days=1)).replace(hour=0, minute=5)
         self.budget.update(max_calls_per_day=1, max_calls_per_hour=10, max_chars_per_call=8000)
         with patch.object(llm, "datetime", wraps=datetime) as model_clock, \
-             patch.object(llm.urllib.request, "urlopen", side_effect=[Response(EMPTY), Response()]) as send:
+             patch.object(llm, "_open_model", side_effect=[Response(EMPTY), Response()]) as send:
             model_clock.now.side_effect = [before, before, after, after]
             enrich.enrich([_item(1)], _src(summary="title"), self.store, {}, self.budget, now=before)
         self.assertEqual(send.call_count, 2)
@@ -167,7 +167,7 @@ class ModelBudgetTests(unittest.TestCase):
 
     def test_scope_headroom_protects_summaries(self):
         self.budget.update(max_calls_per_day=2, max_calls_per_hour=10)
-        with patch.object(llm.urllib.request, "urlopen", return_value=Response()) as send:
+        with patch.object(llm, "_open_model", return_value=Response()) as send:
             first = self.call(spend_scope=self.scope(reserve_calls_per_day=1))
             blocked = self.call("compare again", spend_scope=self.scope(reserve_calls_per_day=1))
             summary = self.call("summary")
@@ -178,7 +178,7 @@ class ModelBudgetTests(unittest.TestCase):
         self.assertEqual(send.call_count, 2)
 
     def test_scoped_token_reservation_blocks_transport(self):
-        with patch.object(llm.urllib.request, "urlopen", return_value=Response()) as send:
+        with patch.object(llm, "_open_model", return_value=Response()) as send:
             result = self.call(spend_scope=self.scope(max_tokens_per_day=10), max_tokens=100)
         self.assertFalse(result.ok)
         send.assert_not_called()
@@ -188,7 +188,7 @@ class ModelBudgetTests(unittest.TestCase):
         self.budget.update(max_calls_per_hour=10, max_tokens_per_day=1000, max_chars_per_call=100, max_tokens_ceiling=100)
         state.write_json_atomic(self.store.llm_root / "usage" / f"{NOW.date()}.json",
                                 {"calls": 1, "recent": []})
-        with patch.object(llm.urllib.request, "urlopen", return_value=Response()) as send:
+        with patch.object(llm, "_open_model", return_value=Response()) as send:
             first = self.call(max_tokens=100)
             blocked = self.call("second", max_tokens=100)
         self.assertTrue(first.ok)
@@ -198,7 +198,7 @@ class ModelBudgetTests(unittest.TestCase):
 
     def test_overall_token_headroom_can_disable_comparison_without_disabling_summary(self):
         self.budget.update(max_calls_per_hour=10, max_tokens_per_day=1000)
-        with patch.object(llm.urllib.request, "urlopen", return_value=Response()) as send:
+        with patch.object(llm, "_open_model", return_value=Response()) as send:
             blocked = self.call(spend_scope=self.scope(reserve_tokens_per_day=900), max_tokens=100)
             summary = self.call("summary", max_tokens=100)
         self.assertFalse(blocked.ok)
@@ -209,11 +209,11 @@ class ModelBudgetTests(unittest.TestCase):
         self.budget["max_calls_per_hour"] = 10
         measured = {**GOOD, "usage": {"prompt_tokens": 7, "completion_tokens": 15,
                     "total_tokens": 22, "completion_tokens_details": {"reasoning_tokens": 10}}}
-        with patch.object(llm.urllib.request, "urlopen", return_value=Response(measured)):
+        with patch.object(llm, "_open_model", return_value=Response(measured)):
             result = self.call(spend_scope=self.scope(), max_tokens=100)
         self.assertEqual(result.accounting["measured_tokens"], 22)
         self.assertEqual(result.accounting["unknown_tokens"], 0)
-        with patch.object(llm.urllib.request, "urlopen", side_effect=TimeoutError("PRIVATE response")):
+        with patch.object(llm, "_open_model", side_effect=TimeoutError("PRIVATE response")):
             timed = self.call("different", spend_scope=self.scope(), max_tokens=100)
         self.assertGreater(timed.accounting["unknown_tokens"], 100)
         self.assertNotIn("PRIVATE", timed.note)
@@ -223,7 +223,7 @@ class ModelBudgetTests(unittest.TestCase):
 
     def test_cache_is_free_and_isolated_by_endpoint(self):
         self.budget["max_calls_per_hour"] = 10
-        with patch.object(llm.urllib.request, "urlopen", return_value=Response()) as send:
+        with patch.object(llm, "_open_model", return_value=Response()) as send:
             self.call(spend_scope=self.scope())
             reused = self.call(spend_scope=self.scope())
             other = llm.ModelRef(self.ref.model, self.ref.provider, "https://second.invalid/v1", "test-key", "test")
@@ -235,14 +235,14 @@ class ModelBudgetTests(unittest.TestCase):
 
     def test_comparison_has_no_implicit_reasoning_retry(self):
         self.budget["max_calls_per_hour"] = 10
-        with patch.object(llm.urllib.request, "urlopen", return_value=Response(EMPTY)) as send:
+        with patch.object(llm, "_open_model", return_value=Response(EMPTY)) as send:
             result = self.call(spend_scope=self.scope(), retry_empty=False)
         self.assertFalse(result.ok)
         self.assertEqual(send.call_count, 1)
         self.assertEqual(result.accounting["attempts"], 1)
 
     def test_oversized_response_remains_unknown_and_does_not_leak_body(self):
-        with patch.object(llm.urllib.request, "urlopen", return_value=Response({**GOOD, "extra": "PRIVATE" * 100})):
+        with patch.object(llm, "_open_model", return_value=Response({**GOOD, "extra": "PRIVATE" * 100})):
             result = self.call(response_limit=100)
         self.assertFalse(result.ok)
         self.assertNotIn("PRIVATE", result.note)
@@ -251,7 +251,7 @@ class ModelBudgetTests(unittest.TestCase):
         self.budget["max_calls_per_hour"] = 10
         for raw in ({"choices": [None]}, {"choices": {"PRIVATE": "bad"}},
                     {"choices": [{"message": "PRIVATE"}]}):
-            with self.subTest(raw=raw), patch.object(llm.urllib.request, "urlopen", return_value=Response(raw)):
+            with self.subTest(raw=raw), patch.object(llm, "_open_model", return_value=Response(raw)):
                 result = self.call(str(raw), retry_empty=False)
                 self.assertFalse(result.ok)
                 self.assertEqual(result.accounting["attempts"], 1)
@@ -262,7 +262,7 @@ class ModelBudgetTests(unittest.TestCase):
         before = NOW.replace(hour=23, minute=55)
         after = (NOW + timedelta(days=1)).replace(hour=0, minute=5)
         scope = self.scope(max_calls_per_hour=1)
-        with patch.object(llm.urllib.request, "urlopen", return_value=Response()) as send:
+        with patch.object(llm, "_open_model", return_value=Response()) as send:
             self.call(spend_scope=scope, now=before)
             blocked = self.call("after midnight", spend_scope=scope, now=after)
         self.assertFalse(blocked.ok)
@@ -271,7 +271,7 @@ class ModelBudgetTests(unittest.TestCase):
         def call(user):
             start.wait(timeout=3)
             return self.call(user, spend_scope=self.scope(max_calls_per_day=1), now=after + timedelta(hours=2))
-        with patch.object(llm.urllib.request, "urlopen", return_value=Response()) as send:
+        with patch.object(llm, "_open_model", return_value=Response()) as send:
             with ThreadPoolExecutor(max_workers=2) as pool:
                 results = list(pool.map(call, ("third", "fourth")))
         self.assertEqual(sum(r.ok for r in results), 1)

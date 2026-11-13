@@ -865,7 +865,7 @@ class LlmTests(unittest.TestCase):
         good = {"choices": [{"finish_reason": "stop",
                              "message": {"content": '{"title_zh": "标题", "summary_zh": "摘要"}'}}]}
         opener = self._fake_urlopen([empty, good])
-        with patch.object(llm.urllib.request, "urlopen", opener):
+        with patch.object(llm, "_open_model", opener):
             result = llm.chat_json("summarize", system="s", user="u", prompt_version="v1",
                                    store=store, models_cfg={"default": "host"},
                                    budget={"max_calls_per_day": 10, "max_calls_per_hour": 10,
@@ -881,7 +881,7 @@ class LlmTests(unittest.TestCase):
         store = state.Store(self.home / "news")
         empty = {"choices": [{"finish_reason": "length", "message": {"content": ""}}]}
         opener = self._fake_urlopen([empty])
-        with patch.object(llm.urllib.request, "urlopen", opener):
+        with patch.object(llm, "_open_model", opener):
             result = llm.chat_json("summarize", system="s", user="u", prompt_version="v2",
                                    store=store, models_cfg={"default": "host"},
                                    budget={"max_calls_per_day": 10, "max_calls_per_hour": 10,

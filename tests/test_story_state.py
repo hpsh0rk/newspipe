@@ -53,6 +53,16 @@ class StoryStateTests(unittest.TestCase):
         self.assertIsNone(self.store.observation("ob_missing"))
         self.assertEqual(list(Path(self.tmp.name).rglob("*")), [])
 
+    def test_safe_facts_projection_reports_omitted_invalid_and_redacted_material(self):
+        from newspipe.story_state import _facts_projection
+        oversized_projection = json.dumps({"groups": [{"api_key": "x"} for _ in range(900)]})
+        self.assertLess(len(oversized_projection), 20000)
+        for text in (oversized_projection, '{"invalid":', '{"api_key":"fixture"}'):
+            with self.subTest(text=text[:30]):
+                shown, complete = _facts_projection(text)
+                self.assertFalse(complete)
+                self.assertNotIn('"api_key":"fixture"', shown)
+
     def test_repeated_version_keeps_original_and_advances_capture(self):
         first = self.record([self.draft(score=1)])
         with sqlite3.connect(self.db()) as conn:

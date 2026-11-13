@@ -22,6 +22,8 @@ COMPARISONS = {"duplicate": "重复报道（提案）", "progress": "后续进�
                "unrelated": "未发现事件关联", "uncertain": "不确定"}
 DIFFERENCES = {"new_fact": "新增事实（来源声称）", "changed_claim": "主张对照", "viewpoint": "不同观点", "unclassified": "原文变化（未分类）"}
 REASONS = {"invalid_model_evidence": "模型结构或引用不合格", "missing_citations": "缺少原文引用",
+           "insufficient_cited_material": "只有标题或空白引用，不能确认事件关联",
+           "incompatible_difference_category": "差异类别与关系结论冲突，保留为不确定",
            "incomplete_duplicate_evidence": "正文不完整或比较材料已截断，不能确认重复",
            "chronology_unverified": "发布时间未知或倒序，不能确认后续进展",
            "missing_viewpoint_citations": "缺少不同观点的双侧引用", "local_candidate_only": "仅本地候选，未作语义判断",
@@ -231,8 +233,8 @@ def drilldown(page):
         body += '</dl><pre class="story-text">' + E(evidence["facts_text"]) + '</pre>'
         for ref in evidence["references"]:
             body += '<p>' + E(ref["role"]) + ' · ' + _source_link(ref) + '</p>'
-        if evidence["facts_truncated"] or evidence["references_truncated"]:
-            body += '<p class="hint">部分事实或引用展示已截断，原始记录仍保留。</p>'
+        if evidence["facts_truncated"] or evidence["references_truncated"] or not evidence.get("facts_projection_complete", True):
+            body += '<p class="hint">部分事实或引用已省略、脱敏或截断，原始记录仍保留。</p>'
         body += '</details></article>' + _comparisons(page.get("comparisons") or {}, page.get("labels") or {}, page["detail_id"]) + '<h3>这个版本的已保存候选</h3>'
     return body + _receipts(page.get("preview") or {}, page.get("labels") or {},
                             observation=page.get("detail_id", ""), after=page.get("after", 0))

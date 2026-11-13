@@ -55,9 +55,9 @@ class EvidenceTests(unittest.TestCase):
             current = observation()
             current["evidence"].update(change)
             self.assertEqual(evidence.validate_comparison(answer("duplicate", "changed_claim"), self.pair(current))["relation"], "uncertain")
-        self.assertEqual(evidence.validate_comparison(answer("duplicate"), self.pair(observation(text="x" * 4000)))["relation"], "uncertain")
-        self.assertEqual(evidence.validate_comparison(answer("duplicate"), self.pair(observation(kind="comment")))["relation"], "uncertain")
-        self.assertEqual(evidence.validate_comparison(answer("duplicate"), self.pair())["relation"], "duplicate")
+        self.assertEqual(evidence.validate_comparison(answer("duplicate", "changed_claim"), self.pair(observation(text="x" * 4000)))["relation"], "uncertain")
+        self.assertEqual(evidence.validate_comparison(answer("duplicate", "changed_claim"), self.pair(observation(kind="comment")))["relation"], "uncertain")
+        self.assertEqual(evidence.validate_comparison(answer("duplicate", "changed_claim"), self.pair())["relation"], "duplicate")
 
     def test_unknown_or_reverse_chronology_cannot_be_progress(self):
         for stamp in (None, 5):
@@ -89,3 +89,36 @@ class EvidenceTests(unittest.TestCase):
         result = evidence.local_comparison({"relation": "unclassified_change", "evidence_fields": ["source_material"]}, pair)
         self.assertEqual(result["relation"], "uncertain")
         self.assertEqual(result["differences"][0]["current"]["text"], "New decision.")
+
+    def test_whitespace_title_only_and_incompatible_categories_cannot_assert_relationships(self):
+        whitespace = self.pair(observation(text=" " * 200), observation("two", text=" " * 200))
+        self.assertEqual(evidence.validate_comparison(answer("duplicate", "changed_claim"), whitespace)["relation"], "uncertain")
+        empty = self.pair(observation(text=""), observation("two", text=""))
+        titles = {"relation": "progress", "differences": [{"kind": "new_fact", "current": "c0", "previous": "p0"}]}
+        self.assertEqual(evidence.validate_comparison(titles, empty)["relation"], "uncertain")
+        for relation, kind in (("duplicate", "viewpoint"), ("duplicate", "new_fact"), ("progress", "viewpoint")):
+            with self.subTest(relation=relation, kind=kind):
+                self.assertEqual(evidence.validate_comparison(answer(relation, kind), self.pair())["relation"], "uncertain")
+
+    def test_omitted_facts_public_projection_cannot_support_full_duplicate(self):
+        from newspipe.state import Store
+        from newspipe.observations import prepare_observation
+        from test_observations import article
+        from test_story_state import NOW
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        facts = {"decision": "cancelled"}
+        for _ in range(18):
+            facts = {"nested": facts}
+        with TemporaryDirectory() as tmp:
+            store = Store(Path(tmp))
+            draft = prepare_observation("source", "rsshub", article(facts=facts))
+            snapshot = store.observation_capture_snapshot([draft], at=NOW, window_days=14, candidate_limit=5, scan_limit=500)
+            store.record_observations([draft], at=NOW, mode="observe", config_revision="r", current_revision="r",
+                                      expected_activation_id=None, snapshot=snapshot, proposals=[], baselines={})
+            row = store.observation(draft.observation_id)
+            self.assertIn("[nested facts omitted]", row["evidence"]["facts_text"])
+            self.assertFalse(row["evidence"]["facts_projection_complete"])
+            pair = self.pair(row)
+            self.assertFalse(pair["current"]["fully_represented"])
+            self.assertEqual(evidence.validate_comparison(answer("duplicate", "changed_claim"), pair)["relation"], "uncertain")

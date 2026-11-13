@@ -33,6 +33,20 @@ from newspipe.errors import ConfigError
 from newspipe.state import TZ
 
 _FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.MULTILINE)
+
+
+class _RejectModelRedirect(urllib.request.HTTPRedirectHandler):
+    def http_error_302(self, req, fp, code, msg, headers):
+        fp.close()
+        raise urllib.error.HTTPError(req.full_url, code, "Model redirects are not authorized", headers, None)
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
+
+
+def _open_model(request, *, timeout):
+    return urllib.request.build_opener(_RejectModelRedirect()).open(request, timeout=timeout)
+
+
 def resolve_model(capability: str, models_cfg: dict, *,
                   host_config_path: Path | None = None,
                   env_path: Path | None = None) -> ModelRef:
@@ -66,17 +80,33 @@ def parse_json_object(text: str) -> dict | None:
     cleaned = _FENCE.sub("", text).strip()
     try:
         data = json.loads(cleaned)
-        return data if isinstance(data, dict) else None
-    except json.JSONDecodeError:
+        return _bounded_object(data)
+    except (ValueError, RecursionError):
         pass
     start, end = cleaned.find("{"), cleaned.rfind("}")
     if start >= 0 and end > start:
         try:
             data = json.loads(cleaned[start:end + 1])
-            return data if isinstance(data, dict) else None
-        except json.JSONDecodeError:
+            return _bounded_object(data)
+        except (ValueError, RecursionError):
             return None
     return None
+
+
+def _bounded_object(data):
+    if not isinstance(data, dict):
+        return None
+    stack, nodes = [(data, 0)], 0
+    while stack:
+        value, depth = stack.pop()
+        nodes += 1
+        if depth > 32 or nodes > 10000:
+            return None
+        if isinstance(value, dict):
+            stack.extend((item, depth + 1) for item in value.values())
+        elif isinstance(value, list):
+            stack.extend((item, depth + 1) for item in value)
+    return data
 
 
 def _hourly_calls(usage: dict, now: datetime) -> int:
@@ -228,7 +258,7 @@ def _chat_json_locked(capability: str, *, ref: ModelRef, key: str, system: str, 
         accounting["estimated_tokens"] += reservation
         accounting["unknown_tokens"] += reservation
         try:
-            with urllib.request.urlopen(req, timeout=tmo) as resp:
+            with _open_model(req, timeout=tmo) as resp:
                 payload = resp.read(response_limit + 1) if response_limit is not None else resp.read()
                 if response_limit is not None and len(payload) > response_limit:
                     raise ValueError("response_limit")

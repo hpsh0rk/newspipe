@@ -51,7 +51,7 @@ class ComparisonTests(unittest.TestCase):
         self.assertTrue(self.store.comparisons(self.drafts[2].observation_id)["receipts"])
 
     def test_explicit_model_result_and_cache_reuse_are_separate_receipts(self):
-        with patch.object(llm.urllib.request, "urlopen", return_value=self.response()) as send:
+        with patch.object(llm, "_open_model", return_value=self.response()) as send:
             first = self.evaluate(allow_model=True, limit=1)
             second = self.evaluate(allow_model=True, limit=1)
         self.assertEqual(send.call_count, 1)
@@ -93,7 +93,7 @@ class ComparisonTests(unittest.TestCase):
         def transport(*args, **kwargs):
             cli.run_subcommand(["stories", "set", "--from-json", '{"mode":"off"}'], self.news)
             return self.response()
-        with patch.object(llm.urllib.request, "urlopen", side_effect=transport) as send:
+        with patch.object(llm, "_open_model", side_effect=transport) as send:
             out = self.evaluate(allow_model=True)
         self.assertEqual(send.call_count, 1)
         self.assertEqual(out["status"], "stale_settings")
@@ -101,7 +101,7 @@ class ComparisonTests(unittest.TestCase):
         self.assertFalse(self.store.comparisons(self.drafts[2].observation_id)["receipts"][0]["active"])
 
     def test_model_failure_is_safe_uncertainty_with_unknown_cost(self):
-        with patch.object(llm.urllib.request, "urlopen", side_effect=TimeoutError("PRIVATE")):
+        with patch.object(llm, "_open_model", side_effect=TimeoutError("PRIVATE")):
             out = self.evaluate(allow_model=True, limit=1)
         self.assertEqual(out["pairs"][0]["result"]["relation"], "uncertain")
         self.assertGreater(out["accounting"]["unknown_tokens"], 0)
@@ -154,3 +154,12 @@ class ComparisonTests(unittest.TestCase):
         out = cli.run_subcommand(["stories", "evaluate", "--observation", self.drafts[2].observation_id], self.news)
         self.assertEqual(out.error["code"], "E_RUNTIME", out.as_dict())
         self.assertNotIn("PRIVATE", json.dumps(out.as_dict()))
+
+    def test_deep_provider_json_records_uncertainty_instead_of_escaping(self):
+        content = '{"a":' + '[' * 1100 + '0' + ']' * 1100 + '}'
+        response = Response({"choices": [{"message": {"content": content}}]})
+        with patch.object(llm, "_open_model", return_value=response):
+            out = self.evaluate(allow_model=True, limit=1)
+        self.assertEqual(out["pairs"][0]["result"]["relation"], "uncertain")
+        self.assertEqual(out["accounting"]["attempts"], 1)
+        self.assertEqual(len(self.store.comparisons(self.drafts[2].observation_id)["receipts"]), 1)
