@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import yaml
@@ -128,6 +129,24 @@ CONTRACT: list[dict[str, Any]] = [
     {"name": "rsshub probe", "summary": "只读测试 RSSHub 连接或 RSS 订阅；不采集、不发送",
      "usage": "newspipe rsshub probe [--base-url URL] [--feed URL_OR_ROUTE] [--json]",
      "args": ["--base-url", "--feed"], "writes": False, "examples": ["newspipe rsshub probe --feed /sspai/matrix --json"]},
+    {"name": "stories settings", "summary": "只读关联预览设置与激活状态，不采集",
+     "usage": "newspipe stories settings [--json]", "args": [], "writes": False,
+     "examples": ["newspipe stories settings --json"]},
+    {"name": "observations list", "summary": "只读原始版本列表；按不可变版本序号分页",
+     "usage": "newspipe observations list [--source NAME] [--after N] [--limit N] [--json]",
+     "args": ["--source", "--after", "--limit"], "writes": False,
+     "examples": ["newspipe observations list --limit 20 --json"]},
+    {"name": "observations show", "summary": "只读原始版本的有界、脱敏证据",
+     "usage": "newspipe observations show ID [--json]", "args": ["id"], "writes": False,
+     "examples": ["newspipe observations show ob_ID --json"]},
+    {"name": "stories preview", "summary": "读取已保存的关联提案与检索范围；不重新比较、不合并",
+     "usage": "newspipe stories preview [--observation ID] [--after N] [--limit N] [--json]",
+     "args": ["--observation", "--after", "--limit"], "writes": False,
+     "examples": ["newspipe stories preview --limit 5 --json"]},
+    {"name": "stories set", "summary": "保存关联预览设置；不激活、不迁移队列",
+     "usage": "newspipe stories set --from-json JSON [--dry-run] [--base-hash HASH] [--json]",
+     "args": ["--from-json", "--dry-run", "--base-hash"], "writes": True,
+     "examples": ['newspipe stories set --from-json \'{"mode":"observe"}\' --dry-run --json']},
     {"name": "migrate", "summary": "把 v1 状态迁到 v2 布局（幂等）",
      "usage": "newspipe migrate [--json]", "args": [], "writes": True,
      "examples": ["newspipe migrate --json"]},
@@ -136,7 +155,7 @@ CONTRACT: list[dict[str, Any]] = [
      "examples": ["newspipe serve --once --dry"]},
 ]
 
-SUBCOMMANDS = ("api", "config", "doctor", "status", "view", "list-sources", "source", "rsshub", "chats", "hooks", "events", "queue",
+SUBCOMMANDS = ("api", "config", "doctor", "status", "view", "list-sources", "source", "rsshub", "stories", "observations", "chats", "hooks", "events", "queue",
                "run", "serve", "migrate", "probe-channel", "probe-model", "card",
                "card-preview", "enrich-only", "policy", "global", "notification", "collect", "notify")
 
@@ -701,6 +720,47 @@ def _sub_policy(args, news_dir):
     return _write_result(command, out, news_dir, next_ok=["newspipe notification preview --json"])
 
 
+def _story_read(command, fn):
+    from newspipe.story_state import StoryStorageError
+    try:
+        return result.ok(command, fn())
+    except StoryStorageError as exc:
+        return result.fail(command, "E_RUNTIME", str(exc), details={"storage_code": exc.code},
+                           hint="检查原始版本存储与备份；读取不会自动修复，也不会重新采集")
+    except ValueError:
+        return result.fail(command, "E_VALIDATION", "分页参数需要 after 在 SQLite 非负整数范围内，limit 为 1..100 的整数",
+                           hint="使用 --after 0 --limit 20 重试，只读数据不受影响")
+
+
+def _sub_observations(args, news_dir):
+    store = state.Store(news_dir)
+    if args.action == "list":
+        return _story_read("observations.list", lambda: store.observations(source=args.source or "", after=args.after, limit=args.limit))
+    if not args.id:
+        return result.fail("observations.show", "E_USAGE", "需要原始版本 ID", hint="先运行 observations list --json")
+    out = _story_read("observations.show", lambda: store.observation(args.id))
+    if out.ok and out.data is None:
+        return result.fail("observations.show", "E_NOT_FOUND", "没有这个原始版本", hint="从 observations list 获取有效 ID")
+    return out
+
+
+def _sub_stories(args, news_dir):
+    if args.action == "set":
+        return _write_result("stories.set", edit.set_story_settings(news_dir, _json_object(args),
+                             base_hash=args.base_hash, dry_run=args.dry_run), news_dir,
+                             next_ok=["newspipe stories settings --json"])
+    store = state.Store(news_dir)
+    if args.action == "preview":
+        return _story_read("stories.preview", lambda: store.story_preview(observation_id=args.observation or "", after=args.after, limit=args.limit))
+    from newspipe.story_capture import observation_status
+    data = (news_dir / "sources.yaml").read_bytes()
+    settings, revision = config.story_settings_snapshot(news_dir, sources_text=data.decode("utf-8"))
+    status = observation_status(store, settings=settings, revision=revision)
+    return result.ok("stories.settings", {"settings": settings.values(), "revision": revision,
+                     "hash": hashlib.sha256(data).hexdigest()[:16], "status": status,
+                     "awaiting_collection": status["awaiting_collection"]})
+
+
 def _sub_global(args, news_dir):
     out = edit.set_globals(news_dir, _json_object(args), base_hash=args.base_hash, dry_run=args.dry_run)
     return _write_result("global.set", out, news_dir, next_ok=["newspipe notification preview --json"])
@@ -965,6 +1025,22 @@ def _build_sub_parser() -> argparse.ArgumentParser:
     hub.add_argument("--dry-run", action="store_true")
     hub.add_argument("--base-hash")
 
+    stories = add("stories")
+    stories.add_argument("action", choices=["settings", "set", "preview"])
+    stories.add_argument("--from-json")
+    stories.add_argument("--dry-run", action="store_true")
+    stories.add_argument("--base-hash")
+    stories.add_argument("--observation")
+    stories.add_argument("--after", type=int, default=0)
+    stories.add_argument("--limit", type=int, default=20)
+
+    observations = add("observations")
+    observations.add_argument("action", choices=["list", "show"])
+    observations.add_argument("id", nargs="?")
+    observations.add_argument("--source")
+    observations.add_argument("--after", type=int, default=0)
+    observations.add_argument("--limit", type=int, default=50)
+
     chatp = add("chats")
     chatp.add_argument("action", choices=["list"])
     chatp.add_argument("--page-size", type=int, default=100)
@@ -1076,6 +1152,8 @@ SUB_HANDLERS = {
         "list-sources", {"sources": config.summarize(_load(news_dir)[0])}),
     ("source", None): _sub_source,
     ("rsshub", None): _sub_rsshub,
+    ("stories", None): _sub_stories,
+    ("observations", None): _sub_observations,
     ("chats", None): _sub_chats,
     ("policy", None): _sub_policy,
     ("global", None): _sub_global,

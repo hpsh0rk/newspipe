@@ -19,7 +19,7 @@ def _hidden(name, value):
 
 def _start(action, token, base_hash, route, *, cls="editor", confirm=""):
     validation = ' novalidate data-server-validation' if action in {
-        "source-save", "source-patch", "source-copy", "policy-save", "global-save", "rsshub-save"} else ""
+        "source-save", "source-patch", "source-copy", "policy-save", "global-save", "rsshub-save", "story-settings"} else ""
     return (f'<form method="post" action="/api/actions/{E(action)}" class="{E(cls)}"'
             + validation + (f' data-confirm="{E(confirm)}"' if confirm else "") + ">"
             + _hidden("token", token) + _hidden("base_hash", base_hash) + _hidden("return_to", route)
@@ -78,6 +78,10 @@ def _field(field, value, *, prefix, scope, slots):
         shown = ", ".join(str(v) for v in (value or [])) if kind == "list" else "" if value is None else str(value)
         numeric = kind in ("int", "float")
         extra = (' min="1"' if path.endswith("max_items") else ' min="0"') if numeric else ""
+        if numeric and "min" in field:
+            extra = f' min="{E(field["min"])}"'
+        if numeric and "max" in field:
+            extra += f' max="{E(field["max"])}"'
         if kind == "float":
             extra += ' step="any"'
         if path == "quiet_hours" or path.endswith(".quiet_hours"):

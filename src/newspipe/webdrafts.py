@@ -44,7 +44,7 @@ class Drafts:
 def edit_controls(action, form):
     """Translate explicit validation and draft-only intents after POST gates."""
     if (form.get("validate_only") or [""])[0] == "1" and action in {
-            "source-save", "source-patch", "source-copy", "policy-save", "global-save", "rsshub-save"}:
+            "source-save", "source-patch", "source-copy", "policy-save", "global-save", "rsshub-save", "story-settings"}:
         form["dry"] = ["1"]
     intent = (form.get("editor_intent") or [""])[0]
     if not intent:

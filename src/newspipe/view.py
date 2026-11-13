@@ -429,6 +429,7 @@ def build(news_dir: Path | None = None, *, now: datetime | None = None) -> dict[
     from newspipe import callback_jobs
     from newspipe.notification_view import snapshot as notification_snapshot
     from newspipe import rssconnect
+    from newspipe.story_capture import observation_status
     cfg, sources_text, sources_hash = edit.sources_snapshot(news_dir)
     import yaml
     raw_sources = yaml.safe_load(sources_text)["sources"]
@@ -461,6 +462,7 @@ def build(news_dir: Path | None = None, *, now: datetime | None = None) -> dict[
         "sources": rows,
         "sources_hash": sources_hash,
         "rsshub": rssconnect.describe(cfg),
+        "stories": observation_status(store, settings=cfg.stories, revision=cfg.story_revision),
         "source_values": {name: config.source_values(source) for name, source in cfg.sources.items()},
         "source_revisions": {name: hashlib.sha256(yaml.safe_dump(body, sort_keys=True).encode()).hexdigest()
                              for name, body in raw_sources.items()},
@@ -946,9 +948,17 @@ def _recent_html(page: dict[str, Any] | None) -> str:
 
 
 def items_html(view: dict[str, Any], *, page: dict[str, Any] | None = None,
-               flash: dict[str, Any] | None = None) -> str:
+               flash: dict[str, Any] | None = None, actions: dict[str, Any] | None = None) -> str:
     """「条目」Tab：近 N 天全部条目 + 服务端筛选（无 JS，`curl` 也能筛）。"""
     pg = page or {}
+    from newspipe import webstories
+    story_page = pg.get("story_page") or {}
+    story_body = webstories.render(view.get("stories") or {}, story_page,
+                                  token=str((actions or {}).get("token") or ""),
+                                  base_hash=pg.get("story_hash", ""), settings=pg.get("story_settings"),
+                                  fields=pg.get("story_fields") or ())
+    if story_page.get("preview_open") or story_page.get("detail_id"):
+        return _page(tab="items", sub_meta=view, svc=view["service"], body=_banner(flash) + story_body)
     all_rows = pg.get("items") or []
     q = str(pg.get("q") or "")
     source = str(pg.get("source") or "")
@@ -982,7 +992,7 @@ def items_html(view: dict[str, Any], *, page: dict[str, Any] | None = None,
     fallback = ('<tr><td colspan="5" class="empty">没有命中的条目'
                 "（换个关键词、放宽天数，或去 <a href=\"/config\">配置</a> 加信源）</td></tr>")
     body = (
-        f'{_banner(flash)}{form}'
+        f'{_banner(flash)}{story_body}{form}'
         "<table><thead><tr><th>#</th><th>状态</th><th>批次</th><th>标题</th>"
         "<th>发布者/分类/分</th></tr></thead>"
         f'<tbody>{_item_rows(shown, show_batch=True) or fallback}</tbody></table>')

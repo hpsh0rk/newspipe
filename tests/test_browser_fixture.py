@@ -11,10 +11,37 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from newspipe import actions, channel, cli, credentials, llm, net, pipeline, rss, rssconnect
+from types import SimpleNamespace
 from preview_workbench import offline_workbench
 
 
 class BrowserFixtureTests(unittest.TestCase):
+    def test_story_fixture_has_truthful_copy_change_commentary_and_migration_cases(self):
+        with offline_workbench(story_history=True) as fixture:
+            before = {p: p.read_bytes() for p in fixture.news_dir.rglob("*") if p.is_file()}
+            preview = fixture.store.story_preview()
+            relations = {p["relation"] for r in preview["receipts"] for p in r["proposals"]}
+            self.assertIn("exact_copy", relations)
+            self.assertIn("unclassified_change", relations)
+            comment = fixture.story_ids["commentary"]
+            self.assertFalse(any(p["relation"] == "exact_copy" for r in preview["receipts"] for p in r["proposals"] if p["current_id"] == comment))
+            legacy = fixture.store.story_preview(observation_id=fixture.story_ids["legacy"])["receipts"][0]
+            self.assertIn("migration_baseline_missing_material", legacy["limitations"])
+            self.assertEqual(legacy["proposals"], [])
+            late = fixture.store.observation(fixture.story_ids["late"])
+            self.assertLess(late["pub_ts"], late["first_seen"])
+            self.assertEqual(before, {p: p.read_bytes() for p in fixture.news_dir.rglob("*") if p.is_file()})
+            self.assertEqual(fixture.blocked_effects, [])
+
+    def test_synthetic_doctor_keeps_card_budget_and_never_probes_live_services(self):
+        with offline_workbench(story_history=True) as fixture:
+            with patch.object(credentials, "resolve_feishu", return_value=SimpleNamespace(describe=lambda: {
+                    "app_id": "present", "app_secret": "present", "source": "synthetic"})):
+                out = cli.run_subcommand(["doctor", "--json"], fixture.news_dir)
+            self.assertTrue(out.ok, out.as_dict())
+            self.assertGreaterEqual(out.data["card_budget"]["headroom"], 0)
+            self.assertEqual(fixture.blocked_effects, [])
+
     def test_fixture_serves_contract_without_live_credentials_or_effects(self):
         with offline_workbench() as fixture:
             with urllib.request.urlopen(fixture.url + "/view", timeout=5) as response:

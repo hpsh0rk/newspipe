@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -14,7 +14,9 @@ from unittest.mock import patch
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from newspipe import backends, channel, credentials, inbound, llm, net, pipeline, rssconnect, runtime, state
+from newspipe import backends, channel, config, credentials, inbound, llm, net, pipeline, rssconnect, runtime, state
+from newspipe.observations import prepare_observation
+from newspipe.story_matching import rank_candidates
 from newspipe.backends.feishu_direct import FeishuDirectChannel
 from newspipe.backends.feishu_lark_cli import LarkCliChannel
 
@@ -28,10 +30,43 @@ class WorkbenchFixture:
     thread: threading.Thread
     blocked_effects: list[str]
     group_calls: list[str]
+    story_ids: dict[str, str]
+
+
+def _story_history(store):
+    """Seed immutable synthetic evidence, never acquire from a real provider."""
+    now = datetime.now()
+    _, revision = config.story_settings_snapshot(store.news_dir)
+    text = "A verifiable toolkit launch includes a reproducible build, public documentation, measured compatibility and explicit supported versions. " * 3
+    original = {"ext_id": "launch", "title": "A verifiable toolkit launch", "content_kind": "article",
+                "source_text": text, "source_text_complete": True, "url": "https://example.invalid/launch",
+                "pub_ts": now.timestamp()}
+    store.record_pushed("research", [{"ext_id": "legacy-only"}], now.date().isoformat())
+    cases = [("original", "research", original),
+             ("copy", "products", {**original, "ext_id": "copy", "url": "https://example.invalid/syndication"}),
+             ("commentary", "products", {**original, "ext_id": "commentary", "content_kind": "post",
+                "source_text": text + " My different commentary questions the compatibility measurement.", "source_text_complete": False}),
+             ("change", "research", {**original, "source_text": text + " Later correction: supported versions include 2.1."}),
+             ("late", "research", {**original, "ext_id": "late", "pub_ts": (now - timedelta(days=2)).timestamp(),
+                "title": "An older launch report arrived today", "source_text_complete": False}),
+             ("legacy", "research", {**original, "ext_id": "legacy-only"}),
+             ("unrelated", "reading", {**original, "ext_id": "unrelated", "title": "A quiet weekend reading list",
+                "source_text": "An unrelated reading list of local history and cooking books.", "source_text_complete": False})]
+    ids = {}
+    for index, (key, source, item) in enumerate(cases):
+        draft = prepare_observation(source, "rsshub" if source != "products" else "hn", item)
+        at = now + timedelta(seconds=index)
+        snapshot = store.observation_capture_snapshot([draft], at=at, window_days=14, candidate_limit=5, scan_limit=500)
+        baselines = store.original_observation_baselines(source, {str(draft.native_id)}) if key == "legacy" else {}
+        store.record_observations([draft], at=at, mode="observe", config_revision=revision, current_revision=revision,
+            expected_activation_id=snapshot.activation_id, snapshot=snapshot,
+            proposals=rank_candidates(draft, list(snapshot.candidates), limit=5), baselines=baselines)
+        ids[key] = draft.observation_id
+    return ids
 
 
 @contextmanager
-def offline_workbench(*, view_actions=True):
+def offline_workbench(*, view_actions=True, story_history=False):
     with TemporaryDirectory(prefix="newspipe-workbench-") as tmp, ExitStack() as stack:
         news = Path(tmp)
         raw = {"chat": "oc_offline_preview", "slots": {"am": "08:15", "pm": "18:35"},
@@ -50,6 +85,8 @@ def offline_workbench(*, view_actions=True):
                                        "notify": {"policy": "archive"}}}}
         for source in raw["sources"].values():
             source["enrich"] = {"summary": "off"}
+        if story_history:
+            raw["stories"] = {"mode": "observe"}
         (news / "sources.yaml").write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False))
         (news / "service.yaml").write_text(f"inbound: {{mode: none}}\nview: {{enabled: true, actions: {str(view_actions).lower()}}}\n")
         store = state.Store(news)
@@ -61,6 +98,7 @@ def offline_workbench(*, view_actions=True):
         store.write_batch({"source": "research", "digest": datetime.now().date().isoformat(),
                            "slot": "sample", "form": "state_only", "title": "Offline reading",
                            "items": [item], "view": "list", "archived": [], "overflow": 0})
+        story_ids = _story_history(store) if story_history else {}
         blocked = []
         def deny(effect):
             def fail(*args, **kwargs):
@@ -101,7 +139,7 @@ def offline_workbench(*, view_actions=True):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            yield WorkbenchFixture(news, f"http://127.0.0.1:{server.server_address[1]}", store, server, thread, blocked, group_calls)
+            yield WorkbenchFixture(news, f"http://127.0.0.1:{server.server_address[1]}", store, server, thread, blocked, group_calls, story_ids)
         finally:
             server.shutdown()
             thread.join(timeout=5)

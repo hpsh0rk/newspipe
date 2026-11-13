@@ -12,7 +12,7 @@ JAVASCRIPT = r"""'use strict';
   const inertTags = new Set('SECTION ARTICLE HEADER ASIDE DIV SPAN P SMALL B STRONG EM I A CODE PRE BR HR UL OL LI DL DT DD TABLE THEAD TBODY TFOOT TR TH TD H2 H3 H4 H5 FORM INPUT SELECT OPTION OPTGROUP BUTTON LABEL FIELDSET LEGEND DETAILS SUMMARY TEXTAREA'.split(' '));
   const inertAttributes = new Set('class id role tabindex hidden title action formaction formnovalidate method name type value readonly required checked disabled selected multiple placeholder pattern min max step size rows cols for colspan rowspan open href target rel novalidate popover popovertarget'.split(' '));
   const domProperties = new Set('action method elements reportValidity dataset querySelectorAll querySelector closest hasAttribute getAttribute setAttribute removeAttribute append remove noValidate classList'.toLowerCase().split(' '));
-  const actionNames = new Set('run source-toggle source-save source-patch source-copy policy-save policy-remove global-save notification-preview notification-migrate rsshub-save rsshub-probe chat-list collect notify notification-retry source-remove queue-ack events-ack flush'.split(' '));
+  const actionNames = new Set('run source-toggle source-save source-patch source-copy policy-save policy-remove global-save notification-preview notification-migrate rsshub-save rsshub-probe chat-list story-settings collect notify notification-retry source-remove queue-ack events-ack flush'.split(' '));
   const safeAction = value => {
     const url = new URL(value, location.href || location.origin);
     return url.origin === location.origin && !url.search && !url.hash &&
@@ -400,13 +400,13 @@ JAVASCRIPT = r"""'use strict';
   };
   const editorURL = href => {
     const url = new URL(href, location.href);
-    if (url.origin !== location.origin || !['/config', '/notifications'].includes(url.pathname)) throw new Error('unsafe editor URL');
+    if (url.origin !== location.origin || !['/config', '/notifications', '/items'].includes(url.pathname)) throw new Error('unsafe editor URL');
     url.hash = '';
     return url;
   };
   const safePanel = panel => {
-    const actions = new Set(['source-save', 'source-patch', 'source-copy', 'policy-save', 'global-save', 'rsshub-save', 'rsshub-probe', 'chat-list', 'notification-preview']);
-    if (!panel.dataset.editorKey || !['source', 'source-copy', 'policy', 'global', 'rsshub', 'acquisition'].includes(panel.dataset.editorPanel) ||
+    const actions = new Set(['source-save', 'source-patch', 'source-copy', 'policy-save', 'global-save', 'rsshub-save', 'rsshub-probe', 'chat-list', 'notification-preview', 'story-settings']);
+    if (!panel.dataset.editorKey || !['source', 'source-copy', 'policy', 'global', 'rsshub', 'acquisition', 'story-settings'].includes(panel.dataset.editorPanel) ||
         !panel.querySelector('h2') || !safeMarkup(panel)) return false;
     return [panel, ...panel.querySelectorAll('*')].every(node => {
       if (node.getAttributeNames().some(attr => /^on/i.test(attr) || ['srcdoc', 'src', 'style'].includes(attr.toLowerCase()))) return false;
@@ -670,7 +670,7 @@ JAVASCRIPT = r"""'use strict';
         region.replaceWith(replacement);
         messages.forEach(message => placeFeedback(message, replacement, placements.get(message)));
       });
-      for (const selector of ['[data-effective]', '[data-policy-summary]', '[data-global-count]']) {
+      for (const selector of ['[data-effective]', '[data-policy-summary]', '[data-global-count]', '[data-story-status]']) {
         document.querySelectorAll(selector).forEach(node => {
           const match = [...page.querySelectorAll(selector)].find(fresh =>
             fresh.dataset.effective === node.dataset.effective && fresh.dataset.policySummary === node.dataset.policySummary);
@@ -745,7 +745,7 @@ JAVASCRIPT = r"""'use strict';
           error.code === 'E_CONFLICT' ? '编辑内容已保留。对照最新配置后手动刷新；不会自动覆盖或重试。' : '输入已保留，可修正后重新提交。']);
         if (probe) probeDetails(error.details || {});
         const field = [...form.querySelectorAll('input, select')].find(input =>
-          input.type !== 'hidden' && error.message?.includes(input.name.replace(/^[fpngr]\./, '')));
+          input.type !== 'hidden' && error.message?.includes(input.name.replace(/^[fpngrs]\./, '')));
         if (field) {
           fieldError(field, error.message);
           invalidField = field;

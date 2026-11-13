@@ -387,6 +387,16 @@ def _argv_rsshub_save(form):
     return _write_flags(["rsshub", "set", "--base-url", form["r.base_url"][0]], form)
 
 
+def _argv_story_settings(form):
+    from newspipe import config as config_mod
+    _one(form, "base_hash")
+    body = {f["path"]: _coerce(f, form["s." + f["path"]])
+            for f in config_mod.describe_schema()["story_fields"] if "s." + f["path"] in form}
+    if "mode" not in body:
+        raise ActionInputError("缺少关联预览选项；请重新打开设置")
+    return _write_flags(["stories", "set", "--from-json", json.dumps(body)], form)
+
+
 ACTIONS: dict[str, Action] = {
     a.name: a for a in (
         Action("run", "跑一轮", _argv_run),
@@ -400,6 +410,7 @@ ACTIONS: dict[str, Action] = {
         Action("notification-preview", "预览有效通知规则", _argv_preview),
         Action("notification-migrate", "迁移旧通知配置", lambda form: _write_flags(["notification", "migrate"], form), danger=True),
         Action("rsshub-save", "保存 RSSHub 地址", _argv_rsshub_save, danger=True),
+        Action("story-settings", "保存关联预览设置", _argv_story_settings, danger=True),
         Action("rsshub-probe", "只读检测 RSSHub / RSS 订阅", _argv_rsshub_probe),
         Action("chat-list", "读取机器人已加入的群", _argv_chat_list),
         Action("collect", "只采集一次", lambda f: ["collect", _one(f, "name"), *(["--dry"] if _flag(f, "dry") else [])]),

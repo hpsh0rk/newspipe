@@ -29,6 +29,8 @@ from newspipe import events, policy, render, runtime, scheduler, state
 from newspipe.errors import ConfigError, DeliveryError
 from newspipe.state import now_iso, today
 from newspipe.source_contract import FetchResult, SubscriptionReport, SourceContractError, identity_key, normalize_fetch
+from newspipe import story_capture
+from newspipe.story_state import StoryStorageError
 
 
 def _record_event(store: state.Store, event_type: str, *, payload: dict[str, Any],
@@ -66,6 +68,7 @@ class SourceRun:
     enrich: dict[str, int] = field(default_factory=dict)
     note: str = ""
     collection: dict | None = None
+    observations: dict | None = None
 
     def as_dict(self) -> dict[str, Any]:
         out = {"source": self.source, "adapter": self.adapter, "status": self.status,
@@ -77,7 +80,56 @@ class SourceRun:
             out["note"] = self.note
         if self.collection is not None:
             out["collection"] = self.collection
+        if self.observations is not None:
+            out["observations"] = self.observations
         return out
+
+
+def _observation_error(run, error):
+    code = error.code if isinstance(error, StoryStorageError) else "configuration" if isinstance(error, ConfigError) else "invalid_evidence"
+    run.observations = {"contract_version": 1, "status": "error", "code": code}
+    run.note = "原始版本记录失败，游标未推进；成功采集内容已保留在待处理队列。检查存储或关联预览配置后重试。"
+
+
+def _capture_begin(cfg, store, run, dry):
+    try:
+        return story_capture.begin_capture(store, dry=dry, cfg=cfg)
+    except (StoryStorageError, SourceContractError, ConfigError) as error:
+        if getattr(getattr(cfg, "stories", None), "mode", "off") == "off":
+            _observation_off_warning(run, error)
+            return None
+        _observation_error(run, error)
+        return None
+
+
+def _observation_off_warning(run, error):
+    run.observations = {"contract_version": 1, "status": "unavailable", "code": getattr(error, "code", "configuration")}
+    run.note = "关联预览已关闭；旧历史暂不可用，采集和通知继续。未修复历史或重写旧队列。"
+
+
+def _capture_prepare(context, store, scfg, result, run, now):
+    if result is None or result.status == "failure":
+        return None
+    try:
+        return story_capture.prepare_capture(context, store, scfg, result.items, at=now)
+    except (StoryStorageError, SourceContractError, ConfigError) as error:
+        if context is not None and context.settings.mode == "off":
+            _observation_off_warning(run, error)
+        else:
+            _observation_error(run, error)
+        return None
+
+
+def _capture_commit(store, capture, run):
+    if capture is not None:
+        try:
+            run.observations = story_capture.commit_capture(store, capture)
+        except (StoryStorageError, SourceContractError, ConfigError) as error:
+            if capture.context.settings.mode == "off":
+                _observation_off_warning(run, error)
+            else:
+                _observation_error(run, error)
+    return not (run.observations or {}).get("status") == "error"
 
 
 # ── 小工具 ────────────────────────────────────────────────────────────────────
@@ -330,7 +382,9 @@ def _process(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slot: str,
         # Unbinding cannot turn a protected notification into an unbounded legacy send.
         collect_source(cfg, store, scfg.name, dry=dry, force=force, now=now)
         return notify_source(cfg, store, scfg.name, dry=dry, slot=slot if mode == "slot" else None, now=now)
+    context = _capture_begin(cfg, store, run, dry)
     result = _acquire(cfg, scfg, since, run)
+    capture = _capture_prepare(context, store, scfg, result, run, now)
     with nullcontext() if dry else store.transaction():
         if result is None:
             if not dry:
@@ -341,17 +395,31 @@ def _process(cfg: Any, store: state.Store, scfg: Any, *, digest: str, slot: str,
             # Acquisition outages do not cancel a persisted remote operation.
             result = FetchResult([], (SubscriptionReport(scfg.name, "failure", code="incomplete"),))
         return _process_locked(cfg, store, scfg, run, result, digest=digest, slot=slot,
-                               dry=dry, now=now, mode=mode, since=since)
+                               dry=dry, now=now, mode=mode, since=since, capture=capture)
 
 
 def _process_locked(cfg: Any, store: state.Store, scfg: Any, run: SourceRun,
                     result: FetchResult, *, digest: str, slot: str, dry: bool,
-                    now: datetime, mode: str, since: float | None) -> SourceRun:
+                    now: datetime, mode: str, since: float | None, capture=None) -> SourceRun:
     raw = result.items
     run.fetched = len(raw)
     kept = filter_mod.apply(raw, scfg)
     run.kept = len(kept)
     fresh = dedup.fresh(kept, store, scfg.name)
+    if not dry and (capture is not None or run.observations is not None):
+        _queue(store, scfg.name, fresh)
+        if not _capture_commit(store, capture, run):
+            unfinished = store.unfinished_batch(scfg.name)
+            if unfinished and unfinished.get("delivery_payload"):
+                # Only the frozen operation may proceed; newly acquired content stays pending.
+                observation_note = run.note
+                run = _deliver_candidates(cfg, store, scfg, run, list(unfinished.get("items") or []),
+                                          digest=digest, slot=slot, dry=False, now=now, mode="collected")
+                run.note = observation_note + (" 已冻结投递的回执独立恢复。" if run.card != "none" else " " + run.note)
+            run.status, run.queued = "error", store.pending_count(scfg.name)
+            store.heartbeat(scfg.name, status=run.status, digest=digest, note=run.note,
+                            card=run.card, queued=run.queued, observations=run.observations)
+            return run
     if not dry and result.reported:
         _queue(store, scfg.name, fresh)
         _commit_watermark(store, scfg.name, result, since, kept, now)
@@ -713,7 +781,9 @@ def collect_source(cfg: Any, store: state.Store, name: str, *, now: datetime | N
                 return run
         if not dry:
             store.record_collection_attempt(name, at=clock.now())
+    context = _capture_begin(cfg, store, run, dry)
     result = _acquire(cfg, scfg, since, run)
+    capture = _capture_prepare(context, store, scfg, result, run, now)
     with nullcontext() if dry else store.transaction():
         if result is None:
             if not dry:
@@ -727,17 +797,24 @@ def collect_source(cfg: Any, store: state.Store, name: str, *, now: datetime | N
             run.status, run.note = "dry", "只预览采集；不写游标、队列或批次"
             return run
         _queue(store, name, fresh)
+        if not _capture_commit(store, capture, run):
+            run.status, run.queued = "error", store.pending_count(name)
+            _save_collection_report(store, run, now)
+            store.heartbeat(name, status=run.status, digest=digest, note=run.note, observations=run.observations)
+            return run
         # Cursor commits after durable pending, even when delivery is paused or fails later.
         _commit_watermark(store, name, result, since, kept, now)
         _save_collection_report(store, run, now)
         run.status = "collected" if result.complete else "partial_failure"
         run.queued = store.pending_count(name)
         store.heartbeat(name, status=run.status, digest=digest, fetched=run.fetched,
-                        kept=run.kept, new=run.new, queued=run.queued, card="none")
+                        kept=run.kept, new=run.new, queued=run.queued, card="none",
+                        **({"observations": run.observations, "note": run.note} if run.observations is not None else {}))
         rule = policy.resolve(cfg, scfg)
     if rule is not None and rule.values["mode"] == "collect":
         notified = notify_source(cfg, store, name, now=now)
         notified.collection = run.collection
+        notified.observations = run.observations
         return notified
     return run
 
