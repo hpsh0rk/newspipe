@@ -62,9 +62,9 @@ class AdapterDescriptor:
 
 REGISTRY = {
     "aihot": AdapterDescriptor("aihot", "AI 热榜", ("legacy_items", "hot_list")),
-    "hn": AdapterDescriptor("hn", "Hacker News", ("legacy_items", "front_page", "article_links")),
-    "reddit": AdapterDescriptor("reddit", "Reddit", ("legacy_items", "communities")),
-    "rsshub": AdapterDescriptor("rsshub", "RSS / RSSHub", ("legacy_items", "rss", "configured_local_endpoint"),
+    "hn": AdapterDescriptor("hn", "Hacker News", ("legacy_items", "front_page", "article_links", "original_evidence", "subscription_results")),
+    "reddit": AdapterDescriptor("reddit", "Reddit", ("legacy_items", "communities", "original_evidence", "subscription_results")),
+    "rsshub": AdapterDescriptor("rsshub", "RSS / RSSHub", ("legacy_items", "rss", "atom", "original_evidence", "subscription_results", "configured_local_endpoint"),
                                optional_dependencies=("httpx[http2]",)),
 }
 

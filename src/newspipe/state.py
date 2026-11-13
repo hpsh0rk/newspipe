@@ -107,11 +107,13 @@ class Store:
         with self.transaction():
             return self._story_ledger().record(drafts, **kwargs)
 
-    def original_observation_baselines(self, source, native_ids):
+    def original_observation_baselines(self, source, native_ids, *, aliases=None):
         from newspipe.observations import prepare_observation
         from newspipe.source_contract import SourceContractError
         completed = self.pushed_ids(source)
-        found = {native: {"completed": native in completed, "availability": "missing_material", "draft": None}
+        aliases = aliases or {}
+        found = {native: {"completed": native in completed or bool(completed.intersection(aliases.get(native, ()))),
+                          "availability": "missing_material", "draft": None}
                  for native in native_ids}
         if not completed.intersection(native_ids):
             return found

@@ -133,7 +133,7 @@ class RssHubProbeTests(unittest.TestCase):
         self.assertEqual(self.files(), before)
 
     def test_runtime_unsupported_xml_is_not_a_successful_quiet_collection(self):
-        with patch("newspipe.net.request", return_value=b'<feed xmlns="http://www.w3.org/2005/Atom"/>'), \
-                patch("newspipe.adapters.rsshub.time.sleep"):
-            with self.assertRaises(Exception):
-                rsshub.fetch({"feeds": ["https://example.invalid/atom"]})
+        with patch("newspipe.net.request", return_value=b'<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"/>'):
+            out = rsshub.fetch({"feeds": ["https://example.invalid/rdf"]})
+            self.assertEqual(out.status, "failure")
+            self.assertEqual(out.reports[0].code, "unsupported")

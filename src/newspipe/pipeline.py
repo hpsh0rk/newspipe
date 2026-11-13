@@ -28,7 +28,7 @@ from newspipe import channel, clock, dedup, delivery, enrich as enrich_mod, filt
 from newspipe import events, policy, render, runtime, scheduler, state
 from newspipe.errors import ConfigError, DeliveryError
 from newspipe.state import now_iso, today
-from newspipe.source_contract import FetchResult, SubscriptionReport, SourceContractError, identity_key, normalize_fetch
+from newspipe.source_contract import FetchResult, SubscriptionReport, SourceContractError, identity_key, item_identity_keys, normalize_fetch
 from newspipe import story_capture
 from newspipe.story_state import StoryStorageError
 
@@ -182,7 +182,7 @@ def _queue(store: state.Store, source: str, items: list[dict]) -> int:
     if not items:
         return 0
     known = _queued_ids(store, source) | store.pushed_ids(source)
-    todo = [it for it in items if identity_key(it.get("ext_id")) not in known]
+    todo = [it for it in items if not item_identity_keys(it).intersection(known)]
     return store.append_pending(source, todo) if todo else 0
 
 

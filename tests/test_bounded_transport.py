@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
 import unittest
+import urllib.error
 from unittest.mock import MagicMock, patch
 
 from newspipe import net
@@ -85,6 +86,18 @@ class BoundedTransportTests(unittest.TestCase):
             with self.subTest(settings=settings), patch("urllib.request.build_opener") as opener, self.assertRaises(ValueError):
                 net.request("https://feed.example.invalid", **settings)
             opener.assert_not_called()
+
+    def test_rejected_http_response_is_closed_before_exit_retry(self):
+        rejected = MagicMock()
+        error = urllib.error.HTTPError("https://feed.example.invalid", 403, "Denied", {}, rejected)
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b'ok'
+        opener = MagicMock()
+        opener.open.side_effect = [error, response]
+        with patch("urllib.request.build_opener", return_value=opener):
+            self.assertEqual(net.request("https://feed.example.invalid", max_bytes=10), b'ok')
+        rejected.close.assert_called_once()
 
 
 if __name__ == "__main__":

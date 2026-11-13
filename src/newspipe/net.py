@@ -103,6 +103,7 @@ def request(url: str, method: str = "GET", data: bytes | None = None,
                 raise
             except urllib.error.HTTPError as exc:
                 last = exc
+                exc.close()
                 if proxy is None and exc.code in (401, 403, 429, 503):
                     continue  # 换出口可能不同结果
                 raise
@@ -125,6 +126,7 @@ def request(url: str, method: str = "GET", data: bytes | None = None,
             raise
         except urllib.error.HTTPError as exc:
             last = exc
+            exc.close()
             if proxy is None and exc.code in (401, 403, 429, 503):
                 continue  # 换出口可能不同结果
             raise

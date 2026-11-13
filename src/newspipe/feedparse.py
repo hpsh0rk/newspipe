@@ -50,7 +50,7 @@ def timestamp(value: str, *, iso=False) -> float | None:
         return None
 
 
-def _link(value: str, base: str) -> str:
+def source_link(value: str, base: str = "") -> str:
     value = urljoin(base, value.strip()) if value.strip() else ""
     try:
         parts = urlsplit(value)
@@ -83,7 +83,7 @@ def text_evidence(markup: str, *, base_url="", plain=False):
                 if tag in {"p", "div", "br", "li", "pre", "blockquote", "tr", "section", "article"}:
                     self.parts.append(" ")
                 if tag == "a" and len(references) < 20:
-                    href = _link(dict(attrs).get("href") or "", base_url)
+                    href = source_link(dict(attrs).get("href") or "", base_url)
                     ref = {"role": "linked", "url": href}
                     if href and ref not in references:
                         references.append(ref)
@@ -152,7 +152,7 @@ def parse(body: bytes, *, base_url: str = "") -> tuple[FeedEntry, ...]:
         if atom:
             links = [link for link in node.findall(ns + "link") if link.get("rel", "alternate") == "alternate"]
             link = next((link for link in links if link.get("type", "text/html") in {"text/html", "application/xhtml+xml"}), None)
-            permalink = _link(link.get("href", ""), entry_base) if link is not None else ""
+            permalink = source_link(link.get("href", ""), entry_base) if link is not None else ""
             native = _content(node, "id", ns) or permalink
             markup, plain = _atom_content(node.find(ns + "content"))
             field = "content"
@@ -164,7 +164,7 @@ def parse(body: bytes, *, base_url: str = "") -> tuple[FeedEntry, ...]:
             published = timestamp(_content(node, "published", ns), iso=True)
             updated = timestamp(_content(node, "updated", ns), iso=True)
         else:
-            permalink = _link(_content(node, "link"), entry_base)
+            permalink = source_link(_content(node, "link"), entry_base)
             native = _content(node, "guid") or permalink
             markup = _content(node, "{" + CONTENT_NS + "}encoded")
             field = "content:encoded" if markup else "description"

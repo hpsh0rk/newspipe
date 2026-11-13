@@ -1,9 +1,10 @@
 """Prospective collection integration; prepare comparisons before taking the writer lock."""
 from dataclasses import dataclass
+import json
 
 from newspipe import config
 from newspipe.observations import prepare_observation
-from newspipe.source_contract import identity_key
+from newspipe.source_contract import identity_key, item_identity_keys
 from newspipe.story_matching import propose_relation, rank_candidates
 from newspipe.story_state import CaptureSnapshot
 from newspipe.story_state import StoryStorageError
@@ -67,7 +68,9 @@ def prepare_capture(context, store, scfg, items, *, at):
     snapshot = store.observation_capture_snapshot(list(drafts), at=at, window_days=settings.window_days,
                                                 candidate_limit=settings.candidate_limit, scan_limit=settings.scan_limit)
     missing = {identity_key(d.native_id) for d in drafts if d.identity_hash not in snapshot.latest_by_identity}
-    baselines = store.original_observation_baselines(scfg.name, missing)
+    aliases = {identity_key(d.native_id): item_identity_keys(json.loads(d.original_json)) - {identity_key(d.native_id)}
+               for d in drafts if identity_key(d.native_id) in missing}
+    baselines = store.original_observation_baselines(scfg.name, missing, aliases=aliases)
     proposals = []
     latest = dict(snapshot.latest_by_identity)
     for draft in drafts:

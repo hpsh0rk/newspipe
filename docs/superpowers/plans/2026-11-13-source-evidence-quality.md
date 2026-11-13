@@ -55,6 +55,7 @@
 ### Task 2: Evidence-Producing Built-In Adapters And Safe Legacy Identity Recognition
 
 **Files:**
+- Create: `src/newspipe/adapters/_common.py`
 - Modify: `src/newspipe/adapters/rsshub.py`, `src/newspipe/adapters/hn.py`, `src/newspipe/adapters/reddit.py`
 - Modify: `src/newspipe/source_contract.py`, `src/newspipe/source_registry.py`, `src/newspipe/dedup.py`, `src/newspipe/pipeline.py`, `src/newspipe/state.py`, `src/newspipe/story_capture.py`
 - Test: `tests/test_source_evidence.py`, `tests/test_source_identity_upgrade.py`, existing RSS runtime/settings/probe tests
