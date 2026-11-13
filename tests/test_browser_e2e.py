@@ -441,6 +441,32 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 self.expect(form.locator('[data-chat-select]')).to_contain_text("周末读书")
                 self.assertEqual(fixture.group_calls, ["", "offline-next"])
 
+    def test_reduced_motion_disables_cross_document_transition_for_no_js_actions(self):
+        for engine in self.browsers:
+            with self.subTest(engine=engine), self.scenario(engine, javascript=False) as (fixture, page):
+                page.goto(fixture.url + "/notifications?global=1")
+                navigation = page.evaluate("""() => {
+                  let navigation = null;
+                  const visit = rules => {
+                    for (const rule of rules) {
+                      if (rule.cssText.startsWith('@view-transition')) {
+                        navigation = rule.navigation || rule.cssText.match(/navigation:\\s*(auto|none)/)?.[1];
+                      } else if (rule instanceof CSSMediaRule && matchMedia(rule.conditionText).matches) {
+                        visit(rule.cssRules);
+                      }
+                    }
+                  };
+                  for (const sheet of document.styleSheets) visit(sheet.cssRules);
+                  return navigation;
+                }""")
+                self.assertEqual(navigation, "none", "Reduced motion must disable native cross-document snapshots")
+                form = page.locator('form[action="/api/actions/global-save"]')
+                for button, expected in (("加载 / 刷新群列表", "我的阅读群"), ("加载更多群", "周末读书")):
+                    with page.expect_navigation():
+                        form.get_by_role("button", name=button, exact=True).click()
+                    self.expect(form.locator('[data-chat-select]')).to_contain_text(expected)
+                self.assertEqual(fixture.group_calls, ["", "offline-next"])
+
     def test_chat_picker_opens_from_global_settings_link(self):
         for engine in self.browsers:
             with self.subTest(engine=engine), self.scenario(engine) as (fixture, page):

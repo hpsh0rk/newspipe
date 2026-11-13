@@ -47,4 +47,10 @@ One fresh whole-branch read-only review found two Important issues: multiline dr
 
 Final fix-pass verification: **94 focused tests passed**, including the new real-HTTP/Store/acquisition regressions and Chromium/WebKit scenarios. The mandatory full JavaScript/browser gate passed **1003 tests, zero skips, 281.152 seconds**. Final secret scan: **223 files, zero findings**; whitespace check: clean. Post-fix offline doctor/screenshots repeated the four-source, **187/200-element** card budget with no escaped browser requests or provider effects. Both implementation tasks and the review fixes are committed separately; the stage commits include `5bc3230` and `733f1b9`.
 
-Development stays on `feat/google-news-source`, based on `main` at `fdf73c4`, unmerged and unpushed until separately instructed.
+## Main Integration
+
+Developed on `feat/google-news-source`, based on `main` at `fdf73c4`. The user subsequently authorized merge and push; the feature was merged into `main` as `964e2a6`. The externally managed feature worktree is preserved.
+
+The first two full runs on merged main each failed the WebKit no-JS group-list flow (1003 tests, one failure per run). Ten isolated repetitions passed, so they were not treated as proof of a fix. Traces showed native navigation snapshots intercepting clicks; browser CSSOM assertions then confirmed that `prefers-reduced-motion` still left cross-document navigation set to `auto` in both engines. The reduced-motion rule now explicitly sets navigation to `none`, with no sleeps, forced clicks, retries or weakened assertions. The new browser assertion observed RED before the fix, then passed together with the original failing test and its preceding pagination scenario.
+
+Final merged-main verification: required JavaScript/browser gates **1004 tests passed, zero skips, 249.244 seconds**. Secret scan: **223 files, zero findings**; `git diff --check`: clean. No production configuration, source activation, provider/model/Feishu call or knowledge write was performed by the integration workflow.

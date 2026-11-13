@@ -276,6 +276,7 @@ footer code{background:transparent; border:0; padding:0}
   transition:border-color var(--dur) var(--ease),box-shadow var(--dur) var(--ease);
 }
 @media (prefers-reduced-motion:reduce){
+  @view-transition{navigation:none}
   html{scroll-behavior:auto}
   *,*::before,*::after{
     animation-duration:.001ms !important; animation-iteration-count:1 !important;
