@@ -237,25 +237,34 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
     class Handler(BaseHTTPRequestHandler):
         server_version = "newspipe"
 
+        def _respond(self, status: int, body: bytes, content_type: str = "", headers=()) -> None:
+            try:
+                self.send_response(status)
+                if content_type:
+                    self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                for name, value in headers:
+                    self.send_header(name, value)
+                self.end_headers()
+                if body:
+                    self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                # Response cancellation cannot undo or repeat a completed CLI action.
+                self.close_connection = True
+
         def _send(self, status: int, payload: dict[str, Any]) -> None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
+            self._respond(status, body, "application/json; charset=utf-8")
 
         def _send_html(self, status: int, page: str) -> None:
             body = page.encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Security-Policy", "script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.end_headers()
-            self.wfile.write(body)
+            self._respond(status, body, "text/html; charset=utf-8", (
+                ("Content-Security-Policy", "script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"),
+                ("X-Content-Type-Options", "nosniff")))
+
+        def _send_redirect(self, location: str) -> None:
+            self._respond(303, b"", headers=(("Location", location),))
 
         def _view(self) -> dict[str, Any]:
             """只读视图契约。这里**不**碰 state 布局——布局知识归 `view.build`。"""
@@ -393,13 +402,7 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
             if route == "/assets/workbench.js":
                 from newspipe.webassets import JAVASCRIPT
                 body = JAVASCRIPT.encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/javascript; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.send_header("Cache-Control", "no-store")
-                self.send_header("X-Content-Type-Options", "nosniff")
-                self.end_headers()
-                self.wfile.write(body)
+                self._respond(200, body, "application/javascript; charset=utf-8", (("X-Content-Type-Options", "nosniff"),))
                 return
             query = parse_qs(urlparse(self.path).query)
             is_batch = route.startswith("/batch/")
@@ -591,10 +594,7 @@ def _make_handler(*, path: str, creds: credentials.FeishuCreds | None, news_dir:
                               "directory": envelope.get("directory"),
                               "preview": data if name == "notification-preview" and envelope.get("ok") else None,
                               "migration": data if name == "notification-migrate" and envelope.get("ok") else None})
-            self.send_response(303)
-            self.send_header("Location", f"{return_to}?draft={key}")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
+            self._send_redirect(f"{return_to}?draft={key}")
 
         def do_POST(self) -> None:                         # noqa: N802
             route = self.path.split("?")[0]
