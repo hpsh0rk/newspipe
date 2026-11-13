@@ -37,6 +37,8 @@ class FeedEntry:
     author: str
     body_field: str
     references: tuple[dict, ...]
+    publisher_name: str = ""
+    publisher_url: str = ""
 
 
 def timestamp(value: str, *, iso=False) -> float | None:
@@ -139,6 +141,28 @@ def _xhtml_references(node, base):
     return tuple(references)
 
 
+def _publisher(node, ns, base):
+    source = node.find(ns + "source")
+    if source is None:
+        return "", "", False
+    base = urljoin(base, source.get(XML_BASE, ""))
+    if ns:
+        markup, plain = _atom_content(source.find(ns + "title"))
+        links = [link for link in source.findall(ns + "link")
+                 if link.get("rel", "alternate") == "alternate"
+                 and link.get("type", "text/html") in {"text/html", "application/xhtml+xml"}]
+        link = links[0] if links else None
+        url = source_link(link.get("href", ""), urljoin(base, link.get(XML_BASE, ""))) if link is not None else ""
+    else:
+        markup, plain = source.text or "", True
+        url = source_link(source.get("url", ""), base)
+    title, _, clipped, _ = text_evidence(markup, plain=plain)
+    if url and (len(url) > 8192 or urlsplit(url).username is not None or urlsplit(url).password is not None):
+        url = ""
+        clipped = True
+    return title[:500], url, clipped or len(title) > 500
+
+
 def parse(body: bytes, *, base_url: str = "") -> tuple[FeedEntry, ...]:
     if not isinstance(body, bytes) or len(body) > MAX_BODY:
         raise FeedError("too_large")
@@ -200,7 +224,8 @@ def parse(body: bytes, *, base_url: str = "") -> tuple[FeedEntry, ...]:
         if body_node is not None and body_node.get("type") == "xhtml":
             refs = _xhtml_references(body_node, entry_base)
         title = text_evidence(title_markup, plain=title_plain)[0]
+        publisher, publisher_url, publisher_clipped = _publisher(node, ns, entry_base)
         items.append(FeedEntry(native, title[:500], permalink, text, raw,
-                               truncated or len(title) > 500, published, updated,
-                               author[:500], field, refs))
+                               truncated or len(title) > 500 or publisher_clipped, published, updated,
+                               author[:500], field, refs, publisher, publisher_url))
     return tuple(items)

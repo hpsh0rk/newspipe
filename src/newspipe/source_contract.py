@@ -68,6 +68,7 @@ def _diagnostics(value, *, stored=False):
         raise SourceContractError("Acquisition diagnostics must be an allowlisted mapping.")
     checks = {"credential_mode": lambda v: v in {"anonymous", "token"} if isinstance(v, str) else False,
               "window_limited": lambda v: type(v) is bool,
+              "window_kind": lambda v: v in {"page_cap", "search_window", "result_cap"} if isinstance(v, str) else False,
               "rate_remaining": lambda v: type(v) is int and 0 <= v <= 2**31 - 1,
               "rate_limit": lambda v: type(v) is int and 0 <= v <= 2**31 - 1,
               "rate_reset_ts": lambda v: _timestamp(v) and v is not None}
